@@ -125,7 +125,15 @@ static void navApproach(const Config& c, uint32_t now) {
     float t = clampf((g_ball.conf - c.acqConf) / (1.0f - c.acqConf), 0.0f, 1.0f);
     speed = c.slowSpeed + t * (c.approachSpeed - c.slowSpeed);
   }
-  if (g_ball.ambiguous || elapsedMs(now, g_ball.lastDetectMs) > irEffectiveHoldMs(c) / 2) speed = speed < c.slowSpeed ? speed : c.slowSpeed;
+  if (c.engine == 2) {
+    // The older the newest evidence, the less the direction can be trusted: fade from the current speed to the slow speed
+    // between 30 % and 60 % of the grace period instead of one step at 50 % (the wheels then already crawl when the loss is declared).
+    float hold = (float)irEffectiveHoldMs(c), age = (float)elapsedMs(now, g_ball.lastDetectMs);
+    float f = clampf((age - 0.3f * hold) / (0.3f * hold), 0.0f, 1.0f);
+    float slow = speed < c.slowSpeed ? speed : c.slowSpeed;
+    speed = speed + f * (slow - speed);
+    if (g_ball.ambiguous) speed = slow;
+  } else if (g_ball.ambiguous || elapsedMs(now, g_ball.lastDetectMs) > irEffectiveHoldMs(c) / 2) speed = speed < c.slowSpeed ? speed : c.slowSpeed;
   if (absf(th) > 120.0f) speed = speed < c.slowSpeed ? speed : c.slowSpeed;   // ball behind: creep
   speed *= scale;
 

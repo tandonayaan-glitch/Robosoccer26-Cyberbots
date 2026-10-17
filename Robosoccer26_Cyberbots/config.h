@@ -46,12 +46,11 @@ struct Config {
   uint8_t irNoisyPerMs;          // more than this many pulses per ms => interference, not a ball
   uint8_t irSettleUs;            // mux settle time before a window opens
   uint8_t irHistMinOn;           // detections in the last 8 windows to switch a channel "active"
-  uint8_t engine;                // 0 = legacy history-fraction estimator, 1 = recency/streak evidence engine
-  uint8_t acqStreak;             // engine 1: consecutive hits that equal one unit of acquisition evidence (summed over receivers)
-  uint8_t acqMinStreak;          // engine 1: acquisition needs at least this many consecutive hits on one receiver (a full ring revisit)
-  uint8_t dirWindows;            // engine 1: most recent windows per receiver that feed the direction estimate
-  uint8_t gateDeg;               // engine 1: evidence must lie within +-gateDeg of the current bearing to refresh the ball
-  uint16_t dirTauMs;             // engine 1: direction smoothing time constant
+  uint8_t engine;                // 0 = legacy history-fraction estimator (fallback), 2 = leaky-evidence engine (default). 1 was removed (see docs/LATENCY_OPTIMIZATION.md)
+  uint8_t acqStreak;             // engine 2: hits (leaky counter) that equal one unit of acquisition evidence, summed over neighbouring receivers
+  uint8_t dirWindows;            // engine 2: freshness span of a hit for the direction estimate, in ring cycles
+  uint8_t gateDeg;               // engine 2: evidence must lie within +-gateDeg of the current bearing to refresh the ball
+  uint16_t dirTauMs;             // engine 2: direction smoothing time constant
   uint16_t acqSpan1Ms;           // engine 2: evidence on ONE receiver must have lasted this long before the ball is acquired
   uint16_t acqSpan2Ms;           // engine 2: ... for two or more neighbouring receivers (after one full ring look-around)
   uint16_t epIdleMs;             // engine 2: evidence is forgotten after this long without a hit
@@ -71,7 +70,7 @@ struct Config {
   // ---- navigation ----
   float acqConf;
   uint16_t lostHoldMs;           // grace without track-consistent evidence before the ball is declared lost (strong signal)
-  uint16_t lostHoldMaxMs;        // engines 1/2: upper bound of the grace period (weak / intermittent signals)
+  uint16_t lostHoldMaxMs;        // engine 2: upper bound of the grace period (weak / intermittent signals)
   uint16_t flickerHoldMs;        // engine 2: grace period for a signal that was already flickering (>= 25 % of visits missed)
   float centerDeg;
   float approachSpeed;           // 0..1 of maxAuto
@@ -143,7 +142,6 @@ static const ParamDef PARAMS[] = {
   PD("losseps", PT_U8, lossEpsExp, 1, 9),
   PD("reacq", PT_U16, reacqMs, 0, 3000),
   PD("acqstreak", PT_U8, acqStreak, 1, 6),
-  PD("acqminstreak", PT_U8, acqMinStreak, 1, 4),
   PD("dirwindows", PT_U8, dirWindows, 1, 8),
   PD("gatedeg", PT_U8, gateDeg, 30, 180),
   PD("dirtau", PT_U16, dirTauMs, 5, 500),
@@ -252,7 +250,6 @@ static void cfgDefaults(Config& c) {
   c.lossEpsExp = 4;
   c.reacqMs = 300;
   c.acqStreak = 4;
-  c.acqMinStreak = 2;
   c.dirWindows = 3;
   c.gateDeg = 100;
   c.dirTauMs = 40;
@@ -350,6 +347,7 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   if (c.slowSpeed > c.attackSpeed) { c.slowSpeed = d.slowSpeed; c.attackSpeed = d.attackSpeed; bad++; repNote(rep, repN, "slow/attack"); }
   bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
   if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
+  if (c.engine == 1) { c.engine = d.engine; bad++; repNote(rep, repN, "engine(1 removed)"); }
   if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }
   if (c.flickerHoldMs < c.lostHoldMs || c.flickerHoldMs > c.lostHoldMaxMs) { c.flickerHoldMs = c.lostHoldMs; bad++; repNote(rep, repN, "flickerhold"); }
   if (c.irStuckFailMs <= c.irStuckMs) { c.irStuckMs = d.irStuckMs; c.irStuckFailMs = d.irStuckFailMs; bad++; repNote(rep, repN, "irstuck"); }

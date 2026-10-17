@@ -90,7 +90,7 @@ static void benchPrepare() {
   send("s"); bwClear(); benchRandomisePhases();
   benchRun(900);
   for (int guard = 0; guard < 20 && (g_ball.valid || !allWheelsStopped()); guard++) benchRun(100);
-  for (int i = 0; i < 16; i++) { g_ir[i].hist = 0; g_ir[i].active = 0; g_ir[i].streak = 0; }
+  for (int i = 0; i < 16; i++) { g_ir[i].hist = 0; g_ir[i].active = 0; }
 }
 static void benchEnableAuto() { send("a"); benchRun(30); }
 static void benchWaitUs(uint64_t us) { uint64_t tp = g_mockUs + us; while (g_mockUs < tp) benchStep(); }
@@ -549,7 +549,7 @@ static int benchApplyArgs(int argc, char** argv, std::string* suite) {
   return 0;
 }
 
-static void benchEstimateOnce() { if (g_cfg.engine == 2) irEstimate2(g_cfg, micros(), millis(), 3, false, 0); else irEstimateFast(g_cfg, micros(), millis()); }
+static void benchEstimateOnce() { irEstimate2(g_cfg, micros(), millis(), 3, false, 0); }
 
 static void benchStartup() {
   // setup() ends with irRestartSchedule(): statistics cover only the cycles after that point
@@ -578,8 +578,8 @@ static int benchMain(int argc, char** argv) {
   printf("CONFIG: seed=%u n=%d suite=%s |", g_benchSeed, g_benchN, suite.c_str());
   for (int i = 2; i < argc; i++) printf(" %s", argv[i]);
   printf("\n");
-  printf("ENGINE=%d window=%u us settle=%u us hold=%u..%u ms acqstreak=%u acqminstreak=%u\n", (int)g_cfg.engine, (unsigned)g_cfg.irWindowUs, (unsigned)g_cfg.irSettleUs,
-         (unsigned)g_cfg.lostHoldMs, (unsigned)g_cfg.lostHoldMaxMs, (unsigned)g_cfg.acqStreak, (unsigned)g_cfg.acqMinStreak);
+  printf("ENGINE=%d window=%u us settle=%u us hold=%u..%u ms (flicker %u) acqstreak=%u acqspan=%u/%u focus=%u reacq=%u\n", (int)g_cfg.engine, (unsigned)g_cfg.irWindowUs, (unsigned)g_cfg.irSettleUs,
+         (unsigned)g_cfg.lostHoldMs, (unsigned)g_cfg.lostHoldMaxMs, (unsigned)g_cfg.flickerHoldMs, (unsigned)g_cfg.acqStreak, (unsigned)g_cfg.acqSpan1Ms, (unsigned)g_cfg.acqSpan2Ms, (unsigned)g_cfg.focusOn, (unsigned)g_cfg.reacqMs);
   benchScanMetrics();
   uint32_t span = 2 * g_scan.cycleUs;
   const int N = g_benchN;
@@ -693,6 +693,39 @@ static int benchMain(int argc, char** argv) {
       for (uint32_t d : {40u, 100u, 250u}) for (int k = 0; k < 24; k++) { InterfTrack r = benchInterfTrack(where, d, (uint32_t)((uint64_t)span * k / 24), pm, oneRx); lost += r.lost; ret += r.retarget; if (r.maxErr > maxe) maxe = r.maxErr; }
       printf("  weak ball miss %.0f%% %s, interference %d: false losses %d/72 retargets %d maxerr %.0f\n", pm * 100, oneRx ? "1rx" : "2rx", where, lost, ret, maxe);
     }
+  }
+  if (want("speed")) {
+    benchReseed(15);
+    printf("APPROACH SPEED while tracking (mean commanded translation PWM over 6 s after 2 s of settling; fraction of the clean-signal value):\n");
+    double base = 0;
+    for (double pm : {0.0, 0.1, 0.3, 0.5, 0.7}) for (int nrx = 1; nrx <= 2; nrx++) {
+      benchPrepare(); benchEnableAuto();
+      if (nrx == 1) bwBall(90, 10, pm); else bwBall(75, 20, pm);
+      benchRun(2000);
+      double sum = 0; uint64_t n = 0, end = g_mockUs + 6000000ULL;
+      while (g_mockUs < end) { benchStep(); sum += benchTranslation(); n++; }
+      double mean = sum / (double)n; if (pm == 0.0 && nrx == 1) base = mean;
+      printf("  misses %2.0f%%, %d rx: mean translation %6.1f PWM = %.2f of clean 1-rx\n", pm * 100, nrx, mean, base > 0 ? mean / base : 0.0);
+      bwClear();
+    }
+  }
+  if (want("period")) {
+    benchReseed(16);
+    printf("BALL MODULATION PERIOD sweep (42 %% duty; the real ball's modulation is UNVERIFIED): a longer period gives fewer pulses per 3 ms window, i.e. a naturally flickering signal\n");
+    int savedPeriod = g_simPeriodUs, savedActive = g_simActiveUs;
+    for (int per : {600, 833, 1000, 1250, 1500, 2000, 2500, 3000}) {
+      g_simPeriodUs = per; g_simActiveUs = per * 42 / 100;
+      int acq = 0; Dist ad, ld;
+      for (int k = 0; k < 48; k++) {
+        AcqResult r = benchAcq(2, (uint32_t)((uint64_t)span * k / 48), 90.0f);
+        if (r.acquired >= 0) { acq++; ad.add(r.acquired); }
+      }
+      for (int k = 0; k < 24; k++) { LossResult r = benchLoss(2, (uint32_t)((uint64_t)span * k / 24), 90.0f); if (r.evidenceAge != -2 && r.declared >= 0) ld.add(r.declared); }
+      MissResult m1 = benchMiss(1, 0.0, 60), m2 = benchMiss(2, 0.0, 60);
+      printf("  period %4d us: 2-rx acquired %2d/48 median %5.0f p95 %5.0f ms | steady loss median %5.0f p95 %5.0f ms (n=%zu) | false losses/min 1rx %.1f 2rx %.1f\n", per, acq,
+             ad.v.empty() ? -1.0 : ad.pct(0.5), ad.v.empty() ? -1.0 : ad.pct(0.95), ld.v.empty() ? -1.0 : ld.pct(0.5), ld.v.empty() ? -1.0 : ld.pct(0.95), ld.v.size(), m1.losses / 1.0, m2.losses / 1.0);
+    }
+    g_simPeriodUs = savedPeriod; g_simActiveUs = savedActive;
   }
   if (want("dbg2")) {
     benchReseed(99); benchPrepare(); benchEnableAuto(); bwBall(120, 10, 0.5); 
@@ -810,7 +843,7 @@ static int benchMain(int argc, char** argv) {
     bwBall(75, 20); benchRun(500);
     const int REP = 400000;
     auto te0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < REP; i++) { if (g_cfg.engine) benchEstimateOnce(); else irEstimate(g_cfg, millis()); }
+    for (int i = 0; i < REP; i++) { if (g_cfg.engine == 2) benchEstimateOnce(); else irEstimate(g_cfg, millis()); }
     auto te1 = std::chrono::steady_clock::now();
     printf("HOST CPU estimator only: %.0f ns per call (engine %d), called once per 3 ms window (engine 0: once per 36 ms cycle)\n", std::chrono::duration<double, std::nano>(te1 - te0).count() / REP, (int)g_cfg.engine);
     bwClear();

@@ -2011,11 +2011,8 @@ static void t_legacy_fallback() {
   while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
   double lost = (double)(g_mockUs - t0) / 1000.0;
   CHECK(lost > 480 && lost < 620);
-  g_cfg.engine = 1; g_cfg.lostHoldMs = 120; g_cfg.lostHoldMaxMs = 300; irRestartSchedule(); benchRun(500);
-  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(1500);
-  t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
-  CHECK((double)(g_mockUs - t0) / 1000.0 < 330);
+  send(":set engine 1\n"); simRun(20);                       // the removed intermediate estimator cannot be selected
+  CHECK(g_cfg.engine == 0);
 }
 
 static void t_e2_config_params() {
@@ -2026,6 +2023,7 @@ static void t_e2_config_params() {
   send(":set focus 0\n"); simRun(20); CHECK(g_cfg.focusOn == 0);
   send(":set losseps 20\n"); simRun(20); CHECK(g_cfg.lossEpsExp != 20);        // out of range: rejected
   send(":set engine 3\n"); simRun(20); CHECK(g_cfg.engine == 2);
+  send(":set engine 1\n"); simRun(20); CHECK(g_cfg.engine == 2);
   // cross-field rule: flickerhold must lie between losthold and losthold_max
   g_cfg.flickerHoldMs = 600; char rep[96]; int bad = cfgValidate(g_cfg, rep, sizeof(rep));
   CHECK(bad >= 1 && g_cfg.flickerHoldMs <= g_cfg.lostHoldMaxMs && g_cfg.flickerHoldMs >= g_cfg.lostHoldMs);
