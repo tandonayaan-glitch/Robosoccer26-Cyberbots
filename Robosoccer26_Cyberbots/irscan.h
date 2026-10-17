@@ -647,12 +647,13 @@ static void irEstimate2(const Config& c, uint32_t nowUs, uint32_t nowMs, uint8_t
   }
   const float rAll = aW > 0 ? clampf(sqrtf(ax * ax + ay * ay) / aW, 0.0f, 1.0f) : 0.0f;
   const bool ambiguous = rAll < 0.5f;
-  // Acceptance must also see receivers whose evidence is no longer FRESH but whose episode is still open: after a
-  // broadband burst the receivers that were hit first age out first, and the last ones visited would otherwise look like a
-  // large local source. Open episodes (S > 0, any age up to epIdleMs) are therefore weighed regardless of recency.
+  // Acceptance must also see receivers whose evidence is no longer FRESH: after a broadband burst the receivers that were
+  // hit first age out first, and the last ones visited would otherwise look like a large local source. Receivers that were
+  // hit within one ring cycle beyond the freshness span are therefore weighed too (a burst reaches every receiver within one
+  // ring cycle; a ball that has moved away must not veto a new cluster for longer than that).
   float ex = 0, ey = 0, eW = 0;
   for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++) {
-    if (!irTrusted(c, ch) || g_ir[ch].S <= 0.0f) continue;
+    if (!irTrusted(c, ch) || g_ir[ch].S <= 0.0f || (uint32_t)(nowUs - g_ir[ch].lastHitUs) > dirSpanUs + ringUs) continue;
     float e = g_ir[ch].S >= (float)c.acqStreak ? 1.0f : g_ir[ch].S / (float)c.acqStreak, sn, cs;
     irChTrig(c, ch, &sn, &cs);
     ex += e * sn; ey += e * cs; eW += e;
@@ -761,8 +762,9 @@ static void irBallTimeout(const Config& c, uint32_t nowMs) {
     g_ball.lostEvent = true;
     g_ball.conf = 0;
     g_ball.acqCount = 0;
-    if (c.engine == 2)                                   // the old evidence must not pre-load the next acquisition
-      for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++) g_ir[ch].S = 0.0f;
+    if (c.engine == 2)                                   // the old track's evidence must not pre-load the next acquisition;
+      for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++)      // evidence elsewhere (a new ball already being confirmed) is kept
+        if (absf(angDiffDeg(c.ch[ch].bearingDeg, g_ball.lostBearingDeg)) <= (float)c.gateDeg) g_ir[ch].S = 0.0f;
   }
 }
 

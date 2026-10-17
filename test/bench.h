@@ -175,12 +175,15 @@ static DirResult benchDir(float from, float to, uint32_t phaseUs, double missP =
       if (arc >= 0) dev = d < 0 ? -d : (d > arc ? d - arc : 0); else dev = d > 0 ? d : (d < arc ? arc - d : 0);
       if (dev > r.excursion) r.excursion = dev;
     }
+    if (getenv("DIRTRACE") && from == 90 && to == 270 && phaseUs == (uint32_t)atoi(getenv("DIRTRACE")) && (uint64_t)(g_mockUs - t0) % 6000 < 50 && msSince(t0) < 330)
+      printf("  t=%3.0f valid=%d brg=%6.1f | ch3 S=%.1f age=%4.0f | ch9 S=%.1f age=%4.0f hits ha=%.1f\n", msSince(t0), g_ball.valid, g_ball.bearingDeg, g_ir[3].S, (double)(uint32_t)(micros() - g_ir[3].lastHitUs) / 1e3, g_ir[9].S, (double)(uint32_t)(micros() - g_ir[9].lastHitUs) / 1e3, g_ir[9].ha);
     if (r.cmd < 0 && g_navState == NAV_APPROACH && (g_reqVx != 0 || g_reqVy != 0)) {
       float ang = atan2f(g_reqVx, g_reqVy) * RAD2DEG;
       if (fabsf(angDiffDeg(ang, to)) < 25) r.cmd = msSince(t0);
     }
     if (r.est >= 0 && r.cmd >= 0) break;
   }
+  if (getenv("DIRLIST") && from == 90 && to == 270) printf("DIRLIST phase=%u est=%.1f\n", (unsigned)phaseUs, r.est);
   return r;
 }
 

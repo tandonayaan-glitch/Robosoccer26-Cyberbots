@@ -2048,6 +2048,67 @@ static void t_scan_revisit_metrics() {
   CHECK(g_scan.winOverrunMaxUs > 80000u);
 }
 
+
+static void t_startup_schedule() {
+  // Right after setup() the first scan cycles must be regular (boot-time blocking work must not leak into the schedule),
+  // nothing may move, and a ball that is already there is found within the normal acquisition time.
+  setup(); calibrateAll();
+  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
+  bwClear();
+  benchRun(800);                                               // idle ring only
+  CHECK(g_scan.cycleCount >= 15);
+  CHECK(g_scan.cycleMaxUs < 12u * (g_cfg.irWindowUs + g_cfg.irSettleUs) + 1000u);
+  CHECK(g_scan.cycleMinUs > 12u * (g_cfg.irWindowUs + g_cfg.irSettleUs) - 1000u);
+  CHECK(g_scan.winOverrunMaxUs < 1500);
+  bwBall(75, 20);                                              // now a ball appears
+  uint64_t t0 = g_mockUs; double acq = -1;
+  while (g_mockUs - t0 < 600000ULL) { benchStep(); if (acq < 0 && g_ball.valid) acq = msSince(t0); trackWheelMotion(); }
+  CHECK(acq > 0 && acq < 100);
+  CHECK(!anyWheelEverMoved);                                   // autonomy is off: sensing alone moves nothing
+  bwClear();
+}
+
+static void t_e2_view_transitions() {
+  // A ball that moves between "seen by one receiver" and "seen by two" (and back) must not be dropped.
+  for (double miss : {0.0, 0.3}) {
+    e2Boot(); g_cfg.engine = 2;
+    CHECK(e2Acquire(90, 10, miss, 3000)); benchRun(500);
+    int loss0 = (int)g_stats.ballLossEvents; bool wasValid = g_ball.valid; int losses = 0;
+    static const float POS[6] = {90, 80, 75, 70, 60, 75};
+    uint64_t end = g_mockUs + 40000000ULL; int idx = 0; uint64_t nextMove = g_mockUs;
+    while (g_mockUs < end) {
+      if (g_mockUs >= nextMove) { nextMove += 700000ULL; float p = POS[idx++ % 6]; bwBall(p, p == 90 || p == 60 ? 10.0f : 20.0f, miss); }
+      benchStep();
+      if (wasValid && !g_ball.valid) losses++;
+      wasValid = g_ball.valid;
+    }
+    (void)loss0;
+    CHECK(losses == 0);
+    bwClear();
+  }
+}
+
+static void t_e2_stale_not_followed() {
+  // Once the evidence stops, the direction must not move and the navigation speed must already be reduced before the
+  // ball is declared lost.
+  e2Boot();
+  startAuto();
+  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(2500);
+  CHECK(g_navState == NAV_APPROACH);
+  double steadySpeed = sqrt((double)g_reqVx * g_reqVx + (double)g_reqVy * g_reqVy);
+  float bearing = g_ball.bearingDeg;
+  bwClear();
+  uint64_t t0 = g_mockUs; bool slowedBeforeLoss = false; float maxDrift = 0;
+  while (g_ball.valid && g_mockUs - t0 < 1000000ULL) {
+    benchStep();
+    maxDrift = fmaxf(maxDrift, fabsf(angDiffDeg(g_ball.bearingDeg, bearing)));
+    if (g_ball.valid && sqrt((double)g_reqVx * g_reqVx + (double)g_reqVy * g_reqVy) < 0.5 * steadySpeed) slowedBeforeLoss = true;
+  }
+  CHECK(maxDrift < 1.0f);
+  CHECK(slowedBeforeLoss);
+  send("s"); simRun(100);
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2063,6 +2124,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed),
 };
 
 int main(int argc, char** argv) {
