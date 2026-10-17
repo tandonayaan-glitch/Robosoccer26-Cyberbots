@@ -1290,6 +1290,16 @@ static void t_ch_inspect() {
   CHECK(!outHas(" C12 ") && !outHas(" C15 "));
 }
 
+static void t_ir_slow_interferer() {
+  bootCal();
+  simRun(500);
+  g_simMode[4] = SIM_BALL; g_simChPeriod[4] = 10000;           // 100 Hz envelope (mains-lamp-like), 4.2 ms active
+  simRun(4000);
+  CHECK(g_ir[4].windows > 20);
+  CHECK(g_ir[4].detCount == 0 && !g_ir[4].active);              // at most one pulse fits in a 3 ms window
+  CHECK(!g_ball.anyDetect && !faultActive(F_IR_CHANNEL));
+}
+
 static void t_cfg_set() {
   bootCal();
   simRun(200);
@@ -1645,7 +1655,7 @@ static const TestCase TESTS[] = {
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
   T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),

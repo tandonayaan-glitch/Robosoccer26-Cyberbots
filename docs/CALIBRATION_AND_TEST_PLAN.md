@@ -1,5 +1,7 @@
 # Calibration guide, first power-on, and physical test plan
 
+See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_DETECTION_AUDIT.md` §8 (distance/angle matrix at 10/20/40/60 cm).
+
 Everything here is a **procedure for you to run**. No step has been performed on the robot;
 every result below is **NOT TESTED**.
 
@@ -55,7 +57,7 @@ Bearings: 0° = robot forward, increasing **clockwise** (right = 90°, rear = 18
 5. Decide per evidence: persistent blind spot → change sensor angles, add side receivers (enable up
    to four on C12–C15 with `:ch 12 en 1`, calibrate and verify them), relocate the rings, or change
    the acquisition circuit (`HARDWARE_REVIEW.md` §4). Do not claim full coverage until the table shows it.
-6. Tune `irwindow`, `irminedges`, `irnoisy` using the `edges` and `per_us` columns of `i` (the measured
+6. Tune `irwindow`, `irminedges`, `irnoisy`, and optionally the pulse-period gate (`:irgate auto` after a `:verify`/`:learn` with the ball) using the `edges` and `per_us` columns of `i` (the measured
    pulse pattern of *your* ball). `:save`.
 
 ## E. IMU calibration

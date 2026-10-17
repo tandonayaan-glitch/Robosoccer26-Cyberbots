@@ -56,6 +56,8 @@ symptom (stuck, interference) or after **two** failed controlled tests; a single
 
 ## 4. Direction estimate and confidence (heuristic)
 
+Per-channel inspection: `i` (all enabled channels), `:ch <n>` (one channel: status, last window state/edges/period, hits, detections, off-band rejects, verified flags). Pulse-period gate: `:irgate` (see `IR_DETECTION_AUDIT.md`). Saved configurations are version 4.
+
 Each trusted channel contributes a vector at its calibrated bearing, weighted by its hits in the last
 8 windows (0..1). The vectors are summed (circular maths, 359° and 1° are neighbours), smoothed as a
 vector, and converted to a bearing. 

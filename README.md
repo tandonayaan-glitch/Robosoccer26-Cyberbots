@@ -5,11 +5,20 @@ IR receivers read through a CD74HC4067 multiplexer, an MPU6050 for relative head
 logging with a RAM flight recorder, and a Hardware Health Monitor that degrades or stops instead of
 guessing.
 
-> **Status: software-verified only.** Everything below was verified against a host-side simulation
-> (mock Arduino-ESP32 core, simulated ball/IMU/filesystem). **No test was run on the physical
-> robot and the sketch has not been compiled with the real Xtensa toolchain** (it could not be
-> downloaded in the build sandbox). See `docs/VERIFICATION_REPORT.md` for exactly what was and was
-> not tested.
+> **Status – read this first.** Verified so far, by evidence class (details in `docs/VERIFICATION_REPORT.md`):
+>
+> | Verified by | Result |
+> |---|---|
+> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 20–21 % RAM |
+> | Real binary in a third-party emulator | boots to the health report with autonomy disabled; no motor line rises (boot-level only) |
+> | **Host simulation** (simulated ball/IMU/filesystem) | 67 test cases × 2 API shapes = 134 runs, 4,814 checks, all pass, ASan/UBSan clean |
+> | Static analysis (cppcheck, clang-tidy, Valgrind) | no defects found |
+> | Requires electrical inspection | **not done** (receiver pinout/supply, pull-downs, reset-state voltages, IMU board) |
+> | Requires testing with the real ball | **not done** (38 kHz receiver vs 40 kHz ball, range, coverage, side gap, interference) |
+> | Requires supervised physical robot tests | **not done** (motor directions, ramps, heading, autonomy) |
+> | Not yet verified | datasheet/rules facts (source documents were unreachable) – `docs/IR_DETECTION_AUDIT.md` §1 |
+>
+> **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md`.
 
 ## Repository layout
 
@@ -21,15 +30,17 @@ guessing.
 | `docs/HARDWARE_REVIEW.md` | Compatibility review, pin map, boot/strapping analysis, IR timing analysis, limitations |
 | `docs/HEALTH_AND_LOGGING.md` | Health monitor, fault codes, CSV schema, rotation, flight recorder, export |
 | `docs/CALIBRATION_AND_TEST_PLAN.md` | Calibration guide, first-power-on procedure, physical test plan |
-| `docs/VERIFICATION_REPORT.md` | What was tested, problems found and fixed, what remains untested |
+| `docs/IR_DETECTION_AUDIT.md` | Highest-priority risk: ball/receiver compatibility, timing, interference, geometry, physical test procedure |
+| `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
+| `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
+| `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |
 
 ## Environment and installation (Arduino IDE)
 
 * Arduino IDE 2.x (any recent version).
 * Board package: **"esp32 by Espressif Systems"**. The code supports both generations of the core
   (LEDC and watchdog APIs are selected at compile time with `ESP_ARDUINO_VERSION_MAJOR`):
-  **2.0.17** and **3.0.7** are the API shapes the host harness checks (signatures taken from the real
-  core headers of those releases). Newer 3.x releases should work but are untested.
+  **2.0.17** and **3.0.7** have both been compiled with the real toolchains (zero warnings). Newer releases are untested.
 * Board: **ESP32 Dev Module** (ESP-32S, 38 pins). Upload speed 921600 or lower.
 * **Partition scheme must contain a data partition labelled `spiffs`**, e.g. *Default 4MB with spiffs
   (1.2MB APP/1.5MB SPIFFS)*. LittleFS uses that label. Without it the robot still runs; logging is
@@ -73,8 +84,8 @@ of the format, not a hardware measurement.**
 | `?` | command list |
 
 Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`,
-`:roller <X|O>`, `:ch <n> <en|pol|trust|bear|tilt> <v>`, `:chreset <n>`, `:learn <deg>`, `:verify <n>`,
-`:cov`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
+`:roller <X|O>`, `:ch <n> [<en|pol|trust|bear|tilt> <v>]` (no field = inspect that channel), `:chreset <n>`, `:learn <deg>`, `:verify <n>`,
+`:cov`, `:irgate <off|auto|min max>`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
 `:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
 
 Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited
@@ -97,5 +108,7 @@ tests require `:mtest`/`:dtest` **and** `:confirm`.
 ## Running the host tests
 
 ```
-./test/run_tests.sh      # builds with the mock core v3 and v2 (-Wall -Wextra -Wshadow, ASan+UBSan) and runs every case
+./test/run_tests.sh        # host simulation: mock core v3 and v2, -Wall -Wextra -Wshadow, ASan+UBSan, every case in its own process
+./test/static_analysis.sh  # cppcheck, clang-tidy, Valgrind
+tools/real_build.sh both   # REAL Arduino-ESP32 2.0.17 + 3.0.7 compile (see the header of the script for toolchain setup)
 ```

@@ -7,6 +7,43 @@ Legend: **[V]** verified from a primary source or by the host tests in this repo
 > rules PDF) **all failed in the build sandbox (DNS blocked)**. Anything about those documents below is
 > marked [2nd] or [?]. Please read the datasheet and the current rules yourself before relying on them.
 
+
+## 0. Audit update (post-implementation) – evidence from the real toolchain
+
+Evidence classes: **[REAL-BUILD]** checked by compiling with the real Arduino-ESP32 2.0.17 / 3.0.7 · **[REAL-HEADER]** read from the SoC/core headers shipped with those cores · **[EMU]** real binary in a third-party emulator · **[2nd]** second-hand · **[?]** unverified · **[PHYS]** needs measurement on the robot.
+
+| Item | Result |
+|---|---|
+| Board target | FQBN `esp32:esp32:esp32` (ESP32 Dev Module) for the ESP-32S 38-pin board. The exact module (WROOM vs WROVER/PSRAM, flash size) of your "ESP-32S V1.1" is **[?]**; check the can label. |
+| Partition table | Core file `default.csv`: `spiffs, data, spiffs, 0x290000, 0x160000` (≈1.4 MB) **[REAL-HEADER]** – the `spiffs` label LittleFS needs exists in *Default 4MB with spiffs*. |
+| GPIO34 input-only | `SOC_GPIO_VALID_OUTPUT_GPIO_MASK` excludes GPIO34–39 **[REAL-HEADER]**; a `static_assert` in `pins.h` fails the real build if SIG is not input-only. |
+| All 18 output-type pins valid and distinct | `static_assert` against the real SoC masks, plus "no pin in 6..11, 0, 12", plus a popcount check for duplicate assignment **[REAL-BUILD, both cores]**. Negative tests (a motor pin set to GPIO35; a duplicated pin) were run and **did** fail the real build. |
+| No ADC / Wi-Fi use | The firmware uses no `analogRead`, Wi-Fi or Bluetooth, so the ADC2-vs-Wi-Fi restriction on GPIO 2,4,13,14,15,25,26,27 does not apply. GPIO34 is read digitally. |
+| I²C | `Wire.begin(16,17,400000)` + `setTimeOut(20)`; signatures match both cores **[REAL-BUILD]**. |
+| Strapping pins (corrected) | The real `gpio_struct.h` describes the strapping register as `{GPIO0, U0TXD, GPIO2, GPIO4, MTDO(GPIO15), GPIO5}` plus MTDI (GPIO12) and the SD pins **[REAL-HEADER]**. **GPIO4 (mux S0) is therefore also in the register**; the earlier review omitted it. Its documented boot effect is **[?]**; S0 is a high-Z select input and is not expected to matter. |
+| ISR safety | `irIsr()` is placed in IRAM and now calls only `esp_timer_get_time` (IRAM) – before, it called flash-resident `digitalRead()/micros()`; found with `nm` on the real ELF and fixed. Default Arduino builds have `CONFIG_ARDUINO_ISR_IRAM` unset **[REAL-HEADER]**, i.e. GPIO interrupts are masked during flash writes. |
+| Resources (final) | 2.0.17: 412,477 B flash (31 %), 69,340 B RAM (21 %). 3.0.7: 434,001 B (33 %), 68,184 B (20 %). Loop task stack 8192 B (`CONFIG_ARDUINO_LOOP_STACK_SIZE`); largest sketch frames from `-fstack-usage` on 3.0.7: `cliExecLine` 1536 B (before moving big temporaries to static storage), `logPump` 1104 B. `h` now prints the **runtime** stack high-water marks, to be read on hardware **[PHYS]**. |
+| Task watchdog | The core's default TWDT is 5 s with the CPU0 idle task checked **[REAL-HEADER]**. The firmware sets 3 s. |
+
+### Boot/reset motor-safety analysis (what is and is not established)
+
+* **Firmware side [HOST][EMU][REAL-BUILD]**: `motorsPinsSafe()` is the first statement of `setup()` and drives all 12 lines LOW; PWM attaches at duty 0; no wheel is driven until `f/b/l/r/q/e/:confirm/a`; every reset starts with autonomy off. Real binaries (both cores) were run in an emulator: **no motor line ever produced a rising edge, LEDC duty stayed 0**, the report printed, autonomy stayed disabled. The emulator does **not** model reset-time pull-ups (GPIO5 reports no pull), so it cannot say anything about the window *before* `setup()`.
+* **Window before `setup()` [?][PHYS]**: from reset until `motorsPinsSafe()` (ROM + bootloader + core init, a few hundred ms) the ESP32 does not drive these pins. Commonly cited reset states: GPIO5 internal pull-up (HIGH), GPIO2/GPIO4 pull-down, others floating inputs; GPIO5/GPIO14 are reported to show PWM/activity during boot **[2nd, not reproduced]**. The real consequence depends entirely on **your L298N board's input conditioning** (some boards have pull-downs or pull-ups on IN/EN, some none), which has not been inspected.
+* **Which line matters**: with the L298N, EN low disables the outputs whatever IN1/IN2 are **[2nd]**. So the protective element is a **pull-down on each EN line (ENA/ENB: GPIO23, 33, 5, 32)**; pull-downs on the IN lines are secondary protection.
+* **A pull-down does not automatically help**: GPIO5's internal pull-up (≈45 kΩ **[2nd]**) forms a divider with the external resistor. 10 kΩ gives ≈0.6 V at 3.3 V, 4.7 kΩ ≈0.3 V, but 100 kΩ would sit at ≈1.0 V, an ambiguous level. The L298N EN-low threshold is about 1.5 V and the ESP32 input-low threshold about 0.8 V **[2nd]**, so ≤ 10 kΩ (4.7 kΩ preferred) is needed. Each pull-down also loads an output: 3.3 V/4.7 kΩ ≈ 0.7 mA – acceptable. No pull-down on GPIO2/15 is wanted (strapping, mux inputs).
+* **Hung CPU / watchdog**: if the loop hangs, LEDC keeps its last duty and the direction pins keep their level until the 3 s watchdog fires; then the pins return to inputs. The worst-case unintended motion is ≈ 3 s + reboot time **plus** any floating-pin behaviour. Hardware pull-downs on EN remove the second part; the motor power switch/fuse is the only protection for the first.
+* **Verify before trusting [PHYS]**: with the **motor supply disconnected**, probe every L298N control input (12 lines) with a scope/DMM through repeated resets, brown-outs (lower the logic supply) and a watchdog reset; require ≤ 0.8 V throughout. Only then connect the motor supply, wheels lifted.
+
+### Receiver ↔ multiplexer ↔ ESP32 interface – verification status
+
+| Requirement | Status |
+|---|---|
+| Receiver supply voltage / pinout / output structure | **Not verified** (datasheet unreachable); family values [2nd]. Measure and read the real part marking. |
+| Receiver output swing | Equals its supply rail (internal pull-up to Vs) **[2nd]**. A 5 V-powered receiver must **not** drive the 3.3 V mux or GPIO34; the HC4067 limit is about VCC + 0.5 V and the ESP32 limit about 3.6 V **[2nd]**. Use 3.3 V supply, or a 5 V-tolerant buffer/level shifter per output (a resistive divider against the receiver's ~30 kΩ internal pull-up needs recalculation and is not recommended). |
+| HC4067 at 3.3 V | Powered from 3.3 V per the wiring; its on-resistance rises at low VCC **[2nd]**, harmless into a CMOS input. Common node loading time constants (kΩ × tens of pF) are microseconds, far below the 10 µs settle used – **not measured [PHYS]**. |
+| Common ground | Required, not verifiable by software. |
+| Pull-up on SIG | Recommended 10–100 kΩ to 3.3 V so an open line idles inactive instead of floating. |
+
 ## 1. Pin map (preserved exactly; fixed in `pins.h`, no setting can change it) [V]
 
 ### Motors (two L298N, 5 V logic inputs driven at 3.3 V)
@@ -59,6 +96,7 @@ wheel and both reversal settings, that the right IN pins and the right EN pin ar
 |---|---|---|---|
 | **5** | Back-left **EN (ENB)** | Strapping pin (SDIO slave timing), internal pull-up at reset and commonly reported to emit a PWM signal during boot [2nd]. So the back-left driver enable can be HIGH during reset/boot ROM. | **Real risk.** If IN3/IN4 (GPIO21/22, floating inputs during boot) are not pulled low on the driver board, that motor can twitch at every reset. Mitigation: 4.7 kΩ pull-down on every L298N input including this EN. The strapping value itself is harmless for a normal flash-boot. No pin change needed. |
 | **14** | Back-right **IN4** | Commonly reported to output PWM at boot [2nd]. | Harmless if the matching EN (GPIO32, floating input at boot) is held low by a pull-down. Same mitigation. |
+| **4** | Mux **S0** | Listed in the strapping register description of the real SoC header (see §0); documented boot effect unverified. | High-Z select input, expected harmless; **[?]**. |
 | **2** | Mux **S3** | Strapping pin; must be LOW/floating to enter download mode. Internal pull-down by default. | Mux select input is high-Z CMOS, so no conflict. Do not add a pull-up to this line. |
 | **15** | Mux **S2** | Strapping pin; if LOW at boot, ROM boot messages are silenced. Internal pull-up by default. | Harmless (affects only boot-log output). |
 | 12, 0 | unused | – | Not used (good: GPIO12 selects flash voltage). |
