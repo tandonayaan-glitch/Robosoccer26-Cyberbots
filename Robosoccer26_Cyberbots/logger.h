@@ -41,7 +41,7 @@ static inline uint16_t logqFree() { return (uint16_t)(LOGQ_SIZE - 1 - logqUsed()
 
 static void logPutLine(const char* line) {     // line includes '\n'
   size_t n = strlen(line);
-  if (n == 0 || n > 300 || logqFree() < n) { g_logDropped++; g_stats.logDropped++; return; }
+  if (n == 0 || n > 300 || logqFree() < n) { g_logDropped = g_logDropped + 1; g_stats.logDropped++; return; }
   uint16_t h = g_logHead;
   for (size_t i = 0; i < n; i++) { g_logq[h] = line[i]; h = (uint16_t)((h + 1) % LOGQ_SIZE); }
   __sync_synchronize();
@@ -49,6 +49,7 @@ static void logPutLine(const char* line) {     // line includes '\n'
 }
 
 // ---- writer state --------------------------------------------------------------------
+static TaskHandle_t g_logTaskHandle = nullptr;   // set by setup() so the stack watermark can be reported
 static uint32_t g_session = 0, g_seq = 0;
 static uint16_t g_part = 0;
 static uint32_t g_curBytes = 0;
@@ -97,7 +98,7 @@ static uint8_t logList(LogFile* out) {            // unsorted listing of our own
 
 // Keep at most (maxFiles-1) old files so that creating one more stays inside the budget.
 static void logEnforceBudget(const Config& c, const char* keepPath) {
-  LogFile lf[LOG_LIST_MAX];
+  static LogFile lf[LOG_LIST_MAX];            // only the writer context calls this: keep it off the task stack
   uint8_t n = logList(lf);
   while (n >= c.maxFiles) {
     int oldest = -1;
@@ -119,8 +120,8 @@ static void headerFor(char* out, size_t n) {
 }
 
 static void writerFail(const char* why) {
-  g_wrFailStreak++;
-  g_fsFailTotal++;
+  g_wrFailStreak = (uint8_t)(g_wrFailStreak + 1);
+  g_fsFailTotal = g_fsFailTotal + 1;
   g_stats.storageFailures++;
   snprintf(g_fsFaultWhy, sizeof(g_fsFaultWhy), "%s", why);
   g_fsWriteFault = true;
@@ -135,7 +136,7 @@ static void logPump(const Config& c, uint32_t nowMs) {
     while (g_logTail != g_logHead) {
       while (g_logTail != g_logHead && g_logq[g_logTail] != '\n') g_logTail = (uint16_t)((g_logTail + 1) % LOGQ_SIZE);
       if (g_logTail != g_logHead) g_logTail = (uint16_t)((g_logTail + 1) % LOGQ_SIZE);
-      g_logDiscarded++;
+      g_logDiscarded = g_logDiscarded + 1;
     }
     return;
   }
@@ -393,6 +394,7 @@ static ExportState g_exp;
 static int8_t g_exportSel = -1;      // -1 = ring, >=0 = file index in newest-first order
 
 static bool exportStart(int8_t sel) {
+  static LogFile lf[LOG_LIST_MAX];            // loop-task only
   if (g_exp.active) return false;
   g_exp.active = false; g_exp.isRing = false; g_exp.ringIdx = 0; g_exp.lines = 0; g_exp.crc = 0;   // File member: no memset
   char b[96];
@@ -401,7 +403,6 @@ static bool exportStart(int8_t sel) {
     snprintf(g_exp.name, sizeof(g_exp.name), "ring");
   } else {
     if (!g_fsRwOk) return false;
-    LogFile lf[LOG_LIST_MAX];
     if (!fsLock(50)) return false;
     uint8_t n = logList(lf);
     fsUnlock();
@@ -475,6 +476,7 @@ static void exportService() {
 }
 
 static void logStatusPrint(const Config& c) {
+  static LogFile lf[LOG_LIST_MAX];            // loop-task only
   say("LOG", "session=%lu schema=%d persist=%s fs=%s", UL(g_session), LOG_SCHEMA, g_logPersist ? "ON" : "OFF", g_fsDetail);
   say("LOG", "file=%s bytes=%lu/%lu part=%u budget=%u files x %lu B, reserve=%lu B", g_curPath[0] ? g_curPath : "(none yet)",
       UL(g_curBytes), UL(c.fileMaxBytes), (unsigned)g_part, (unsigned)c.maxFiles, UL(c.fileMaxBytes), UL(c.fsReserveBytes));
@@ -486,7 +488,6 @@ static void logStatusPrint(const Config& c) {
       (unsigned)g_frCount, FR_N, UL(g_frCaptures), (unsigned)g_frFrozenCount, UL(g_outDropped),
       g_exportSel < 0 ? "ring" : "file");
   if (g_fsRwOk) {
-    LogFile lf[LOG_LIST_MAX];
     if (fsLock(50)) {
       uint8_t n = logList(lf);
       fsUnlock();

@@ -25,10 +25,12 @@
 #endif
 #if MOCK_CORE_V3
   #define ESP_ARDUINO_VERSION_MAJOR 3
-  #define ESP_ARDUINO_VERSION_STR "3.0.7-mock"
+  #define ESP_ARDUINO_VERSION_MINOR 0
+  #define ESP_ARDUINO_VERSION_PATCH 7
 #else
   #define ESP_ARDUINO_VERSION_MAJOR 2
-  #define ESP_ARDUINO_VERSION_STR "2.0.17-mock"
+  #define ESP_ARDUINO_VERSION_MINOR 0
+  #define ESP_ARDUINO_VERSION_PATCH 17
 #endif
 
 #define IRAM_ATTR
@@ -47,6 +49,7 @@ typedef int BaseType_t;
 static inline SemaphoreHandle_t xSemaphoreCreateMutex() { return (SemaphoreHandle_t)1; }
 static inline int xSemaphoreTake(SemaphoreHandle_t, uint32_t) { return pdTRUE; }
 static inline int xSemaphoreGive(SemaphoreHandle_t) { return pdTRUE; }
+static inline uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 4096; }
 
 // ---- virtual time + signal model ------------------------------------------------------
 static uint64_t g_mockUs = 5000000ULL;   // start at 5 s so nothing depends on t=0
@@ -55,6 +58,7 @@ enum SimMode { SIM_IDLE = 0, SIM_BALL = 1, SIM_STUCK_ACTIVE = 2, SIM_NOISE = 3 }
 static int g_simMode[16];                 // per mux channel
 static int g_simPeriodUs = 833;           // 1.2 kHz ball modulation
 static int g_simActiveUs = 350;           // output LOW for this long each period (TSOP active-low)
+static int g_simChPeriod[16];             // per-channel source period override (us), 0 = use g_simPeriodUs
 static int g_simNoiseUs = 120;            // interference toggle period
 static bool g_simActiveHigh[16];          // model a channel whose output idles LOW and pulses HIGH
 
@@ -72,7 +76,8 @@ static uint8_t mockSigLevel(uint64_t us) {
   bool activeHigh = g_simActiveHigh[ch];
   bool active = false;
   switch (g_simMode[ch]) {
-    case SIM_BALL: active = (int)((us + (uint64_t)ch * 97u) % (uint64_t)g_simPeriodUs) < g_simActiveUs; break;
+    case SIM_BALL: { int per = g_simChPeriod[ch] ? g_simChPeriod[ch] : g_simPeriodUs; int act = g_simChPeriod[ch] ? (per * 42) / 100 : g_simActiveUs;
+                     active = (int)((us + (uint64_t)ch * 97u) % (uint64_t)per) < act; break; }
     case SIM_STUCK_ACTIVE: active = true; break;
     case SIM_NOISE: active = (int)((us / (uint64_t)g_simNoiseUs) & 1u); break;
     default: active = false;

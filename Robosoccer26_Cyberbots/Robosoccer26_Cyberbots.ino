@@ -13,6 +13,7 @@
   #include <Wire.h>
   #include <LittleFS.h>
   #include <esp_system.h>
+  #include <soc/soc_caps.h>
   #include <esp_task_wdt.h>
   #include <freertos/FreeRTOS.h>
   #include <freertos/task.h>
@@ -128,7 +129,7 @@ void setup() {
   outFlushBlocking(1500);
 
 #ifndef HOST_TEST
-  xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, nullptr, 0);   // flash writes live off the control core
+  xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, &g_logTaskHandle, 0);   // flash writes live off the control core
 #endif
   wdtBegin();
   g_lastLoopUs = micros();

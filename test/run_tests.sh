@@ -4,18 +4,24 @@
 set -u
 cd "$(dirname "$0")"
 FAIL=0
+TOTAL_T=0; TOTAL_P=0; TOTAL_C=0
+rm -rf /tmp/mockfs /tmp/mockfs_*          # clean, reproducible start: no state from earlier runs
 for CORE in 3 2; do
   BIN=/tmp/rs26_test_core$CORE
   echo "=== building (mock core v$CORE, -Wall -Wextra -Wshadow, ASan+UBSan) ==="
-  g++ -std=c++17 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 -fsanitize=address,undefined -fno-sanitize-recover=undefined \
+  g++ -std=c++20 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 -fsanitize=address,undefined -fno-sanitize-recover=undefined \
       -DMOCK_CORE_V3=$([ $CORE = 3 ] && echo 1 || echo 0) -I. -o "$BIN" test_main.cpp || { echo "BUILD FAILED"; exit 1; }
   rm -rf /tmp/mockfs_reboot
   for T in $("$BIN" --list); do
     if [ "$T" = "t_reboot_phase2" ]; then :; fi
     OUT=$("$BIN" "$T" 2>&1); RC=$?
-    echo "[core v$CORE] $(echo "$OUT" | tail -1)"
-    if [ $RC -ne 0 ]; then echo "$OUT" | head -40; FAIL=1; fi
+    LAST=$(echo "$OUT" | tail -1)
+    echo "[core v$CORE] $LAST"
+    echo "$OUT" | grep -E "^  (latency|sweep):" 
+    CK=$(echo "$LAST" | sed -nE 's/.*\(([0-9]+) checks.*/\1/p'); TOTAL_C=$((TOTAL_C + ${CK:-0})); TOTAL_T=$((TOTAL_T + 1))
+    if [ $RC -ne 0 ]; then echo "$OUT" | head -40; FAIL=1; else TOTAL_P=$((TOTAL_P + 1)); fi
   done
 done
+echo "SUMMARY: $TOTAL_P/$TOTAL_T test runs passed ($((TOTAL_T / 2)) test cases x 2 core API shapes), $TOTAL_C checks executed in total"
 [ $FAIL -eq 0 ] && echo "ALL TESTS PASSED" || echo "SOME TESTS FAILED"
 exit $FAIL

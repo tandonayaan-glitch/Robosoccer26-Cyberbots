@@ -23,7 +23,7 @@ static void printHelp() {
   say("INFO", "i : IR snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ch <n> <en|pol|trust|bear|tilt> <v> | :chreset <n> | :learn <deg> | :verify <n> | :cov | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :cov | :irgate <off|auto|min max> | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -53,9 +53,10 @@ static void cmdParamSet(const char* name, const char* val) {
   float v;
   if (!p || !parseF(val, &v)) { say("WARN", "usage: :set <name> <number>   (':get' lists names)"); return; }
   if (!paramInRange(*p, v)) { say("WARN", "%s=%g rejected: allowed %g..%g", name, v, p->lo, p->hi); return; }
-  Config t = g_cfg;
+  static Config t, chk;                          // 0.5 KB each: not on the task stack
+  t = g_cfg;
   paramSet(t, *p, v);
-  Config chk = t;
+  chk = t;
   char rep[64];
   if (cfgValidate(chk, rep, sizeof(rep)) != 0) { say("WARN", "%s=%g rejected: conflicts with related limits (%s)", name, v, rep); return; }
   g_cfg = t;
@@ -82,8 +83,20 @@ static void cmdParamGet(const char* name) {
 
 static void cmdCh(char* a, char* b, char* v) {
   float n, x;
-  if (!parseF(a, &n) || n < 0 || n > 15 || !b) { say("WARN", "usage: :ch <0-15> <en|pol|trust|bear|tilt> <value>"); return; }
+  if (!parseF(a, &n) || n < 0 || n > 15) { say("WARN", "usage: :ch <0-15> [<en|pol|trust|bear|tilt> <value>]"); return; }
   ChCfg& h = g_cfg.ch[(int)n];
+  if (!b) {                                   // inspection of one channel
+    const IrChan& s = g_ir[(int)n];
+    say("INFO", "C%d: %s | active-%s | trusted=%d | bearing %.0f%s tilt %.0f | status %s%s", (int)n, h.enabled ? "ENABLED" : "disabled",
+        h.activeLow ? "LOW" : "HIGH", h.trusted, h.bearingDeg, h.bearingCal ? "" : " (UNCALIBRATED)", h.tiltDownDeg,
+        CH_NAME[irChStatus(g_cfg, (uint8_t)n)], irTrusted(g_cfg, (uint8_t)n) ? "" : " [excluded from navigation]");
+    if (h.enabled)
+      say("INFO", "C%d: last window raw=%u state=%s edges=%u active_us=%lu period_us=%lu | smoothed active=%u hist8=%u/8 | windows=%lu detections=%lu offband=%lu overruns=%lu | verified=%d failedTests=%d",
+          (int)n, (unsigned)s.raw, WS_NAME[s.winState], (unsigned)s.edges, UL(s.activeUs), UL(s.periodUs), (unsigned)s.active, popcount16(s.hist & 0xFF),
+          UL(s.windows), UL(s.detCount), UL(s.offband), UL(s.overruns), h.verified, h.verifyFails);
+    else say("INFO", "C%d is not scanned (a disabled channel is never reported as failed)", (int)n);
+    return;
+  }
   if (strcmp(b, "pol") == 0 && v && (strcmp(v, "low") == 0 || strcmp(v, "high") == 0)) { h.activeLow = (strcmp(v, "low") == 0); say("INFO", "C%d output polarity: active-%s", (int)n, h.activeLow ? "LOW" : "HIGH"); return; }
   if (!parseF(v, &x)) { say("WARN", "value must be a number"); return; }
   if (strcmp(b, "en") == 0) { h.enabled = x != 0; if (!h.enabled) { g_ir[(int)n].active = 0; g_ir[(int)n].detect = 0; } }
@@ -133,7 +146,7 @@ static void cliExecLine(char* line, uint32_t now) {
   else if (!strcmp(cmd, "get")) cmdParamGet(t[1]);
   else if (!strcmp(cmd, "save")) cmdSave();
   else if (!strcmp(cmd, "load")) {
-    char rep[64]; Config tmp;
+    char rep[64]; static Config tmp;
     CfgLoadResult r = cfgLoad(tmp, rep, sizeof(rep));
     c = tmp; say("INFO", "config %s%s%s", cfgLoadText(r), rep[0] ? ": " : "", rep);
   }
@@ -162,6 +175,26 @@ static void cliExecLine(char* line, uint32_t now) {
     float n2;
     if (!parseF(t[1], &n2) || n2 < 0 || n2 > 15 || !c.ch[(int)n2].enabled) say("WARN", "usage: :verify <enabled channel>  (touch the ball to that receiver's face)");
     else { irProbeStart(2, (uint8_t)n2, 0, 3000, now); say("TEST", "verifying C%d for 3 s - hold the ball against that receiver", (int)n2); }
+  }
+  else if (!strcmp(cmd, "irgate")) {
+    float lo, hi;
+    static Config gate;
+    gate = c;
+    if (t[1] && !strcmp(t[1], "off")) { gate.irPeriodMinUs = gate.irPeriodMaxUs = 0; }
+    else if (t[1] && !strcmp(t[1], "auto")) {
+      if (g_lastPeriod.n < 8) { say("WARN", "irgate auto needs a measurement: run :verify <ch> or :learn <deg> with the ball first (last probe had %lu usable windows, need 8)", UL(g_lastPeriod.n)); return; }
+      uint32_t lo2 = (uint32_t)(g_lastPeriod.mean * 0.65f), hi2 = (uint32_t)(g_lastPeriod.mean * 1.35f);
+      gate.irPeriodMinUs = (uint16_t)(lo2 < 100 ? 100 : lo2); gate.irPeriodMaxUs = (uint16_t)(hi2 > 20000 ? 20000 : hi2);
+    }
+    else if (parseF(t[1], &lo) && parseF(t[2], &hi) && lo >= 100 && hi > lo && hi <= 20000) { gate.irPeriodMinUs = (uint16_t)lo; gate.irPeriodMaxUs = (uint16_t)hi; }
+    else { say("WARN", "usage: :irgate off | auto | <min_us 100..> <max_us ..20000>"); return; }
+    char rep[64];
+    static Config chk;
+    chk = gate;
+    if (cfgValidate(chk, rep, sizeof(rep)) != 0) { say("WARN", "gate rejected (%s)", rep); return; }
+    c = gate;
+    if (c.irPeriodMaxUs) say("INFO", "pulse-period gate ON: %u..%u us (:save to keep). Check with 'i' that the real ball still detects.", (unsigned)c.irPeriodMinUs, (unsigned)c.irPeriodMaxUs);
+    else say("INFO", "pulse-period gate OFF");
   }
   else if (!strcmp(cmd, "cov")) cmdCov();
   else if (!strcmp(cmd, "zero")) { imuZeroYaw(); g_refYaw = 0; say("INFO", "heading reference zeroed"); }
@@ -197,7 +230,7 @@ static void cliExecLine(char* line, uint32_t now) {
   }
   else if (!strcmp(cmd, "logdel")) {
     if (t[1] && !strcmp(t[1], "CONFIRM") && g_fsRwOk && fsLock(100)) {
-      LogFile lf[LOG_LIST_MAX]; uint8_t k = logList(lf);
+      static LogFile lf[LOG_LIST_MAX]; uint8_t k = logList(lf);
       for (uint8_t i = 0; i < k; i++) if (strcmp(lf[i].name, g_curPath) != 0) LittleFS.remove(lf[i].name);
       fsUnlock(); say("LOG", "deleted %u old log file(s) (current file kept)", (unsigned)k);
     } else say("WARN", "this deletes old log files. Send ':logdel CONFIRM'");

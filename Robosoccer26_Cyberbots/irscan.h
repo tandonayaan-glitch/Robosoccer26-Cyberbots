@@ -12,12 +12,12 @@
 #include "config.h"
 #include "health.h"
 
-enum WinState : uint8_t { WS_NONE, WS_DETECT, WS_STUCK, WS_NOISY, WS_INVALID };
+enum WinState : uint8_t { WS_NONE, WS_DETECT, WS_STUCK, WS_NOISY, WS_INVALID, WS_OFFBAND };
 enum ChStatus : uint8_t {
   CH_DISABLED, CH_UNVERIFIED, CH_VERIFIED, CH_SUSPECT_STUCK, CH_SUSPECT_NOISY, CH_SUSPECT_TEST,
   CH_FAIL_STUCK, CH_FAIL_TEST
 };
-static const char* WS_NAME[] = {"none", "DETECT", "STUCK", "NOISY", "invalid"};
+static const char* WS_NAME[] = {"none", "DETECT", "STUCK", "NOISY", "invalid", "offband"};
 static const char* CH_NAME[] = {"DISABLED", "UNVERIFIED", "VERIFIED", "SUSPECT_STUCK", "SUSPECT_NOISY",
                                 "SUSPECT_TEST", "FAIL_STUCK", "FAIL_TEST"};
 
@@ -30,7 +30,7 @@ struct IrChan {
   uint32_t activeUs;      // time the output was at its active level in the last window
   uint32_t periodUs;      // measured mean pulse period of the last window (0 if < 2 pulses)
   uint16_t hist;          // 1 bit per window, newest = bit 0
-  uint32_t windows, detCount, overruns;
+  uint32_t windows, detCount, overruns, offband;
   uint32_t lastWindowMs, lastDetectMs;
   uint32_t stuckSinceMs;
   uint8_t noisyScore, cleanStreak, stuckSuspect, stuckFail, noisy;
@@ -39,6 +39,19 @@ static IrChan g_ir[MUX_CHANNELS];
 
 // ---- edge counter (ISR) -----------------------------------------------------------
 #define IR_EDGE_CAP 250
+// The ISR must not call anything that lives in flash (digitalRead()/micros() are in flash on
+// Arduino-ESP32: confirmed with nm on the real 2.0.17/3.0.7 builds). A GPIO32-39 input is read
+// straight from the GPIO input register and time comes from esp_timer_get_time() (IRAM).
+static_assert(PIN_MUX_SIG >= 32 && PIN_MUX_SIG <= 39, "ISR reads GPIO_IN1: SIG must be GPIO32..39");
+#ifdef HOST_TEST
+  #define IR_SIG_LEVEL() digitalRead(PIN_MUX_SIG)
+  #define IR_NOW_US() micros()
+#else
+  #include <soc/gpio_struct.h>
+  #include <esp_timer.h>
+  #define IR_SIG_LEVEL() ((uint8_t)((GPIO.in1.val >> (PIN_MUX_SIG - 32)) & 1u))
+  #define IR_NOW_US() ((uint32_t)esp_timer_get_time())
+#endif
 static volatile bool g_isrGate = false;
 static volatile uint8_t g_isrActiveLevel = 0;
 static volatile bool g_isrInActive = false;
@@ -47,20 +60,20 @@ static volatile uint32_t g_isrActAcc = 0, g_isrActStart = 0, g_isrFirst = 0, g_i
 
 static void IRAM_ATTR irIsr() {
   if (!g_isrGate) return;
-  bool isActive = (digitalRead(PIN_MUX_SIG) == g_isrActiveLevel);
-  uint32_t t = micros();
+  bool isActive = (IR_SIG_LEVEL() == g_isrActiveLevel);
+  uint32_t t = IR_NOW_US();
   if (isActive) {
     if (!g_isrInActive) {
       g_isrInActive = true;
       g_isrActStart = t;
       if (g_isrEdges == 0) g_isrFirst = t;
       g_isrLast = t;
-      g_isrEdges++;
+      g_isrEdges = (uint16_t)(g_isrEdges + 1);
       if (g_isrEdges >= IR_EDGE_CAP) g_isrGate = false;   // flood guard: bounded interrupt load
     }
   } else if (g_isrInActive) {
     g_isrInActive = false;
-    g_isrActAcc += t - g_isrActStart;
+    g_isrActAcc = g_isrActAcc + (t - g_isrActStart);
   }
 }
 
@@ -101,8 +114,11 @@ struct Probe {
   float deg;
   uint32_t endMs;
   uint32_t hits[MUX_CHANNELS], windows[MUX_CHANNELS], maxEdges[MUX_CHANNELS];
+  uint32_t perSum, perN, perMin, perMax;   // pulse periods (us) of windows with >= 3 pulses
 };
 static Probe g_probe;
+struct PeriodStat { uint32_t n, mean, minUs, maxUs; };
+static PeriodStat g_lastPeriod;           // result of the last probe, input to ":irgate auto"
 struct CovRow { float deg; uint16_t mask; uint8_t pct[MUX_CHANNELS]; };
 #define COV_MAX 48
 static CovRow g_cov[COV_MAX];
@@ -125,14 +141,20 @@ static uint8_t irCountEnabled(const Config& c) {
 // Pure window classifier (unit tested). activeUs: time at active level; startActive/endActive:
 // level at window open/close.
 static WinState irClassifyWindow(const Config& c, uint16_t edges, uint32_t activeUs, uint32_t windowUs,
-                                 bool startActive, bool endActive) {
+                                 bool startActive, bool endActive, uint32_t periodUs = 0) {
   if (edges == 0) {
     if (startActive && endActive && activeUs + windowUs / 20 >= windowUs) return WS_STUCK;
     return WS_NONE;
   }
   float windowMs = (float)windowUs / 1000.0f;
   if (edges >= IR_EDGE_CAP || (float)edges > (float)c.irNoisyPerMs * windowMs) return WS_NOISY;
-  if (edges >= c.irMinEdges) return WS_DETECT;
+  if (edges >= c.irMinEdges) {
+    // Optional pulse-period gate: an unrelated 38-40 kHz source (remote, other robot, lamp driver)
+    // produces a different envelope rhythm from the ball. Only usable once the ball's real period
+    // has been measured (":verify"/":learn" then ":irgate auto").
+    if (c.irPeriodMaxUs && edges >= 2 && (periodUs < c.irPeriodMinUs || periodUs > c.irPeriodMaxUs)) return WS_OFFBAND;
+    return WS_DETECT;
+  }
   return WS_NONE;   // a single pulse is not enough evidence
 }
 
@@ -207,6 +229,7 @@ static void irChannelUpdate(const Config& c, uint8_t ch, WinState ws, uint32_t n
   s.windows++;
   s.lastWindowMs = nowMs;
   if (ws == WS_INVALID) { s.overruns++; g_stats.scanOverruns++; return; }   // never interpret a late window
+  if (ws == WS_OFFBAND) s.offband++;
   s.detect = (ws == WS_DETECT);
   s.hist = (uint16_t)((s.hist << 1) | (s.detect ? 1 : 0));
   if (s.detect) { s.detCount++; s.lastDetectMs = nowMs; }
@@ -257,12 +280,17 @@ static void irCloseWindow(Config& c, uint32_t nowMs) {
   startActive = (edges == 0) && (acc + c.irWindowUs / 20 >= actual);
   WinState ws;
   if (actual > g_scan.lastWinPlannedUs + g_scan.lastWinPlannedUs / 2 + 500) ws = WS_INVALID;   // loop was late
-  else ws = irClassifyWindow(c, edges, acc, actual, startActive, endActive);
+  else ws = irClassifyWindow(c, edges, acc, actual, startActive, endActive, s.periodUs);
   irChannelUpdate(c, ch, ws, nowMs);
   if (g_probe.mode && ws != WS_INVALID) {
     g_probe.windows[ch]++;
     if (ws == WS_DETECT) g_probe.hits[ch]++;
     if (edges > g_probe.maxEdges[ch]) g_probe.maxEdges[ch] = edges;
+    if ((ws == WS_DETECT || ws == WS_OFFBAND) && edges >= 3 && s.periodUs) {
+      g_probe.perSum += s.periodUs; g_probe.perN++;
+      if (!g_probe.perMin || s.periodUs < g_probe.perMin) g_probe.perMin = s.periodUs;
+      if (s.periodUs > g_probe.perMax) g_probe.perMax = s.periodUs;
+    }
   }
   g_scan.open = false;
 }
@@ -272,8 +300,10 @@ static void irEstimate(const Config& c, uint32_t nowMs) {
   uint8_t n = 0;
   uint16_t mask = 0;
   bool unverified = false;
+  bool recentHit = false;     // a contributing channel detected in one of its last 2 windows (~72 ms)
   for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++) {
     if (!irTrusted(c, ch) || !g_ir[ch].active) continue;
+    if (g_ir[ch].hist & 0x3) recentHit = true;
     float w = (float)popcount16(g_ir[ch].hist & 0xFF) / 8.0f;
     float b = c.ch[ch].bearingDeg * DEG2RAD;
     sx += w * sinf(b); sy += w * cosf(b); W += w; n++;
@@ -299,8 +329,12 @@ static void irEstimate(const Config& c, uint32_t nowMs) {
   //   W          : summed hit fractions over the last 8 windows (1 channel with 8/8 hits = 1.0)
   g_ball.conf = rf * (W < 1.0f ? W : 1.0f) * (unverified ? 0.85f : 1.0f);
   g_ball.ambiguous = g_ball.rInst < 0.5f;
-  g_ball.lastDetectMs = nowMs;
-  if (g_ball.conf >= c.acqConf * 0.6f) g_ball.lastGoodMs = nowMs;
+  // Freshness comes only from RECENT windows. Otherwise the 8-window history that smooths the estimate
+  // would keep refreshing the timestamps for ~0.3 s after the ball has gone and delay the loss decision.
+  if (recentHit) {
+    g_ball.lastDetectMs = nowMs;
+    if (g_ball.conf >= c.acqConf * 0.6f) g_ball.lastGoodMs = nowMs;
+  }
   if (g_ball.conf >= c.acqConf) { if (g_ball.acqCount < 255) g_ball.acqCount++; } else g_ball.acqCount = 0;
   if (!g_ball.valid && g_ball.acqCount >= 2) { g_ball.valid = true; g_ball.validSinceMs = nowMs; }
 }
@@ -380,6 +414,12 @@ static void irProbeStart(uint8_t mode, uint8_t ch, float deg, uint32_t durMs, ui
 
 static void irProbeFinish(Config& c, uint32_t nowMs) {
   (void)nowMs;
+  g_lastPeriod.n = g_probe.perN;
+  g_lastPeriod.mean = g_probe.perN ? g_probe.perSum / g_probe.perN : 0;
+  g_lastPeriod.minUs = g_probe.perMin; g_lastPeriod.maxUs = g_probe.perMax;
+  if (g_probe.perN) say("TEST", "measured pulse period of this source: mean %lu us (%.0f Hz), min %lu, max %lu over %lu windows (use :irgate auto to gate on it)",
+                        UL(g_lastPeriod.mean), 1e6f / (float)g_lastPeriod.mean, UL(g_lastPeriod.minUs), UL(g_lastPeriod.maxUs), UL(g_lastPeriod.n));
+  else say("TEST", "no window had >= 3 pulses: pulse period could not be measured");
   if (g_probe.mode == 1) {                       // learn: which receivers see the ball at this bearing?
     CovRow row;
     memset(&row, 0, sizeof(row));

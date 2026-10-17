@@ -267,6 +267,11 @@ static void t_config() {
   // never persist invalid settings
   Config bad; cfgDefaults(bad); bad.acqConf = NAN;
   CHECK(!cfgSave(bad));
+  // pulse-period gate must be both-zero or a sane band
+  { Config g; cfgDefaults(g); g.irPeriodMinUs = 500; g.irPeriodMaxUs = 0; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1 && g.irPeriodMinUs == 0 && strstr(rep, "irperiodgate")); }
+  { Config g; cfgDefaults(g); g.irPeriodMinUs = 900; g.irPeriodMaxUs = 800; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1 && g.irPeriodMaxUs == 0); }
+  { Config g; cfgDefaults(g); g.irPeriodMinUs = 50; g.irPeriodMaxUs = 800; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1); }
+  { Config g; cfgDefaults(g); g.irPeriodMinUs = 400; g.irPeriodMaxUs = 1500; CHECK(cfgValidate(g, rep, sizeof(rep)) == 0); }
   // pins are not part of the configuration: no parameter name can touch them
   for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(strstr(PARAMS[i].name, "gpio") == nullptr && strncmp(PARAMS[i].name, "pin", 3) != 0);
   // and no ParamDef offset can reach outside the Config struct
@@ -1055,6 +1060,236 @@ static void t_fs_commands() {
   { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); CHECK(n >= 1 && n < before + 1); }
 }
 
+static void t_ir_spare_channels() {
+  bootCal();
+  for (int i = 12; i < 16; i++) g_simMode[i] = SIM_BALL;      // a "ball" on mux inputs that have no receiver installed
+  simRun(3000);
+  CHECK(!g_ball.valid && !g_ball.anyDetect);
+  for (int i = 12; i < 16; i++) { CHECK(g_ir[i].windows == 0 && g_ir[i].detCount == 0 && !g_ir[i].active); CHECK(irChStatus(g_cfg, i) == CH_DISABLED); CHECK(!irTrusted(g_cfg, i)); }
+  CHECK(g_scan.enabledCount == 12);
+  uint8_t nT, nU; irCoverageGap(g_cfg, &nT, &nU);
+  CHECK(nT == 12);                                             // spare channels are not counted as coverage
+  CHECK(!faultActive(F_IR_CHANNEL));                           // and are never reported as failed
+  CHECK(outHas("reserved for future receivers: disabled"));
+  // defaults agree with the physical count and the angle range
+  Config d; cfgDefaults(d);
+  int en = 0; for (int i = 0; i < 16; i++) { en += d.ch[i].enabled; CHECK(d.ch[i].bearingDeg >= 0 && d.ch[i].bearingDeg < 360 && d.ch[i].tiltDownDeg == 22.0f && !d.ch[i].bearingCal); }
+  CHECK(en == IR_PLANNED_CHANNELS && en == 12);
+}
+
+static void t_ir_period_gate() {
+  bootCal();
+  simRun(500);
+  // before any measurement: 'auto' is refused and the gate is reported OFF
+  send(":irgate auto\n"); send("h"); simRun(1500);
+  CHECK(outHas("needs a measurement"));
+  CHECK(outHas("pulse-period gate OFF"));
+  // An unrelated modulated source with a ball-like rhythm (2.5 kHz envelope) on channel 3.
+  g_simMode[3] = SIM_BALL; g_simChPeriod[3] = 400;
+  simRun(1500);
+  CHECK(g_ir[3].active);                                       // WITHOUT a gate it is indistinguishable from a ball (documented limitation)
+  CHECK(g_ir[3].offband == 0);
+  // Measure the real ball (833 us) on channel 7 and gate on it.
+  g_simMode[3] = SIM_IDLE; g_simChPeriod[3] = 0;
+  g_simMode[7] = SIM_BALL;
+  send(":verify 7\n"); simRun(5000);
+  CHECK(g_lastPeriod.n >= 8 && g_lastPeriod.mean > 700 && g_lastPeriod.mean < 950);
+  CHECK(outHas("measured pulse period of this source"));
+  send(":irgate auto\n"); simRun(100);
+  CHECK(g_cfg.irPeriodMaxUs > 0 && g_cfg.irPeriodMinUs < 833 && g_cfg.irPeriodMaxUs > 833);
+  CHECK(g_cfg.irPeriodMinUs >= 100 && g_cfg.irPeriodMaxUs <= 20000);
+  // Now the same unrelated source is rejected, the real ball still detects.
+  g_simMode[7] = SIM_IDLE; clearBall();
+  simRun(1500);
+  g_simMode[3] = SIM_BALL; g_simChPeriod[3] = 400;
+  simRun(2000);
+  CHECK(!g_ir[3].active && g_ir[3].offband > 5);
+  CHECK(!g_ball.anyDetect && !g_ball.valid);
+  CHECK(!faultActive(F_IR_CHANNEL) && g_cond == COND_NORMAL);   // an off-band source is not a hardware fault
+  g_simMode[3] = SIM_IDLE; g_simChPeriod[3] = 0;
+  g_simMode[7] = SIM_BALL;
+  simRun(2000);
+  CHECK(g_ir[7].active && g_ball.valid);
+  // validation: lone limits and nonsense are refused; off works
+  send(":irgate off\n"); simRun(50);
+  Serial.out.clear();
+  send(":set irperlo 500\n"); simRun(50);
+  CHECK(outHas("rejected") && g_cfg.irPeriodMinUs == 0);
+  Serial.out.clear();
+  send(":irgate 50 900\n"); simRun(50);
+  CHECK(outHas("usage"));
+  send(":irgate 500 400\n"); simRun(50);
+  CHECK(outHas("usage"));
+  send(":irgate 300 1500\n"); simRun(50);
+  CHECK(g_cfg.irPeriodMinUs == 300 && g_cfg.irPeriodMaxUs == 1500);
+  send(":irgate off\n"); simRun(50);
+  CHECK(g_cfg.irPeriodMinUs == 0 && g_cfg.irPeriodMaxUs == 0);
+}
+
+static void t_latency() {
+  // Measured in simulation (control-loop quantisation 50 us): how long from the ball appearing until
+  // the firmware would act on it, and from disappearing until it is declared lost.
+  bootCal();
+  simRun(1000);
+  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
+  ballAt(90, 10);                                              // single verified receiver
+  uint64_t t0 = g_mockUs;
+  while (!g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
+  double acq1 = (double)(g_mockUs - t0) / 1000.0;
+  clearBall();
+  simRun(1500);
+  ballAt(75, 20);                                              // two neighbouring receivers
+  t0 = g_mockUs;
+  while (!g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
+  double acq2 = (double)(g_mockUs - t0) / 1000.0;
+  clearBall();
+  t0 = g_mockUs;
+  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
+  double lost = (double)(g_mockUs - t0) / 1000.0;
+  printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lost, g_scan.cycleUs / 1000.0);
+  CHECK(acq1 < 400);
+  CHECK(acq2 < 400);
+  CHECK(lost < g_cfg.lostHoldMs + 150);                        // hold time + at most ~2 windows/cycles of freshness
+  CHECK(acq1 > g_scan.cycleUs / 1000.0);                       // can never be faster than one scan
+}
+
+static void t_side_zone_note() {
+  bootCal();
+  simRun(500);
+  startAuto();
+  ballAt(90, 10);
+  simRun(2500);
+  CHECK(g_navState == NAV_APPROACH);
+  Serial.out.clear();
+  clearBall();
+  simRun(g_cfg.lostHoldMs + 500);
+  CHECK(outHas("possible entry into the ~40 mm side blind zone"));
+  // a loss straight ahead does not carry that hint
+  startAuto();
+  ballAt(0, 10); simRun(2500);
+  Serial.out.clear(); clearBall(); simRun(g_cfg.lostHoldMs + 500);
+  CHECK(!outHas("side blind zone"));
+  // the health report never implies continuous coverage
+  send("h"); simRun(1500);
+  CHECK(outHas("does NOT mean continuous coverage"));
+  CHECK(outHas("stack headroom"));
+}
+
+static void t_nav_all_directions() {
+  bootCal();
+  simRun(500);
+  startAuto();
+  for (int deg = 0; deg < 360; deg += 30) {
+    ballAt((float)deg, 10);                                    // exactly one receiver sees the ball
+    simRun(3000);
+    char msg[64]; snprintf(msg, sizeof(msg), "bearing %d", deg);
+    if (g_navState != NAV_APPROACH || !g_ball.valid) { printf("  not approaching at %s\n", msg); }
+    CHECK(g_navState == NAV_APPROACH && g_ball.valid);
+    CHECK_NEAR(fabsf(angDiffDeg(g_ball.bearingDeg, (float)deg)), 0, 2.0);
+    // requested direction must point toward the ball (centre band softens the sideways part)
+    float reqAng = atan2f(g_reqVx, g_reqVy) * RAD2DEG;
+    float tol = (deg == 0) ? 1.0f : (deg == 30 || deg == 330 ? 25.0f : 8.0f);
+    CHECK_NEAR(fabsf(angDiffDeg(reqAng, (float)deg)), 0, tol);
+    // wheels follow the mecanum mixing of that request
+    float u[4]; mecanumMix(g_reqVx, g_reqVy, g_reqW, g_cfg.rollerO != 0, u);
+    for (int i = 0; i < 4; i++) if (fabsf(u[i]) > 0.15f) CHECK((wheelDir(i) > 0) == (u[i] > 0) && wheelDir(i) != 0);
+  }
+}
+
+static void t_nav_sweep_and_multi() {
+  bootCal();
+  simRun(500);
+  startAuto();
+  ballAt(0, 20); simRun(2500);
+  CHECK(g_navState == NAV_APPROACH);
+  // ball circles the robot at 60 deg/s: the estimate must follow it continuously across every sector boundary
+  float prev = g_ball.bearingDeg; float worstJump = 0; int lostSamples = 0;
+  for (int step = 0; step < 120; step++) {                    // 6 s = 360 deg
+    ballAt(fmodf(step * 3.0f, 360.0f), 20);
+    simRun(50);
+    if (!g_ball.valid) lostSamples++;
+    float d = fabsf(angDiffDeg(g_ball.bearingDeg, prev)); if (d > worstJump) worstJump = d; prev = g_ball.bearingDeg;
+  }
+  printf("  sweep: worst bearing jump between 50 ms samples = %.1f deg, samples without a valid ball = %d\n", worstJump, lostSamples);
+  CHECK(worstJump < 40.0f);
+  CHECK(lostSamples == 0);
+  CHECK(g_stats.ballLossEvents == 0);
+  // several receivers at once
+  ballAt(45, 25); simRun(2000);
+  CHECK(g_ball.nActive == 2 && fabsf(g_ball.bearingDeg - 45) < 4);
+  ballAt(90, 35); simRun(2000);
+  CHECK(g_ball.nActive == 3 && fabsf(g_ball.bearingDeg - 90) < 3);
+  ballAt(0, 65); simRun(2000);                                // five receivers: front arc
+  CHECK(g_ball.nActive >= 4 && fabsf(g_ball.bearingDeg) < 3);
+  CHECK_NEAR(g_ball.rInst, 0.746, 0.03);                       // geometry of five receivers across 120 deg
+}
+
+static void t_imu_frozen_in_approach() {
+  bootCal();
+  simRun(500);
+  startAuto();
+  ballAt(0, 10);
+  simRun(2500);
+  CHECK(g_navState == NAV_APPROACH && !isnan(g_hdgErr));
+  for (int mode : {2, 4, 3}) {                                // frozen, saturated, all-zero
+    g_mpu.mode = mode;
+    g_mpu.gz = 0;
+    simRun(2500);
+    CHECK(!imuHeadingUsable(g_cfg, millis()));
+    CHECK(isnan(g_hdgErr));
+    CHECK(g_navState == NAV_APPROACH);
+    CHECK(fabsf(g_reqW) <= g_cfg.hdgMaxRot + 1e-6f);          // bounded, and ball is dead ahead: no turning
+    CHECK(fabsf(g_reqW) < 0.05f);
+    CHECK(wheelDir(0) > 0 && wheelDir(1) > 0 && wheelDir(2) > 0 && wheelDir(3) > 0);   // drives straight, no spin
+    g_mpu.mode = 0;
+    simRun(g_cfg.recoverVerifyMs + 2500);
+    CHECK(g_imu.ok);
+  }
+  // ball off to one side + no usable heading: fallback turn is bounded and toward the ball
+  g_mpu.mode = 1;
+  ballAt(60, 10);
+  simRun(2500);
+  CHECK(g_reqW > 0 && g_reqW <= g_cfg.hdgMaxRot + 1e-6f);
+}
+
+static void t_gpio_tamper() {
+  bootCal();
+  simRun(300);
+  anyWheelEverMoved = false;
+  const char* cmds[] = {":set gpio 3\n", ":set pin 5\n", ":set in1 4\n", ":set pwmpin 3\n", ":set en 12\n", ":set muxsig 35\n",
+                        ":ch 3 pin 4\n", ":ch 3 gpio 4\n", ":rev ZZ 1\n", ":mtest XX\n", ":set pwmfreq 99999999\n", ":set maxauto -5\n",
+                        ":set maxauto 1e99\n", ":set maxauto 0x20\n", ":ch -1 en 1\n", ":ch 16 en 1\n", ":ch 3 bear nan\n", ":ch 3 bear inf\n"};
+  for (const char* c : cmds) { send(c); simRunTracking(60); }
+  CHECK(!anyWheelEverMoved);
+  CHECK(outCount("unknown") + outCount("usage") + outCount("rejected") + outCount("must be a number") + outCount("bearing 0..359.9") >= 14);
+  struct { int a, b, e; } spec[4] = {{18, 19, 23}, {25, 26, 33}, {21, 22, 5}, {27, 14, 32}};
+  for (int i = 0; i < 4; i++) CHECK(WHEEL_PINS[i].in1 == spec[i].a && WHEEL_PINS[i].in2 == spec[i].b && WHEEL_PINS[i].en == spec[i].e);
+  CHECK(g_cfg.maxAuto == 170 && g_cfg.pwmFreq == 5000);
+  CHECK(g_cfg.ch[3].bearingDeg == 90);
+  // the persisted blob cannot carry pins either: sizes/offsets of the pin tables are not part of Config
+  CHECK(sizeof(Config) < 700);
+}
+
+static void t_ch_inspect() {
+  bootCal();
+  simRun(1500);
+  g_simMode[3] = SIM_BALL; simRun(1200);
+  Serial.out.clear();
+  send(":ch 3\n"); send(":ch 13\n"); send(":ch 99\n"); simRun(200);
+  CHECK(outHas("C3: ENABLED | active-LOW"));
+  CHECK(outHas("status UNVERIFIED"));
+  CHECK(outHas("state=DETECT") || outHas("state=none"));
+  CHECK(outHas("detections="));
+  CHECK(outHas("C13 is not scanned"));
+  CHECK(outHas("usage: :ch"));
+  // the snapshot shows every enabled channel individually, and only those
+  Serial.out.clear();
+  send("i"); simRun(300);
+  int rows = 0; for (int i = 0; i < 16; i++) { char tag[16]; snprintf(tag, sizeof(tag), " C%-2d ", i); if (outHas(tag)) rows++; }
+  CHECK(rows == 12);
+  CHECK(!outHas(" C12 ") && !outHas(" C15 "));
+}
+
 static void t_cfg_set() {
   bootCal();
   simRun(200);
@@ -1270,12 +1505,21 @@ static void t_export() {
   simRun(8000);
   send("g"); simRun(500);
   CHECK(outHas("[0] /L"));
+  g_hostWriterInline = false;                                // freeze the file so its line count can be compared exactly
+  logPump(g_cfg, millis() + 10000);
+  std::string newest; { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); uint32_t best = 0; for (uint8_t i = 0; i < n; i++) if (lf[i].key >= best) { best = lf[i].key; newest = lf[i].name; } }
+  int fileLines = 0; std::string firstLine, secondLine;
+  { FILE* f = fopen((g_fsDir + newest).c_str(), "r"); char ln[400]; while (f && fgets(ln, sizeof(ln), f)) { fileLines++; if (fileLines == 1) firstLine = ln; if (fileLines == 2) secondLine = ln; } if (f) fclose(f); }
+  CHECK(firstLine.rfind("#schema=1;fw=", 0) == 0);
+  CHECK(secondLine == std::string(LOG_COLUMNS) + "\n");
   send(":xsel 0\n"); simRun(50);
   Serial.out.clear();
   send("x"); simRun(20000);
   bool ok; int lines;
   parseExportAndCrc(Serial.out, "#BEGIN-EXPORT", &ok, &lines);
   CHECK(ok && lines > 20);
+  CHECK(lines == fileLines);                                 // exported row count == rows actually on flash
+  g_hostWriterInline = true;
   CHECK(outHas("#BEGIN-EXPORT name=/L") && outHas("schema=1"));
   // ring export matches the in-RAM data and its CRC verifies
   Serial.out.clear();
@@ -1386,6 +1630,8 @@ static void t_health_report_text() {
   CHECK(outHas("MPU6050 @0x68 who=0x68: PASS"));
   CHECK(outHas("PWM shown is COMMANDED"));
   CHECK(outHas("reset reason"));
+  CHECK(outHas(MOCK_CORE_V3 ? "Arduino-ESP32 core 3.0.7 |" : "Arduino-ESP32 core 2.0.17 |"));   // version string composed from MAJOR/MINOR/PATCH
+  CHECK(outHas(MOCK_CORE_V3 ? "Arduino-ESP32 core 3.0.7 |" : "Arduino-ESP32 core 2.0.17 |"));   // composed from MAJOR/MINOR/PATCH
   CHECK(!outHas("PASS (operator-confirmed") );             // nothing is claimed verified
 }
 
@@ -1399,7 +1645,7 @@ static const TestCase TESTS[] = {
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
   T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),

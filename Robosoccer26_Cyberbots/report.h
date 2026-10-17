@@ -2,10 +2,13 @@
 #pragma once
 #include "nav.h"
 
-#if defined(ESP_ARDUINO_VERSION_STR)
-  #define CORE_VERSION_STR ESP_ARDUINO_VERSION_STR
+// ESP_ARDUINO_VERSION_STR does not exist in Arduino-ESP32 2.0.17 (found on the real build): compose it.
+#define RS_STR2(x) #x
+#define RS_STR(x) RS_STR2(x)
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && defined(ESP_ARDUINO_VERSION_MINOR) && defined(ESP_ARDUINO_VERSION_PATCH)
+  #define CORE_VERSION_STR RS_STR(ESP_ARDUINO_VERSION_MAJOR) "." RS_STR(ESP_ARDUINO_VERSION_MINOR) "." RS_STR(ESP_ARDUINO_VERSION_PATCH)
 #else
-  #define CORE_VERSION_STR "unknown (<2.0.? or macro unavailable)"
+  #define CORE_VERSION_STR "unknown (version macros unavailable)"
 #endif
 
 static esp_reset_reason_t g_resetReason = ESP_RST_UNKNOWN;
@@ -30,13 +33,13 @@ static void printIrSnapshot(const Config& c) {
   float gap = irCoverageGap(c, &nT, &nU);
   say("INFO", "IR snapshot: %u enabled channel(s), scan cycle %lu us (avg %.0f, max %lu), cycles=%lu, window=%u us",
       (unsigned)irCountEnabled(c), UL(g_scan.cycleUs), g_scan.cycleAvgUs, UL(g_scan.cycleMaxUs), UL(g_scan.cycleCount), (unsigned)c.irWindowUs);
-  say("INFO", " ch label bearing   raw det act edges per_us  hits8 status          (raw: pin level 1=idle for active-low; det: this window; act: smoothed)");
+  say("INFO", " ch label bearing   raw det act edges per_us  hits8 rej status          (raw: pin level 1=idle for active-low; det: this window; act: smoothed; rej: windows rejected by the period gate)");
   for (uint8_t i = 0; i < MUX_CHANNELS; i++) {
     if (!c.ch[i].enabled) continue;
     const IrChan& s = g_ir[i];
-    say("INFO", " C%-2u %-5s %5.0f%s  %u   %u   %u  %5u %6lu  %u/8   %s%s", i, c.ch[i].activeLow ? "AL" : "AH", c.ch[i].bearingDeg,
+    say("INFO", " C%-2u %-5s %5.0f%s  %u   %u   %u  %5u %6lu  %u/8  %4lu %s%s", i, c.ch[i].activeLow ? "AL" : "AH", c.ch[i].bearingDeg,
         c.ch[i].bearingCal ? " " : "?", (unsigned)s.raw, (unsigned)s.detect, (unsigned)s.active, (unsigned)s.edges, UL(s.periodUs),
-        popcount16(s.hist & 0xFF), CH_NAME[irChStatus(c, i)], irTrusted(c, i) ? "" : " [excluded]");
+        popcount16(s.hist & 0xFF), UL(s.offband), CH_NAME[irChStatus(c, i)], irTrusted(c, i) ? "" : " [excluded]");
   }
   if (g_ball.valid || g_ball.anyDetect)
     say("INFO", "ball: %s, direction %.0f deg (heuristic from %u active channel(s)), confidence %.2f (heuristic), channel agreement %.2f%s",
@@ -118,7 +121,10 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
   }
   say(tag, "[IR] channels C12-C15 reserved for future receivers: %s", (c.ch[12].enabled || c.ch[13].enabled || c.ch[14].enabled || c.ch[15].enabled) ? "some ENABLED" : "disabled (not reported as failed)");
   say(tag, "[IR] physical operation: %u of %u enabled receivers verified with the real ball; the rest NOT TESTED (absence of the ball proves nothing)", (unsigned)nv, (unsigned)ne);
-  say(tag, "[IR] trusted=%u (min %u), largest uncovered gap %.0f deg (computed from configured bearings + assumed fov %.0f; real coverage NOT TESTED)", (unsigned)nT, (unsigned)c.minTrusted, gap, c.fovHalfDeg);
+  say(tag, "[IR] trusted=%u (min %u), largest AZIMUTH gap %.0f deg (configured bearings + assumed fov %.0f; real coverage NOT TESTED)", (unsigned)nT, (unsigned)c.minTrusted, gap, c.fovHalfDeg);
+  say(tag, "[IR] WARNING: a gap of 0 deg here does NOT mean continuous coverage. The reported ~40 mm blind zone beside each side of the chassis (between front and rear rings) and height/tilt effects are not representable in this azimuth-only model: a ball inside it may be invisible.");
+  if (c.irPeriodMaxUs) say(tag, "[IR] pulse-period gate ON: accepting mean pulse periods %u..%u us (windows outside are rejected as 'offband')", (unsigned)c.irPeriodMinUs, (unsigned)c.irPeriodMaxUs);
+  else say(tag, "[IR] pulse-period gate OFF: any 2+ pulse pattern below the interference rate is accepted; an unrelated 38-40 kHz source with a similar rhythm could be mistaken for the ball (measure the ball with :verify, then :irgate auto)");
   say(tag, "[IR] TSOP1738 vs 40 kHz ball compatibility: NOT TESTED (must be checked with the real ball: :learn / :verify)");
 
   // --- IMU
@@ -147,6 +153,8 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
       UL(g_stats.ballLossEvents), UL(g_stats.reacquisitions), UL(g_stats.reacquisitions ? g_stats.reacquireTotalMs / g_stats.reacquisitions : 0),
       UL(g_stats.searchTotalMs), UL(g_stats.imuTimeouts), UL(g_stats.degradedTransitions), UL(g_stats.safetyStops), UL(g_stats.logDropped), UL(g_stats.storageFailures));
   say(tag, "stats: channels that failed an operator-run controlled test: mask 0x%04X | imu re-init attempts=%lu recoveries=%lu | scan overruns=%lu", (unsigned)g_stats.channelTestFailMask, UL(g_imu.initAttempts), UL(g_stats.imuRecoveries), UL(g_stats.scanOverruns));
+  say(tag, "[Firmware] stack headroom (lowest ever, bytes): loop task %lu of 8192, log-writer task %lu of 8192 | loop gap max %lu us | heap min free %lu B",
+      UL(uxTaskGetStackHighWaterMark(NULL)), UL(g_logTaskHandle ? uxTaskGetStackHighWaterMark(g_logTaskHandle) : 0), UL(g_loopMaxEverUs), UL(ESP.getFreeHeap()));
   say(tag, "limits: no wheel feedback (PWM shown is COMMANDED); no distance/IR strength; coverage and ball compatibility unproven until tested; software failsafes do not replace wiring/current limits");
   say(tag, "========================================================");
 }

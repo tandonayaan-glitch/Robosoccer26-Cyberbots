@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 3
+#define CFG_VERSION 4
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -46,6 +46,8 @@ struct Config {
   uint8_t irNoisyPerMs;          // more than this many pulses per ms => interference, not a ball
   uint8_t irSettleUs;            // mux settle time before a window opens
   uint8_t irHistMinOn;           // detections in the last 8 windows to switch a channel "active"
+  uint16_t irPeriodMinUs;        // pulse-period gate (0/0 = OFF): accept only mean pulse periods in [min,max] us
+  uint16_t irPeriodMaxUs;        // set from a measured ball with ":irgate auto"; rejects unrelated modulated sources
   uint32_t irStuckMs;            // output held active this long => suspect
   uint32_t irStuckFailMs;        // ... this long => confirmed fault
   float fovHalfDeg;              // assumed half acceptance angle per receiver (coverage maths; ASSUMPTION)
@@ -117,6 +119,8 @@ static const ParamDef PARAMS[] = {
   PD("irnoisy", PT_U8, irNoisyPerMs, 2, 50),
   PD("irsettle", PT_U8, irSettleUs, 2, 100),
   PD("irhistmin", PT_U8, irHistMinOn, 1, 8),
+  PD("irperlo", PT_U16, irPeriodMinUs, 0, 20000),
+  PD("irperhi", PT_U16, irPeriodMaxUs, 0, 20000),
   PD("irstuck", PT_U32, irStuckMs, 500, 30000),
   PD("irstuckfail", PT_U32, irStuckFailMs, 2000, 120000),
   PD("fov", PT_F32, fovHalfDeg, 10, 90),
@@ -208,6 +212,8 @@ static void cfgDefaults(Config& c) {
   c.irNoisyPerMs = 3;     // ball ~1.2 pulses/ms; motor-PWM/interference is several per ms
   c.irSettleUs = 10;
   c.irHistMinOn = 2;
+  c.irPeriodMinUs = 0;     // gate OFF until the real ball has been measured
+  c.irPeriodMaxUs = 0;
   c.irStuckMs = 2000;
   c.irStuckFailMs = 15000;
   c.fovHalfDeg = 35.0f;
@@ -273,7 +279,7 @@ static void repNote(char* rep, size_t n, const char* what) {
 // Replace every out-of-range / non-finite field with its safe default. Returns the number of
 // fields replaced; `rep` receives a comma-separated list of the names.
 static int cfgValidate(Config& c, char* rep, size_t repN) {
-  Config d;
+  static Config d;                         // loop-task only; keeps 0.5 KB off the stack
   cfgDefaults(d);
   int bad = 0;
   if (repN) rep[0] = 0;
@@ -294,6 +300,8 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   }
   if (c.testPwm < c.minPwm || c.testPwm > c.maxManual) { c.testPwm = d.testPwm; bad++; repNote(rep, repN, "testpwm"); }
   if (c.slowSpeed > c.attackSpeed) { c.slowSpeed = d.slowSpeed; c.attackSpeed = d.attackSpeed; bad++; repNote(rep, repN, "slow/attack"); }
+  bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
+  if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
   if (c.irStuckFailMs <= c.irStuckMs) { c.irStuckMs = d.irStuckMs; c.irStuckFailMs = d.irStuckFailMs; bad++; repNote(rep, repN, "irstuck"); }
   for (int i = 0; i < MUX_CHANNELS; i++) {
     ChCfg& h = c.ch[i];

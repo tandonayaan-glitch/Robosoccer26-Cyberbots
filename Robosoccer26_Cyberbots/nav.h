@@ -75,7 +75,9 @@ static void navMarkLoss(const char* where) {
   g_lostAtMs = millis();
   g_lostPending = true;
   say("NAV", "ball lost (%s): loss #%lu, last bearing %.0f deg", where, UL(g_stats.ballLossEvents), g_lastBearing);
-  logEvent("N", "ball_lost");
+  bool sideZone = absf(g_lastBearing) >= 60.0f && absf(g_lastBearing) <= 120.0f;   // diagnostic hint only, no behaviour change
+  if (sideZone) say("NAV", "note: ball vanished near a side bearing (%.0f deg): possible entry into the ~40 mm side blind zone (reported hardware gap)", g_lastBearing);
+  logEvent("N", sideZone ? "ball_lost_side_zone" : "ball_lost");
 }
 
 static bool navEnableAuto(const Config& c, uint32_t now) {
