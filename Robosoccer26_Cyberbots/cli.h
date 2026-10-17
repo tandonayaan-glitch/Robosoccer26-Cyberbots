@@ -23,7 +23,7 @@ static void printHelp() {
   say("INFO", "i : IR snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :irchar <n> [s] [period_us] | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -175,6 +175,16 @@ static void cliExecLine(char* line, uint32_t now) {
     float n2;
     if (!parseF(t[1], &n2) || n2 < 0 || n2 > 15 || !c.ch[(int)n2].enabled) say("WARN", "usage: :verify <enabled channel>  (touch the ball to that receiver's face)");
     else { irProbeStart(2, (uint8_t)n2, 0, 3000, now); say("TEST", "verifying C%d for 3 s - hold the ball against that receiver", (int)n2); }
+  }
+  else if (!strcmp(cmd, "irchar")) {
+    float chn, sec = 3, ref = 0;
+    if (!parseF(t[1], &chn) || chn < 0 || chn > 15 || !c.ch[(int)chn].enabled || (t[2] && (!parseF(t[2], &sec) || sec < 1 || sec > 20)) || (t[3] && (!parseF(t[3], &ref) || ref < 200 || ref > 3000)))
+      say("WARN", "usage: :irchar <enabled channel> [seconds 1..20, default 3] [reference pulse period us 200..3000]");
+    else if (g_autoEnabled || g_probe.mode) say("WARN", "irchar: autonomy must be off and no other probe running");
+    else {
+      irProbeStart(3, (uint8_t)chn, 0, (uint32_t)(sec * 1000.0f), now, (uint32_t)ref);
+      say("TEST", "irchar C%d for %.0f s, reference period %s: robot stationary, source fixed in front of that receiver; the other receivers are not scanned meanwhile", (int)chn, (double)sec, ref > 0 ? "given" : "nominal 833 us");
+    }
   }
   else if (!strcmp(cmd, "irgate")) {
     float lo, hi;

@@ -57,7 +57,7 @@ Bearings: 0° = robot forward, increasing **clockwise** (right = 90°, rear = 18
 5. Decide per evidence: persistent blind spot → change sensor angles, add side receivers (enable up
    to four on C12–C15 with `:ch 12 en 1`, calibrate and verify them), relocate the rings, or change
    the acquisition circuit (`HARDWARE_REVIEW.md` §4). Do not claim full coverage until the table shows it.
-6. Tune `irwindow`, `irminedges`, `irnoisy`, and optionally the pulse-period gate (`:irgate auto` after a `:verify`/`:learn` with the ball) using the `edges` and `per_us` columns of `i` (the measured
+6. Before relying on `:irgate auto`, run the ball/receiver/interference experiment of `docs/IR_HARDWARE_EXPERIMENT.md` (`:irchar`). Tune `irwindow`, `irminedges`, `irnoisy`, and optionally the pulse-period gate (`:irgate auto` after a `:verify`/`:learn` with the ball) using the `edges` and `per_us` columns of `i` (the measured
    pulse pattern of *your* ball). `:save`.
 
 7. **Detector timing with the real ball** (all engine-2 figures in `docs/LATENCY_OPTIMIZATION.md` are simulated; none of them

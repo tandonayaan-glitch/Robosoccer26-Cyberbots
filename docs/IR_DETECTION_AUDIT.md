@@ -85,6 +85,7 @@ real ball's modulation are **not** in these numbers.
 * Before: noise threshold 6 pulses/ms (> 18 per window) accepted a 4.2 kHz interferer as a detection.
   After: **3 pulses/ms (> 9 per window)**: this *tightens* the threshold (it was not relaxed). The ball's nominal 1.2 kHz [2nd] is 0.4 of the limit.
 * Cost: a ball whose envelope were faster than ~3 kHz would be called noisy. The limit is configurable (`:set irnoisy`).
+* (Update: what the gate measures, its weakness against missed bursts, and the hardware experiment that decides it are in `docs/IR_HARDWARE_EXPERIMENT.md`.)
 * The principled complement is the **pulse-period gate** (`:irgate`): measure the real ball with `:verify`/`:learn`
   (the firmware reports mean/min/max pulse period), then `:irgate auto` accepts only ±35 % around it. It
   is **off by default** because the ball's real pattern is unconfirmed; a threshold guessed without a

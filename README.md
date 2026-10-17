@@ -34,6 +34,7 @@ guessing.
 | `docs/LATENCY_OPTIMIZATION.md` | Simulated latency baseline vs optimised, reliability cost, physical limits |
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
 | `docs/LATENCY_OPTIMIZATION.md` | IR detector latency/reliability: method, root causes, engine 2, simulated before/after tables, targets met and unmet, physical limits |
+| `docs/IR_HARDWARE_EXPERIMENT.md` | What the IR golf ball's source code says about its waveform, what `:irgate auto` actually measures, the `:irchar` capture and the step-by-step ball/receiver/interference experiment (no hardware results yet) |
 | `docs/bench/` | Raw benchmark outputs (simulation), static-analysis and real-build logs |
 | `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
 | `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |
@@ -88,7 +89,7 @@ of the format, not a hardware measurement.**
 | `?` | command list |
 
 Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`,
-`:roller <X|O>`, `:ch <n> [<en|pol|trust|bear|tilt> <v>]` (no field = inspect that channel), `:chreset <n>`, `:learn <deg>`, `:verify <n>`,
+`:roller <X|O>`, `:ch <n> [<en|pol|trust|bear|tilt> <v>]` (no field = inspect that channel), `:chreset <n>`, `:learn <deg>`, `:irchar <ch> [s] [period_us]`, `:verify <n>`,
 `:cov`, `:irgate <off|auto|min max>`, `:irprofile <fast|balanced|safe>`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
 `:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
 

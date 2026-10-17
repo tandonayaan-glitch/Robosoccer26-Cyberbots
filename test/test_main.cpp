@@ -2162,6 +2162,90 @@ static void t_engine_switch_at_run_time() {
 }
 
 
+// ---- ":irchar": pulse characterisation and shadow gates -------------------------------------------------------
+static bool outLineAfter(const char* key, std::string* line) {
+  size_t p = Serial.out.rfind(key);
+  if (p == std::string::npos) return false;
+  size_t e = Serial.out.find('\n', p);
+  *line = Serial.out.substr(p, e == std::string::npos ? std::string::npos : e - p);
+  return true;
+}
+static void irCharRun(const char* cmd, uint32_t ms) {
+  Serial.out.clear();
+  send(cmd); simRun(ms);
+}
+static void t_irchar_gate_functions() {
+  // Ball documentation: bursts start every 833 us. A window that lost one burst has the intervals 833 and 1666.
+  const uint32_t ok[4] = {0, 833, 1666, 2499}, lost[3] = {0, 833, 2499}, rhythm[4] = {0, 1250, 2500, 3750}, fast[4] = {0, 300, 600, 900};
+  CHECK(irCombGatePass(ok, 4, 833, 10));
+  CHECK(irCombGatePass(lost, 3, 833, 10));                    // one missed burst is a 2x interval: tolerated
+  CHECK(!irCombGatePass(rhythm, 4, 833, 20));                 // 1250 us spacing is half way between 1x and 2x of 833
+  CHECK(!irCombGatePass(fast, 4, 833, 35));                   // too fast
+  CHECK(!irCombGatePass(ok, 1, 833, 35));                     // one pulse has no interval
+  // the mean-interval gate of ":irgate auto" (+-35 %) calls the same window with the missed burst foreign:
+  CHECK(irMeanGatePass(833, 833, 10) && irMeanGatePass(1100, 833, 35));
+  CHECK(!irMeanGatePass((2499 - 0) / 2, 833, 35));            // mean of {833, 1666} = 1249 us: 50 % off
+  Config c; cfgDefaults(c);
+  c.irPeriodMinUs = (uint16_t)(833 * 0.65f); c.irPeriodMaxUs = (uint16_t)(833 * 1.35f);
+  CHECK(irClassifyWindow(c, 4, 800, 3000, false, false, 833) == WS_DETECT);
+  CHECK(irClassifyWindow(c, 3, 600, 3000, false, false, 1249) == WS_OFFBAND);   // today's gate rejects the window that lost one burst
+}
+static void t_irchar_ball_like() {
+  bootCal();
+  g_simPeriodUs = 833; g_simActiveUs = 190;                   // documented ball: 8 carrier cycles every 833 us (output width is a simulation assumption)
+  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
+  g_simMode[3] = SIM_BALL;
+  uint32_t cyclesBefore = g_scan.cycleCount, chWindows = g_ir[3].windows;
+  irCharRun(":irchar 3 2\n", 2600);
+  CHECK(g_ir[3].windows - chWindows < 40);                    // the capture's ~665 windows were not counted as channel windows (a few ring windows come after it)
+  CHECK(outHas("irchar C3 "));
+  CHECK(g_probe.mode == 0);                                   // finished by itself
+  std::string l;
+  CHECK(outLineAfter("irchar pulse width us", &l));
+  int n = 0, mn = 0, mean = 0, mx = 0;
+  CHECK(sscanf(l.c_str(), "irchar pulse width us (output at active level): n=%d min=%d mean=%d max=%d", &n, &mn, &mean, &mx) == 4);
+  CHECK(n > 100); CHECK(mn >= 170 && mx <= 210); CHECK_NEAR(mean, 190, 15);
+  CHECK(outLineAfter("irchar pulse intervals", &l));
+  int ivN = 0, modeUs = 0;
+  CHECK(sscanf(l.c_str(), "irchar pulse intervals (start to start inside windows): n=%d, most common ~%d us", &ivN, &modeUs) == 2);
+  CHECK(ivN > 100); CHECK_NEAR(modeUs, 833, 30);
+  CHECK(outLineAfter("irchar gate SHADOW", &l));
+  int shN = 0, m10 = 0, m20 = 0, m35 = 0, k10 = 0, k20 = 0, k35 = 0;
+  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
+               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
+  CHECK(shN > 30); CHECK(k35 == shN && m35 == shN);           // a clean periodic source passes both gates
+  CHECK(outHas("NOMINAL 833 us"));
+  // the ring sweep resumes and the probe did not leave a ball track or channel health changes behind
+  simRun(200);
+  CHECK(g_scan.cycleCount > cyclesBefore);
+}
+static void t_irchar_interferer() {
+  bootCal();
+  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
+  g_simMode[2] = SIM_BALL; g_simChPeriod[2] = 1500;           // an unrelated source with a 1500 us rhythm
+  irCharRun(":irchar 2 2 833\n", 2600);
+  CHECK(outHas("reference 833 us (given)"));
+  std::string l;
+  CHECK(outLineAfter("irchar gate SHADOW", &l));
+  int shN = 0, m10 = 0, m20 = 0, m35 = 0, k10 = 0, k20 = 0, k35 = 0;
+  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
+               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
+  CHECK(shN > 20); CHECK(m10 == 0 && m20 == 0 && m35 == 0 && k10 == 0);   // (the +-20 % multiple gate still passes 1500 us: 1500 is 20 % from 2x)
+  // a source whose every second burst is missing (1666 us): the mean-interval gate loses it, the multiple gate keeps it
+  g_simChPeriod[2] = 1666;
+  irCharRun(":irchar 2 2 833\n", 2600);
+  CHECK(outLineAfter("irchar gate SHADOW", &l));
+  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
+               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
+  CHECK(shN > 10 && m35 == 0 && k10 == shN);
+  // bad arguments and the autonomy interlock
+  irCharRun(":irchar 99\n", 50); CHECK(outHas("usage: :irchar"));
+  irCharRun(":irchar 2 100\n", 50); CHECK(outHas("usage: :irchar"));
+  send("a"); simRun(50);
+  irCharRun(":irchar 2 1\n", 50);
+  if (g_autoEnabled) CHECK(outHas("autonomy must be off")); 
+}
+
 static void t_e2_phantom_exposure() {
   // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
   // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
@@ -2196,7 +2280,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

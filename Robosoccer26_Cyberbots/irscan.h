@@ -65,12 +65,43 @@ static volatile bool g_isrInActive = false;
 static volatile uint16_t g_isrEdges = 0;
 static volatile uint32_t g_isrActAcc = 0, g_isrActStart = 0, g_isrFirst = 0, g_isrLast = 0;
 
+// Pulse statistics for ":irchar" (pulse width and gap histograms). Streamed from the ISR only while g_isrChar is set, so
+// normal operation pays one flag test per edge.
+#define CH_WBINS 24              // pulse width histogram: 50 us bins, last bin = overflow
+#define CH_GBINS 32              // gap histogram: 100 us bins, last bin = overflow
+static volatile bool g_isrChar = false;
+static volatile bool g_chTrunc = false;           // the first pulse of this window began before it opened: its width is unknown
+static volatile uint32_t g_chLastEnd = 0;         // when the previous pulse of this window ended (0 = none yet)
+static volatile uint32_t g_chWMin, g_chWMax, g_chWSum, g_chWN, g_chGMin, g_chGMax, g_chGSum, g_chGN;
+static volatile uint32_t g_chW[CH_WBINS], g_chG[CH_GBINS];
+#define CH_STARTS 8
+static volatile uint32_t g_chT[CH_STARTS];        // start time of the first CH_STARTS pulses of the window
+
+static void IRAM_ATTR irCharGap(uint32_t g) {
+  if (g < g_chGMin) g_chGMin = g;
+  if (g > g_chGMax) g_chGMax = g;
+  g_chGSum = g_chGSum + g; g_chGN = g_chGN + 1;
+  uint32_t b = g / 100u; if (b >= CH_GBINS) b = CH_GBINS - 1;
+  g_chG[b] = g_chG[b] + 1;
+}
+static void IRAM_ATTR irCharWidth(uint32_t w) {
+  if (w < g_chWMin) g_chWMin = w;
+  if (w > g_chWMax) g_chWMax = w;
+  g_chWSum = g_chWSum + w; g_chWN = g_chWN + 1;
+  uint32_t b = w / 50u; if (b >= CH_WBINS) b = CH_WBINS - 1;
+  g_chW[b] = g_chW[b] + 1;
+}
+
 static void IRAM_ATTR irIsr() {
   if (!g_isrGate) return;
   bool isActive = (IR_SIG_LEVEL() == g_isrActiveLevel);
   uint32_t t = IR_NOW_US();
   if (isActive) {
     if (!g_isrInActive) {
+      if (g_isrChar) {
+        if (g_chLastEnd) irCharGap(t - g_chLastEnd);
+        if (g_isrEdges < CH_STARTS) g_chT[g_isrEdges] = t;
+      }
       g_isrInActive = true;
       g_isrActStart = t;
       if (g_isrEdges == 0) g_isrFirst = t;
@@ -81,6 +112,10 @@ static void IRAM_ATTR irIsr() {
   } else if (g_isrInActive) {
     g_isrInActive = false;
     g_isrActAcc = g_isrActAcc + (t - g_isrActStart);
+    if (g_isrChar) {
+      if (g_chTrunc) g_chTrunc = false; else irCharWidth(t - g_isrActStart);
+      g_chLastEnd = t;
+    }
   }
 }
 
@@ -145,9 +180,9 @@ static void irNoteEvidence(uint32_t tUs) {
   g_ball.lastEvidenceUs = tUs;
 }
 
-// operator probes (":learn" coverage mapping, ":verify" controlled receiver test)
+// operator probes (":learn" coverage mapping, ":verify" controlled receiver test, ":irchar" pulse characterisation)
 struct Probe {
-  uint8_t mode;           // 0 none, 1 learn, 2 verify
+  uint8_t mode;           // 0 none, 1 learn, 2 verify, 3 irchar
   uint8_t ch;
   float deg;
   uint32_t endMs;
@@ -155,6 +190,24 @@ struct Probe {
   uint32_t perSum, perN, perMin, perMax;   // pulse periods (us) of windows with >= 3 pulses
 };
 static Probe g_probe;
+// ":irchar": one receiver watched with back-to-back windows, every window classified exactly as in normal operation.
+#define CH_PBINS 32              // window-period histogram: 100 us bins, last bin = overflow
+#define CH_IBINS 160             // pulse-interval histogram: 20 us bins up to 3.2 ms
+struct IrCharStat {
+  uint32_t startUs;
+  uint32_t windows, invalid, cls[6];             // cls[] indexed by WinState
+  uint32_t edgeSum, edgeHist[6];                 // edges per window: 0..4, 5+
+  uint32_t per[CH_PBINS], perN, perSum;          // mean pulse period of windows with >= 2 pulses (the statistic the gate acts on)
+  uint32_t run, longestRun, runs[7];             // consecutive windows without a (pre-gate) detection: 1,2,3-4,5-8,9-16,17-32,33+
+  bool seenDetect;
+  // pulse-to-pulse intervals (start to start) inside a window, and two candidate gates evaluated against a reference period
+  uint32_t refUs;                                // reference period the shadow gates are judged against
+  bool refGiven;                                 // false = the nominal 833 us of the ball documentation
+  uint16_t iv[CH_IBINS];                         // interval histogram, 20 us bins (saturating)
+  uint32_t ivN, kN[5], kOut;                     // intervals total; near 1x..4x the reference; elsewhere
+  uint32_t shN, shMean[3], shComb[3];            // pre-gate detections with >= 2 pulses; pass counts at +-10, 20, 35 %
+};
+static IrCharStat g_char;
 struct PeriodStat { uint32_t n, mean, minUs, maxUs; };
 static PeriodStat g_lastPeriod;           // result of the last probe, input to ":irgate auto"
 struct CovRow { float deg; uint16_t mask; uint8_t pct[MUX_CHANNELS]; };
@@ -258,6 +311,7 @@ static void irOpenWindow(const Config& c, uint8_t ch) {
   }
   g_scan.lastOpenUs[ch] = t ? t : 1u;
   g_isrInActive = (digitalRead(PIN_MUX_SIG) == g_isrActiveLevel);
+  g_chTrunc = g_isrInActive; g_chLastEnd = 0;
   g_isrActStart = t;
   g_scan.winStartUs = t;
   g_scan.cur = ch;
@@ -303,6 +357,67 @@ static void irChannelUpdate(const Config& c, uint8_t ch, WinState ws, uint32_t n
 }
 
 static void irProbeFinish(Config& c, uint32_t nowMs);
+
+// ":irchar" window bookkeeping. Pre-gate detection = DETECT or OFFBAND (OFFBAND = enough pulses but rejected by the period gate).
+static const uint8_t CH_TOL[3] = {10, 20, 35};
+// Shadow gate 1 = what ":irgate" does today: the MEAN pulse interval of the window within +-tol % of the reference.
+static bool irMeanGatePass(uint32_t periodUs, uint32_t refUs, uint32_t tolPct) {
+  uint32_t dev = periodUs > refUs ? periodUs - refUs : refUs - periodUs;
+  return (uint64_t)dev * 100u <= (uint64_t)tolPct * refUs;
+}
+// Shadow gate 2 (candidate, not used by the detector): EVERY interval between consecutive pulse starts must sit within +-tol % of the
+// reference of a whole multiple (1..4) of it, so a missed burst (interval = 2x) is tolerated and an unrelated rhythm is not.
+static bool irCombGatePass(const uint32_t* t, uint8_t n, uint32_t refUs, uint32_t tolPct) {
+  if (n < 2 || refUs == 0) return false;
+  for (uint8_t i = 1; i < n; i++) {
+    uint32_t d = t[i] - t[i - 1];
+    uint32_t k = (d + refUs / 2) / refUs;
+    if (k < 1 || k > 4) return false;
+    uint32_t target = k * refUs, dev = d > target ? d - target : target - d;
+    if ((uint64_t)dev * 100u > (uint64_t)tolPct * refUs) return false;
+  }
+  return true;
+}
+
+static void irCharWindow(uint8_t ch, WinState ws, uint16_t edges, uint32_t periodUs, const uint32_t* starts, uint8_t nStarts) {
+  if (ws == WS_INVALID) { g_char.invalid++; return; }
+  g_char.windows++;
+  g_char.cls[ws]++;
+  g_char.edgeSum += edges;
+  g_char.edgeHist[edges > 5 ? 5 : edges]++;
+  if (edges >= 2) { uint32_t b = periodUs / 100u; g_char.per[b >= CH_PBINS ? CH_PBINS - 1 : b]++; g_char.perN++; g_char.perSum += periodUs; }
+  bool det = (ws == WS_DETECT || ws == WS_OFFBAND);
+  for (uint8_t i = 1; i < nStarts; i++) {          // intervals between consecutive pulse starts
+    uint32_t d = starts[i] - starts[i - 1], b = d / 20u;
+    if (b >= CH_IBINS) b = CH_IBINS - 1;
+    if (g_char.iv[b] < 65535) g_char.iv[b]++;
+    g_char.ivN++;
+    uint32_t k = (d + g_char.refUs / 2) / g_char.refUs;
+    if (k >= 1 && k <= 4 && irMeanGatePass(d, k * g_char.refUs, 35)) g_char.kN[k]++; else g_char.kOut++;
+  }
+  if (det && edges >= 2 && nStarts >= 2) {
+    g_char.shN++;
+    for (uint8_t i = 0; i < 3; i++) {
+      if (irMeanGatePass(periodUs, g_char.refUs, CH_TOL[i])) g_char.shMean[i]++;
+      if (irCombGatePass(starts, nStarts, g_char.refUs, CH_TOL[i])) g_char.shComb[i]++;
+    }
+  }
+  if (det) {
+    if (g_char.run) { g_char.runs[g_char.run == 1 ? 0 : g_char.run == 2 ? 1 : g_char.run <= 4 ? 2 : g_char.run <= 8 ? 3 : g_char.run <= 16 ? 4 : g_char.run <= 32 ? 5 : 6]++; }
+    g_char.run = 0; g_char.seenDetect = true;
+  } else if (g_char.seenDetect) {
+    g_char.run++;
+    if (g_char.run > g_char.longestRun) g_char.longestRun = g_char.run;
+  }
+  g_probe.windows[ch]++;
+  if (ws == WS_DETECT) g_probe.hits[ch]++;
+  if (edges > g_probe.maxEdges[ch]) g_probe.maxEdges[ch] = edges;
+  if (det && edges >= 3 && periodUs) {            // same input as ":irgate auto" gets from the other probes
+    g_probe.perSum += periodUs; g_probe.perN++;
+    if (!g_probe.perMin || periodUs < g_probe.perMin) g_probe.perMin = periodUs;
+    if (periodUs > g_probe.perMax) g_probe.perMax = periodUs;
+  }
+}
 static void irVisit2(const Config& c, uint8_t ch, bool detect, uint32_t tUs);
 
 static void irCloseWindow(Config& c, uint32_t nowMs) {
@@ -327,6 +442,15 @@ static void irCloseWindow(Config& c, uint32_t nowMs) {
   WinState ws;
   if (actual > g_scan.lastWinPlannedUs + g_scan.lastWinPlannedUs / 2 + 500) { ws = WS_INVALID; g_scan.lastBlindUs = actual - g_scan.lastWinPlannedUs; }   // loop was late
   else ws = irClassifyWindow(c, edges, acc, actual, startActive, endActive, s.periodUs);
+  if (g_probe.mode == 3) {                       // characterisation: measure only, leave receiver health and the ball track alone
+    uint32_t st[CH_STARTS] = {0};
+    uint8_t ns = edges < CH_STARTS ? (uint8_t)edges : (uint8_t)CH_STARTS;
+    for (uint8_t i = 0; i < ns; i++) st[i] = g_chT[i];
+    irCharWindow(ch, ws, edges, s.periodUs, st, ns);
+    g_scan.lastCycleMs = nowMs;                  // the scan is deliberately parked on one receiver: not a stalled scan
+    g_scan.open = false;
+    return;
+  }
   irChannelUpdate(c, ch, ws, nowMs);
   if (ws == WS_DETECT) { s.lastDetectUs = t; if (irTrusted(c, ch)) irNoteEvidence(t); }
   if (c.engine == 2 && ws != WS_INVALID) irVisit2(c, ch, ws == WS_DETECT && irTrusted(c, ch), t);
@@ -738,6 +862,7 @@ static void irRestartSchedule() {
 // weak track is being watched. Strong tracks and idle scanning use the plain ring.
 static uint8_t irPickNext(const Config& c, bool* ringWrapped, bool* focus) {
   *focus = false; *ringWrapped = false;
+  if (g_probe.mode == 3) return g_probe.ch;      // ":irchar" watches one receiver back to back
   if (c.engine == 2 && g_focusMask && g_scan.ringRun >= 1) {
     for (uint8_t k = 1; k <= MUX_CHANNELS; k++) {
       uint8_t i = (uint8_t)((g_scan.focusLast + k) % MUX_CHANNELS);
@@ -768,6 +893,12 @@ static void irService(Config& c, uint32_t nowMs) {
   } else if ((uint32_t)(nowUs - g_scan.winStartUs) >= c.irWindowUs) {
     uint8_t closed = g_scan.cur;
     irCloseWindow(c, nowMs);
+    if (g_probe.mode == 3) {
+      if (deadlineReached(nowMs, g_probe.endMs)) irProbeFinish(c, nowMs);   // the next call restarts the ring schedule
+      else { bool w, f; irOpenWindow(c, irPickNext(c, &w, &f)); }
+      irBallTimeout(c, nowMs);
+      return;
+    }
     if (c.engine == 2) irEstimate2(c, micros(), nowMs, closed, g_ir[closed].winState == WS_DETECT && irTrusted(c, closed), g_scan.lastBlindUs);
     bool wrapped, focus;
     uint8_t next = irPickNext(c, &wrapped, &focus);
@@ -789,14 +920,85 @@ static void irService(Config& c, uint32_t nowMs) {
 }
 
 // ---- operator probes -----------------------------------------------------------------------
-static void irProbeStart(uint8_t mode, uint8_t ch, float deg, uint32_t durMs, uint32_t nowMs) {
+static void irProbeStart(uint8_t mode, uint8_t ch, float deg, uint32_t durMs, uint32_t nowMs, uint32_t refUs = 0) {
   memset(&g_probe, 0, sizeof(g_probe));
   g_probe.mode = mode; g_probe.ch = ch; g_probe.deg = deg;
   g_probe.endMs = nowMs + durMs;
+  if (mode == 3) {
+    g_isrChar = false;
+    memset(&g_char, 0, sizeof(g_char));
+    g_char.startUs = micros();
+    g_char.refUs = refUs ? refUs : 833; g_char.refGiven = refUs != 0;
+    g_chWMin = 0xFFFFFFFFu; g_chGMin = 0xFFFFFFFFu;
+    g_chWMax = 0; g_chGMax = 0; g_chWSum = 0; g_chWN = 0; g_chGSum = 0; g_chGN = 0;
+    for (uint8_t i = 0; i < CH_WBINS; i++) g_chW[i] = 0;
+    for (uint8_t i = 0; i < CH_GBINS; i++) g_chG[i] = 0;
+    g_isrGate = false; g_scan.open = false;     // the next service call opens the first window on the chosen receiver
+    g_isrChar = true;
+  }
+}
+
+// One line of "lo-hi:count" cells for the non-empty bins of a histogram (the last bin is open-ended).
+template <typename T>
+static void irCharHistLine(const char* name, const T* h, uint8_t nb, uint32_t binUs) {
+  char b[256];
+  int n = snprintf(b, sizeof(b), "%s", name);
+  for (uint8_t i = 0; i < nb && n > 0 && n < (int)sizeof(b) - 24; i++) {
+    if (!h[i]) continue;
+    if (i == nb - 1) n += snprintf(b + n, sizeof(b) - (size_t)n, " >=%lu:%lu", UL(i * binUs), UL((uint32_t)h[i]));
+    else n += snprintf(b + n, sizeof(b) - (size_t)n, " %lu-%lu:%lu", UL(i * binUs), UL((i + 1) * binUs - 1), UL((uint32_t)h[i]));
+  }
+  say("TEST", "%s", b);
+}
+
+static void irCharReport(const Config& c) {
+  uint8_t ch = g_probe.ch;
+  uint32_t elapsedUs = micros() - g_char.startUs;
+  uint32_t w = g_char.windows;
+  uint32_t pre = g_char.cls[WS_DETECT] + g_char.cls[WS_OFFBAND];
+  uint32_t cadence = w ? elapsedUs / w : 0;
+  say("TEST", "irchar C%u %lu ms: %lu windows of %u us (one per %lu us, %lu invalid) | pre-gate detections %lu (%.1f%%), passed gate %lu, rejected by gate %lu | none %lu, noisy %lu, stuck %lu",
+      ch, UL(elapsedUs / 1000), UL(w), (unsigned)c.irWindowUs, UL(cadence), UL(g_char.invalid), UL(pre), w ? 100.0f * (float)pre / (float)w : 0.0f,
+      UL(g_char.cls[WS_DETECT]), UL(g_char.cls[WS_OFFBAND]), UL(g_char.cls[WS_NONE]), UL(g_char.cls[WS_NOISY]), UL(g_char.cls[WS_STUCK]));
+  if (c.irPeriodMaxUs) say("TEST", "irchar gate: %u..%u us is ON; gate pass rate of pre-gate detections = %.1f%% (%lu of %lu)", (unsigned)c.irPeriodMinUs, (unsigned)c.irPeriodMaxUs,
+      pre ? 100.0f * (float)g_char.cls[WS_DETECT] / (float)pre : 0.0f, UL(g_char.cls[WS_DETECT]), UL(pre));
+  else say("TEST", "irchar gate: OFF (set one with ':irgate auto' or ':irgate <min> <max>', then capture again to see its pass rate)");
+  if (g_chWN) say("TEST", "irchar pulse width us (output at active level): n=%lu min=%lu mean=%lu max=%lu", UL(g_chWN), UL(g_chWMin), UL(g_chWSum / g_chWN), UL(g_chWMax));
+  else say("TEST", "irchar pulse width: no complete pulse seen");
+  if (g_chGN) say("TEST", "irchar gap us (inactive time between pulses in a window): n=%lu min=%lu mean=%lu max=%lu", UL(g_chGN), UL(g_chGMin), UL(g_chGSum / g_chGN), UL(g_chGMax));
+  uint32_t wcopy[CH_WBINS], gcopy[CH_GBINS];
+  for (uint8_t i = 0; i < CH_WBINS; i++) wcopy[i] = g_chW[i];
+  for (uint8_t i = 0; i < CH_GBINS; i++) gcopy[i] = g_chG[i];
+  irCharHistLine("irchar width hist (50 us bins):", wcopy, CH_WBINS, 50);
+  irCharHistLine("irchar gap hist (100 us bins):", gcopy, CH_GBINS, 100);
+  if (g_char.perN) say("TEST", "irchar window period us (windows with >= 2 pulses, the value the gate tests): n=%lu mean=%lu", UL(g_char.perN), UL(g_char.perSum / g_char.perN));
+  irCharHistLine("irchar window period hist (100 us bins):", g_char.per, CH_PBINS, 100);
+  say("TEST", "irchar pulses per window: 0:%lu 1:%lu 2:%lu 3:%lu 4:%lu 5+:%lu (mean %.2f)", UL(g_char.edgeHist[0]), UL(g_char.edgeHist[1]), UL(g_char.edgeHist[2]), UL(g_char.edgeHist[3]),
+      UL(g_char.edgeHist[4]), UL(g_char.edgeHist[5]), w ? (double)g_char.edgeSum / (double)w : 0.0);
+  // pulse-to-pulse rhythm: where the intervals between consecutive pulse starts cluster, and how the two gates would have judged this capture
+  if (g_char.ivN) {
+    uint8_t mb = 0;
+    for (uint8_t i = 1; i < CH_IBINS - 1; i++) if (g_char.iv[i] > g_char.iv[mb]) mb = i;
+    uint32_t modeUs = (uint32_t)mb * 20u + 10u, lo = modeUs - modeUs / 10u, hi = modeUs + modeUs / 10u, sum = 0, n = 0;
+    for (uint8_t i = 0; i < CH_IBINS - 1; i++) { uint32_t cen = (uint32_t)i * 20u + 10u; if (cen >= lo && cen <= hi) { sum += cen * g_char.iv[i]; n += g_char.iv[i]; } }
+    say("TEST", "irchar pulse intervals (start to start inside windows): n=%lu, most common ~%lu us (20 us bins; mean of the +-10%% around it %lu us) -> repeat captures of other sources with ':irchar %u <s> %lu'",
+        UL(g_char.ivN), UL(modeUs), UL(n ? sum / n : 0), (unsigned)ch, UL(n ? sum / n : modeUs));
+    irCharHistLine("irchar interval hist (20 us bins):", g_char.iv, CH_IBINS, 20);
+    uint32_t tot = g_char.kN[1] + 2 * g_char.kN[2] + 3 * g_char.kN[3] + 4 * g_char.kN[4];
+    say("TEST", "irchar vs reference %lu us (%s): intervals near 1x:%lu 2x:%lu 3x:%lu 4x:%lu, elsewhere:%lu | pulses delivered %.1f%% of the bursts the intervals span",
+        UL(g_char.refUs),  g_char.refGiven ? "given" : "NOMINAL 833 us from the ball documentation, not measured", UL(g_char.kN[1]), UL(g_char.kN[2]), UL(g_char.kN[3]), UL(g_char.kN[4]), UL(g_char.kOut),
+        tot ? 100.0f * (float)(g_char.kN[1] + g_char.kN[2] + g_char.kN[3] + g_char.kN[4]) / (float)tot : 0.0f);
+  }
+  if (g_char.shN) say("TEST", "irchar gate SHADOW (reference %lu us, %lu pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %lu/%lu/%lu at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %lu/%lu/%lu",
+      UL(g_char.refUs), UL(g_char.shN), UL(g_char.shMean[0]), UL(g_char.shMean[1]), UL(g_char.shMean[2]), UL(g_char.shComb[0]), UL(g_char.shComb[1]), UL(g_char.shComb[2]));
+  say("TEST", "irchar silent runs between detections (windows): 1:%lu 2:%lu 3-4:%lu 5-8:%lu 9-16:%lu 17-32:%lu 33+:%lu | longest %lu windows = about %lu ms",
+      UL(g_char.runs[0]), UL(g_char.runs[1]), UL(g_char.runs[2]), UL(g_char.runs[3]), UL(g_char.runs[4]), UL(g_char.runs[5]), UL(g_char.runs[6]),
+      UL(g_char.longestRun), UL((uint32_t)((uint64_t)g_char.longestRun * cadence / 1000u)));
 }
 
 static void irProbeFinish(Config& c, uint32_t nowMs) {
   (void)nowMs;
+  g_isrChar = false;
   g_lastPeriod.n = g_probe.perN;
   g_lastPeriod.mean = g_probe.perN ? g_probe.perSum / g_probe.perN : 0;
   g_lastPeriod.minUs = g_probe.perMin; g_lastPeriod.maxUs = g_probe.perMax;
@@ -833,6 +1035,12 @@ static void irProbeFinish(Config& c, uint32_t nowMs) {
       say("TEST", "C%u %s: only %lu/%lu windows detected (needed %lu). Fails=%u. Check the ball is on and at the receiver face before concluding it is faulty.",
           ch, c.ch[ch].verifyFails >= 2 ? "FAIL" : "SUSPECT", UL(h), UL(w), UL(need), (unsigned)c.ch[ch].verifyFails);
     }
+  }
+  else if (g_probe.mode == 3) {                  // irchar: pulse shape of whatever the receiver sees
+    irCharReport(c);
+    g_probe.mode = 0;
+    irRestartSchedule();                         // resume the ring sweep on a clean schedule
+    return;
   }
   g_probe.mode = 0;
 }
