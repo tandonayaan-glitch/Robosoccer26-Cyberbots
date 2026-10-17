@@ -36,6 +36,10 @@ Software behaviour referenced below was verified in simulation only (`docs/VERIF
 - [ ] 38 kHz receiver vs 40 kHz ball: range achieved vs required – **decision recorded** (keep, change receiver, or change acquisition).
 - [ ] Enter measured bearings (`:ch <n> bear <deg>`), mounting tilt metadata, `:save`.
 - [ ] No false ball for 60 s with the ball off and with the room's other IR sources active.
+- [ ] Real-ball hit statistics (`docs/CALIBRATION_AND_TEST_PLAN.md` §D.7): `d` after 30 s of a steady ball at 10/20/40/60 cm: measured miss fraction and grace period recorded per position; the positions where the signal flickers are listed.
+- [ ] Dropout test with a hand-held card (50-250 ms): which gaps keep the track, close versus far; `losthold`, `flickerhold`, `losthold_max` set from the result.
+- [ ] Phantom-acquisition test with unrelated IR sources (remote, phone flash, another robot) for 60 s: count recorded; `:irprofile` chosen on the evidence.
+- [ ] Physical latency with a logic analyser (emitter switch -> motor EN), 20 appearances and 20 disappearances: distribution recorded next to the simulated tables. **No latency figure in the repository is a robot measurement until this is done.**
 
 ## Phase 4 – IMU checks (motors off)
 - [ ] 60 s still: heading drift recorded; unplug SDA/SCL → `IMU_TIMEOUT` DEGRADED, reconnect → verified recovery.

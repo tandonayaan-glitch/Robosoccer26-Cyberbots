@@ -404,13 +404,14 @@ static SoakResult benchSoak(uint32_t totalSeconds, uint32_t seed) {
   bool ballTruth = false; uint64_t truthEnd = 0, graceUntil = 0, dropUntil = 0;
   bool wasValid = g_ball.valid; bool segAcquired = false; uint64_t segStart = 0; int segMask = 0; double segMiss = 0;
   uint64_t nextEvent = g_mockUs + 200000; int phase = 0;           // 0 idle, 1 ball
-  bool lossWatch = false; bool burstElig = false, burstGot = false; uint64_t phantomStart = 0; bool phantomRun = false;
+  bool lossWatch = false; bool burstElig = false, burstGot = false, prevBurstElig = false; int prevShape = 0; uint64_t prevLen = 0; uint64_t phantomStart = 0; bool phantomRun = false;
   uint64_t burstEnd = 0; int burstMask_ = 0; bool inDrop = false; int dbgShape = -1; uint64_t dbgBurstStart = 0, dbgBurstLen = 0;
   uint64_t nextBurst = g_mockUs + 500000;
   while (g_mockUs < end) {
     uint64_t now = g_mockUs;
     if (now >= nextEvent) {
-      if (phase == 0) {                                                // start a ball segment
+      if (phase == 0 && getenv("NOBALL")) { nextEvent = now + 1000000ULL; }
+      else if (phase == 0) {                                                // start a ball segment
         phase = 1; ballTruth = true; segStart = now; segAcquired = false; R.ballSegments++;
         int nrx = 1 + rand() % 3; float deg = (float)(rand() % 360);
         static const double MISS[4] = {0.0, 0.1, 0.3, 0.5};
@@ -434,8 +435,10 @@ static SoakResult benchSoak(uint32_t totalSeconds, uint32_t seed) {
     if (!burstEnd && now >= nextBurst && !getenv("NOBURST")) {                                // interference burst: 10 - 250 ms, random shape
       int shape = rand() % 5; int base = rand() % 12; burstMask_ = burstMask(shape, base);
       if (phase == 1) burstMask_ &= ~segMask;                           // do not cover the ball's own receivers
+      if (getenv("SOAKDBG2") && prevBurstElig) printf("BURST shape=%d len=%.0f got=%d\n", prevShape, (double)prevLen / 1e3, (int)burstGot);
+      prevBurstElig = false;
       burstElig = (!g_ball.valid && phase == 0);
-      if (burstMask_) { if (burstElig) { R.burstsEligible++; burstGot = false; } burstOn(shape, burstMask_); dbgBurstLen = (uint64_t)(10 + rand() % 241) * 1000ULL; burstEnd = now + dbgBurstLen; dbgShape = shape; dbgBurstStart = now; R.burstsInjected++; }
+      if (burstMask_) { if (burstElig) { R.burstsEligible++; burstGot = false; } burstOn(shape, burstMask_); dbgBurstLen = (uint64_t)(10 + rand() % 241) * 1000ULL; burstEnd = now + dbgBurstLen; dbgShape = shape; dbgBurstStart = now; R.burstsInjected++; prevBurstElig = burstElig; prevShape = shape; prevLen = dbgBurstLen; }
       nextBurst = now + (uint64_t)(300 + rand() % 2200) * 1000ULL;
     }
     benchStep();

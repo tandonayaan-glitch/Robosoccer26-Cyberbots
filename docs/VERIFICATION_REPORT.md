@@ -6,7 +6,7 @@ Every claim in this repository carries one of these evidence classes. Nothing is
 |---|---|---|
 | **A. REAL-BUILD** | Compiled by the real Arduino-ESP32 core + Xtensa GCC | **Done for 2.0.17 and 3.0.7** (§1) |
 | **B. EMU** | The real compiled binary executed in a third-party ESP32 emulator | Boot-level only (§2) |
-| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 69 cases × 2 API shapes (§3) |
+| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 87 cases × 2 API shapes (§3) |
 | **D. STATIC** | cppcheck, clang-tidy, Valgrind, sanitizers, compiler warnings | Done (§4) |
 | **E. ELECTRICAL** | Needs inspection/measurement of the real circuit | **Not done** |
 | **F. BALL** | Needs the real competition ball | **Not done** |
@@ -20,8 +20,8 @@ Every claim in this repository carries one of these evidence classes. Nothing is
 
 | Core | Compiler | arduino-cli | Result | Flash | RAM (static) | Warnings |
 |---|---|---|---|---|---|---|
-| Arduino-ESP32 **2.0.17** (IDF 4.4.7) | xtensa-esp32-elf-gcc 8.4.0 (esp-2021r2-patch5) | 0.35.3 | **success** | 412,477 B (31 %) | 69,340 B (21 %) | **0** |
-| Arduino-ESP32 **3.0.7** (IDF 5.1.4) | xtensa-esp32-elf-gcc 12.2 (esp-x32 2302) | 1.1.1 | **success** | 434,001 B (33 %) | 68,184 B (20 %) | **0** |
+| Arduino-ESP32 **2.0.17** (IDF 4.4.7) | xtensa-esp32-elf-gcc 8.4.0 (esp-2021r2-patch5) | 0.35.3 | **success** | 420,401 B (32 %) | 70,500 B (21 %) | **0** |
+| Arduino-ESP32 **3.0.7** (IDF 5.1.4) | xtensa-esp32-elf-gcc 12.2 (esp-x32 2302) | 1.1.1 | **success** | 442,257 B (33 %) | 69,344 B (21 %) | **0** |
 
 Command (per core): `arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all Robosoccer26_Cyberbots`.
 
@@ -43,7 +43,7 @@ Command: `./test/run_tests.sh` (cleans `/tmp/mockfs*`, then for **mock core v3 a
 
 **Final result: 70 test cases × 2 core API shapes = 140 runs, 140 passed, 0 failed, 5,108 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
 
-Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · current = **70**. The suite grew as audits added regression tests.
+Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · `89c3503` = 70 · current = **87** (the engine-2 regression tests listed below were added). The suite grew as audits added regression tests.
 
 | Area (requirement) | Test cases |
 |---|---|
@@ -58,6 +58,7 @@ Reconciliation of the counts quoted during development (counted from `git show <
 | Serial interface | `t_cli_robust` (CR/LF, NUL, high bytes, 4000-byte fuzz, overlong/unterminated lines), `t_diag_no_motion`, `t_live_ir_rate` |
 | Storage / logging / export | `t_fs_missing`, `t_fs_write_failure`, `t_fs_full`, `t_fs_commands` (format + watchdog + no false stall), `t_log_rotation`, `t_log_queue_overflow`, `t_flight_recorder`, `t_export` (CRC and row count == rows on disk), `t_nonblocking` |
 | Reports | `t_health_report_text`, `t_fault_report_format` |
+| Detector (engine 2) and its fallback | `t_e2_broadband_tail` (arc left after a broadband burst is not a ball), `t_e2_stall_is_not_absence`, `t_e2_focus_scheduling` (strong track: no extra windows; flickering track: focus, no receiver starved), `t_e2_grace_period_bounds`, `t_e2_dropout_survival`, `t_e2_reacquisition`, `t_e2_stop_after_loss` (brake before search, no wheel reversal), `t_e2_view_transitions`, `t_e2_stale_not_followed`, `t_e2_micros_wrap_steady`, `t_e2_micros_wrap_flicker`, `t_startup_schedule`, `t_scan_revisit_metrics`, `t_e2_config_params`, `t_irprofile`, `t_legacy_fallback`, `t_engine_switch_at_run_time`, `t_fast_engine_rejection`, `t_latency` |
 
 Measured in simulation (not on hardware): scan cycle 36.1 ms; acquisition 57–143 ms (see docs/LATENCY_OPTIMIZATION.md; legacy engine 153–240 ms); loss 141 ms (legacy 546 ms); bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
 
@@ -80,6 +81,15 @@ Measured in simulation (not on hardware): scan cycle 36.1 ms; acquisition 57–1
 | 8 | Review omitted GPIO4 from the strapping list | real `gpio_struct.h` | documentation corrected |
 | 9 | Scan never started if all channels were disabled at boot; `:fsformat` could trip the watchdog / false loop-stall | earlier review | fixed with regression tests (`t_boot_no_channels`, `t_fs_commands`) |
 | 10 | Config version bumped to 4 (new gate fields): a saved v3 config is rejected with a clear message and defaults load | change | by design |
+| 11 | The `89c3503` estimator (engine 1) was not as reliable as reported: weak-signal false losses (30 % misses: 5/min vs 0), dropout tolerance 100 ms vs 300 ms, burst acceptance higher for adjacent-receiver bursts; single-trial benchmarks had hidden it | benchmark v2 (seeded, 240 phases, soak with ground truth) | replaced by engine 2; engine 1 removed (`docs/LATENCY_OPTIMIZATION.md` §3) |
+| 12 | Quality estimate that grew while the ball was gone (hold up to the maximum for strong signals) | benchmark: loss 318 ms instead of 120 ms | grace period fixed at the last good evidence |
+| 13 | After a broadband burst the receivers hit first aged out first and the arc left looked like a large local source: accepted as a ball | soak with ground truth, debug trace | open-episode ambiguity check; `t_e2_broadband_tail` |
+| 14 | A loop stall closed the window late, the track aged by the stall and was declared lost | stall benchmark (75 false losses in 60 s at 100 ms stalls) | stalled time credited back (bounded); `t_e2_stall_is_not_absence` |
+| 15 | The fast re-acquisition path compared the new evidence with itself (the candidate overwrote the last bearing) | test `t_e2_reacquisition` | separate `lostBearingDeg` |
+| 16 | Losing a track wiped the evidence of a different ball already being confirmed (opposite-sector jump 250 ms instead of 140 ms) | direction benchmark phase trace | evidence is cleared only inside the lost track's gate |
+| 17 | The decision to watch a track more closely depended on the ring time in milliseconds: a slightly slower real loop would have switched it on for good | parameter sweep (`losseps`, `losthold`) | decided from the measured miss statistics |
+| 18 | `scan cycle` was the only timing metric; per-receiver revisit time and window lateness were not measured, so a stall was invisible | review of the 36.12 ms figure | `revisitMaxUs[]`, `winOverrunMaxUs`, reported by `i`/`h`; the cycle is documented as the ring sweep |
+| 19 | After a loss the search rotation was started immediately, reversing two wheels through the dead-time pause | motor-path trace | brake first, then rotate (`t_e2_stop_after_loss`) |
 
 ## 6. H – Unverified (no evidence either way)
 TSOP1738 datasheet values; the ball's carrier/modulation/mode and which league uses it; current rules text; ESP32 reset-state pull strengths; L298N board input conditioning; motor stall current; receiver supply voltage/pinout; MPU6050 breakout wiring; the exact ESP-32S module (PSRAM?); real scan timing and flash-stall duration; real IMU noise, sign and drift.

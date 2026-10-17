@@ -53,14 +53,22 @@ acquisition front end. The firmware does not substitute parts.
 
 ### Timing (simulation numbers unless stated) [HOST]
 
-| Quantity | Value |
-|---|---|
-| Scan cycle (12 ch × (3000+10) µs) | 36.1 ms measured in simulation (≈ 28 Hz); **not measured on hardware [PHYS]** |
-| Observation duty per receiver | 3 ms of every 36 ms ≈ 8 % |
-| Ball appears → acted on (single verified receiver) | **189 ms** (`t_latency`) |
-| Ball appears → acted on (two adjacent receivers) | **125 ms** |
-| Ball disappears → declared lost | **537 ms** (hold 500 ms + ≤ 2 windows). *Found by test:* originally 718 ms because the 8-window smoothing history kept refreshing the "last good" timestamp; freshness now comes only from the latest two windows. |
-| Responsiveness consequence | At 0.5 m/s the robot travels ≈ 6–9 cm before acquiring and ≈ 27 cm before declaring the ball lost. That may be too slow for fast play; tune `losthold`, `irwindow`, `irhistmin`, or move to parallel acquisition (`HARDWARE_REVIEW.md` §4). |
+Measured by the seeded benchmark of `docs/LATENCY_OPTIMIZATION.md` (240 injection phases over two scan cycles per distribution; raw
+output in `docs/bench/`). **No figure here is a robot measurement [PHYS].**
+
+| Quantity | Legacy engine (`engine 0`) | Engine 2 (default) |
+|---|---|---|
+| Ring cycle (12 ch × (3000+10) µs) | 36.12 ms; this is also the revisit interval of every receiver while the ring is idle. While a candidate or a flickering track is watched, up to three receivers are visited every second window and the others wait up to two ring cycles. Loop stalls lengthen both (measured per receiver, `i`/`h`). | same |
+| Observation duty per receiver | 3 ms of every 36 ms ≈ 8 % | same (ring); several times higher for the watched receivers |
+| Ball appears → confirmed, 1 / 2 / 3 receivers (median / p95) | 224/240 · 152/168 · 118/134 ms | 160/177 · 90/105 · 87/102 ms (default `balanced`); 127/144 · 58/72 · 52/66 ms with `:irprofile fast` |
+| Ball disappears → declared lost (steady signal, median / p95) | 545/561 ms | 134/149 ms |
+| Ball disappears → declared lost (flickering signal) | 536/560 ms | 285/291 ms (longer grace on purpose) |
+| Declared lost → translation ≤ 10 % of steady (commanded PWM, not wheel speed) | +50 ms … see the document | brake-first, +50 ms |
+| Consequence at 0.5 m/s | ≈ 11 cm before acquiring (1 receiver), ≈ 27 cm before declaring the ball lost | ≈ 8 cm, ≈ 7 cm |
+
+The previously quoted "125–189 ms / 537 ms" came from `t_latency`: **one trial** per case at one scan phase. The distributions in
+`docs/LATENCY_OPTIMIZATION.md` replace them. What the receiver itself needs to react and recover (datasheet value, unverified) and the
+real ball's modulation are **not** in these numbers.
 
 ## 4. Can it tell a ball from interference?
 

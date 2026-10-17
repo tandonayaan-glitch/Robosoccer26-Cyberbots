@@ -9,7 +9,7 @@ guessing.
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 20–21 % RAM |
+> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 32–33 % flash, 21 % RAM |
 > | Real binary in a third-party emulator | boots to the health report with autonomy disabled; no motor line rises (boot-level only) |
 > | **Host simulation** (simulated ball/IMU/filesystem) | 70 test cases × 2 API shapes = 140 runs, 5,108 checks, all pass, ASan/UBSan clean |
 > | Static analysis (cppcheck, clang-tidy, Valgrind) | no defects found |
@@ -33,8 +33,11 @@ guessing.
 | `docs/IR_DETECTION_AUDIT.md` | Highest-priority risk: ball/receiver compatibility, timing, interference, geometry, physical test procedure |
 | `docs/LATENCY_OPTIMIZATION.md` | Simulated latency baseline vs optimised, reliability cost, physical limits |
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
+| `docs/LATENCY_OPTIMIZATION.md` | IR detector latency/reliability: method, root causes, engine 2, simulated before/after tables, targets met and unmet, physical limits |
+| `docs/bench/` | Raw benchmark outputs (simulation), static-analysis and real-build logs |
 | `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
 | `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |
+| `tools/bench_all.sh`, `tools/bench_summary.py` | Regenerate the host benchmark outputs under `docs/bench/`; one-line summary per parameter set |
 
 ## Environment and installation (Arduino IDE)
 
@@ -86,7 +89,7 @@ of the format, not a hardware measurement.**
 
 Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`,
 `:roller <X|O>`, `:ch <n> [<en|pol|trust|bear|tilt> <v>]` (no field = inspect that channel), `:chreset <n>`, `:learn <deg>`, `:verify <n>`,
-`:cov`, `:irgate <off|auto|min max>`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
+`:cov`, `:irgate <off|auto|min max>`, `:irprofile <fast|balanced|safe>`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
 `:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
 
 Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited
@@ -112,4 +115,6 @@ tests require `:mtest`/`:dtest` **and** `:confirm`.
 ./test/run_tests.sh        # host simulation: mock core v3 and v2, -Wall -Wextra -Wshadow, ASan+UBSan, every case in its own process
 ./test/static_analysis.sh  # cppcheck, clang-tidy, Valgrind
 tools/real_build.sh both   # REAL Arduino-ESP32 2.0.17 + 3.0.7 compile (see the header of the script for toolchain setup)
+tools/bench_all.sh         # regenerate the simulated latency/reliability benchmark outputs under docs/bench/
+/tmp/rs26_bench_all --bench suite=acq|loss|dir|drop|miss|interf|fault|stall|soak|sweep|brief|period|speed|dacc|cpu|imm seed=N engine=0|2 [name=value ...]   # one suite (binary built by tools/bench_all.sh)
 ```

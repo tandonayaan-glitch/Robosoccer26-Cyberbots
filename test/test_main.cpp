@@ -2181,7 +2181,7 @@ static const TestCase TESTS[] = {
 
 int main(int argc, char** argv) {
   if (argc >= 2 && strcmp(argv[1], "--list") == 0) { for (auto& t : TESTS) printf("%s\n", t.name); return 0; }
-  if (argc >= 2 && strcmp(argv[1], "--bench") == 0) { freshFs("bench"); return benchMain(argc, argv); }
+  if (argc >= 2 && strcmp(argv[1], "--bench") == 0) { freshFs((std::string("bench") + std::to_string((long)getpid())).c_str()); return benchMain(argc, argv); }
   if (argc >= 5 && strcmp(argv[1], "--eval-ir") == 0) { freshFs("eval"); return evalMain(argc, argv); }
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {

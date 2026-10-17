@@ -60,6 +60,23 @@ Bearings: 0° = robot forward, increasing **clockwise** (right = 90°, rear = 18
 6. Tune `irwindow`, `irminedges`, `irnoisy`, and optionally the pulse-period gate (`:irgate auto` after a `:verify`/`:learn` with the ball) using the `edges` and `per_us` columns of `i` (the measured
    pulse pattern of *your* ball). `:save`.
 
+7. **Detector timing with the real ball** (all engine-2 figures in `docs/LATENCY_OPTIMIZATION.md` are simulated; none of them
+   is a property of your ball). With the robot on a stand and `d` available:
+   a. For each distance/angle of the matrix above, hold the ball steady for 30 s and note `d`'s *measured miss fraction*
+      and *grace period*. A steady ball should read < 5 % and give the minimum grace period (`losthold`). A fraction
+      above 25 % means the signal flickers at that position (range limit, 38 kHz receiver vs 40 kHz ball, orientation):
+      record where, because that is where `flickerhold` and the focus windows are doing the work.
+   b. Cover and uncover the ball by hand for 50, 100, 150, 200, 250 ms (cardboard card, stopwatch or a logged event):
+      note which gaps keep the track (`ball lost` events in the log, `g`), separately for a close (steady) and a distant
+      (flickering) ball. Compare with the simulated survival (steady ≈ 100 ms, flickering ≈ 200 ms) and set `losthold`,
+      `flickerhold`, `losthold_max` from what a real ball does, not from the simulation.
+   c. Wave an unrelated IR source (remote control, phone camera flash, another robot) across the receivers: count
+      phantom acquisitions in 60 s. If the count is unacceptable, move to `:irprofile safe` or tune `acqspan1`/`acqspan2`;
+      if the ball is hard to catch, `:irprofile fast`. Record the measured pulse period and consider `:irgate auto`.
+   d. Physical latency: with a logic analyser on the ball-emitter switch and a motor EN pin, record 20 appearances and 20
+      disappearances; the firmware-only part is in the simulation tables, the receiver recovery and the wheels' real
+      response are not. Record the distribution and the worst case.
+
 ## E. IMU calibration
 Robot level and still: `:gcal` (≈2 s). Rotate the robot by hand clockwise 90°: `m` must show the
 heading changing by about +90 (if it goes negative: `:set yawsign 1`). `:zero` sets the reference.

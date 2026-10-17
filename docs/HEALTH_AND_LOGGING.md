@@ -67,9 +67,18 @@ confidence = R_filtered × min(1, W) × (0.85 if any contributing channel is UNV
 R_filtered = length of the smoothed mean unit vector (agreement between channels)
 W          = sum of the contributing channels' hit fractions
 ```
-This is **not** an empirically calibrated probability. A ball is "acquired" after confidence ≥
-`acqconf` (0.45) on two consecutive scans and "lost" after `losthold` (0.5 s) without a good sample.
-Contradictory channels (agreement < 0.5) are flagged ambiguous and never acted on.
+This is **not** an empirically calibrated probability. Contradictory channels (agreement < 0.5) are flagged
+ambiguous and never acted on.
+
+Acquisition and loss are decided by **engine 2** (default; `engine 0` is the legacy fallback). Engine 2 keeps a leaky
+evidence counter per receiver (+1 per detecting window, −0.1 per miss, forgotten after `epidle` ms) and accepts a ball when
+the evidence has lasted `acqspan1` ms (one receiver) / `acqspan2` ms (two or more neighbours), the rest of the ring has been
+looked at since the onset, and the receivers agree. A ball is declared lost when no track-consistent evidence has arrived for
+its **grace period**: at least `losthold` (steady signal) or `flickerhold` (signal that was already missing ≥ 25 % of its
+visits), at least the time in which a run of misses would be rarer than 10^-`losseps` at the measured hit rate, and at most
+`losthold_max`. Loop stalls are not counted as absence. `:irprofile fast|balanced|safe` selects the acquisition spans.
+`d` prints the current grace period, the tolerated misses and the measured miss fraction. Details and all numbers (simulated):
+`docs/LATENCY_OPTIMIZATION.md`.
 
 ## 5. Logging
 
