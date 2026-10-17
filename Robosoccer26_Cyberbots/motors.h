@@ -164,6 +164,10 @@ static void motorsUpdate(const Config& c, uint32_t nowMs) {
       if (!deadlineReached(nowMs, g_wheelHoldUntil[i])) tgt = 0; else g_wheelHolding[i] = false;
     }
     bool speedingUp = absf(tgt) > absf(cur) && (cur == 0 || ((cur > 0) == (tgt > 0)));
+    if (speedingUp && cur == 0 && !g_wheelHolding[i]) {   // below minPwm a wheel does not turn: do not ramp through the dead zone
+      float lim = (float)c.minPwm < absf(tgt) ? (float)c.minPwm : absf(tgt);
+      cur = tgt > 0 ? lim : -lim;
+    }
     float step = (speedingUp ? (float)c.accelPwmPerS : (float)c.decelPwmPerS) * dt;
     if (tgt > cur) cur = (cur + step > tgt) ? tgt : cur + step;
     else if (tgt < cur) cur = (cur - step < tgt) ? tgt : cur - step;

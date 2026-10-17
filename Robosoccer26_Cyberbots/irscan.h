@@ -30,6 +30,7 @@ struct IrChan {
   uint32_t activeUs;      // time the output was at its active level in the last window
   uint32_t periodUs;      // measured mean pulse period of the last window (0 if < 2 pulses)
   uint16_t hist;          // 1 bit per window, newest = bit 0
+  uint8_t streak;         // consecutive DETECT windows ending with the latest visit (0 after any miss)
   uint32_t windows, detCount, overruns, offband;
   uint32_t lastWindowMs, lastDetectMs;
   uint32_t lastDetectUs;       // micros() at the close of the last DETECT window (latency instrumentation)
@@ -105,6 +106,10 @@ struct BallEst {
   bool evOpen;                       // an evidence burst is in progress
   uint32_t firstEvidenceUs, lastEvidenceUs, acquiredUs, lostUs;   // micros() timestamps
   float fx, fy;
+  float q;                           // engine 1: fraction of scan cycles that delivered track evidence (EWMA); misses are accounted
+                                     // retroactively, only when evidence returns, so a current outage cannot lengthen its own grace
+  uint32_t freshCycle;               // scan-cycle index of the newest evidence counted in q
+  uint32_t lastGoodUs, lastUpdateUs;   // engine 1: newest track-consistent evidence, last estimate update
   uint8_t acqCount;
   bool lostEvent;         // set for one poll when the ball is lost (consumed by navigation)
 };
@@ -249,6 +254,7 @@ static void irChannelUpdate(const Config& c, uint8_t ch, WinState ws, uint32_t n
   if (ws == WS_INVALID) { s.overruns++; g_stats.scanOverruns++; return; }   // never interpret a late window
   if (ws == WS_OFFBAND) s.offband++;
   s.detect = (ws == WS_DETECT);
+  s.streak = s.detect ? (uint8_t)(s.streak < 255 ? s.streak + 1 : 255) : 0;
   s.hist = (uint16_t)((s.hist << 1) | (s.detect ? 1 : 0));
   if (s.detect) { s.detCount++; s.lastDetectMs = nowMs; }
   int hits = popcount16(s.hist & 0xFF);
@@ -362,11 +368,109 @@ static void irEstimate(const Config& c, uint32_t nowMs) {
   }
 }
 
+
+// ---- engine 1: recency / streak evidence ---------------------------------------------------------------
+// Evidence unit: a receiver whose latest visits were all hits contributes min(1, streak/acqStreak). The ball is
+// acquired when the evidence summed over receivers reaches 1 and the receivers agree on a direction, so two adjacent
+// receivers hitting in the same scan confirm it after ONE cycle, while a lone receiver needs acqStreak consecutive
+// hits (which is what rejects short single-receiver bursts). After acquisition only evidence consistent with the track
+// (within gateDeg of the bearing) can refresh it, so stale or unrelated signals cannot keep the ball alive.
+static float g_chSin[MUX_CHANNELS], g_chCos[MUX_CHANNELS], g_chBear[MUX_CHANNELS];
+static void irChTrig(const Config& c, uint8_t ch, float* sn, float* cs) {
+  if (g_chBear[ch] != c.ch[ch].bearingDeg || (g_chSin[ch] == 0 && g_chCos[ch] == 0)) {
+    g_chBear[ch] = c.ch[ch].bearingDeg;
+    g_chSin[ch] = sinf(c.ch[ch].bearingDeg * DEG2RAD);
+    g_chCos[ch] = cosf(c.ch[ch].bearingDeg * DEG2RAD);
+  }
+  *sn = g_chSin[ch]; *cs = g_chCos[ch];
+}
+
+// Grace period before a ball is declared lost. Engine 1: short for a strong signal (hit on nearly every visit),
+// growing to lostHoldMaxMs when the signal is intermittent, so marginal-range balls are not dropped on a run of misses.
+static uint32_t irEffectiveHoldMs(const Config& c) {
+  if (!c.engine || c.lostHoldMaxMs <= c.lostHoldMs) return c.lostHoldMs;
+  float k = clampf((0.98f - g_ball.q) / 0.2f, 0.0f, 1.0f);
+  return (uint32_t)((float)c.lostHoldMs + k * (float)(c.lostHoldMaxMs - c.lostHoldMs));
+}
+
+static void irEstimateFast(const Config& c, uint32_t nowUs, uint32_t nowMs) {
+  const uint16_t dmask = (uint16_t)((1u << c.dirWindows) - 1u);
+  const bool track = g_ball.valid;
+  float ax = 0, ay = 0, aW = 0, aE = 0, aEc = 0;       // all live receivers
+  float gx = 0, gy = 0, gW = 0, gE = 0, gEc = 0;       // live receivers consistent with the track
+  uint8_t aN = 0, gN = 0, aMaxStreak = 0; uint16_t aMask = 0, gMask = 0;
+  bool aUnver = false, gUnver = false, gFresh = false;
+  for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++) {
+    if (!irTrusted(c, ch)) continue;
+    const IrChan& s = g_ir[ch];
+    int h = popcount16(s.hist & dmask);
+    if (!h) continue;
+    float w = (float)h / (float)c.dirWindows, sn, cs;
+    irChTrig(c, ch, &sn, &cs);
+    float ev = s.streak ? (s.streak >= c.acqStreak ? 1.0f : (float)s.streak / (float)c.acqStreak) : 0.0f;
+    float evc = s.streak ? (s.streak >= 4 ? 1.0f : (float)s.streak / 4.0f) : 0.0f;
+    if (s.streak > aMaxStreak) aMaxStreak = s.streak;
+    ax += w * sn; ay += w * cs; aW += w; aE += ev; aEc += evc; aN++; aMask |= (uint16_t)(1u << ch);
+    if (!c.ch[ch].verified) aUnver = true;
+    bool inGate = !track || absf(angDiffDeg(c.ch[ch].bearingDeg, g_ball.bearingDeg)) <= (float)c.gateDeg;
+    if (inGate) {
+      gx += w * sn; gy += w * cs; gW += w; gE += ev; gEc += evc; gN++; gMask |= (uint16_t)(1u << ch);
+      if (!c.ch[ch].verified) gUnver = true;
+      if (s.streak) gFresh = true;
+    }
+  }
+  g_ball.cycleStamp = g_scan.cycleCount;
+  float dtUs = (float)(uint32_t)(nowUs - g_ball.lastUpdateUs);
+  g_ball.lastUpdateUs = nowUs;
+  // Choose the evidence set: the gated one while a track exists and has support, otherwise everything.
+  bool useGate = track && gW > 0;
+  float sx = useGate ? gx : ax, sy = useGate ? gy : ay, W = useGate ? gW : aW, Ec = useGate ? gEc : aEc, E = useGate ? gE : aE;
+  uint8_t n = useGate ? gN : aN; uint16_t mask = useGate ? gMask : aMask; bool unver = useGate ? gUnver : aUnver;
+  g_ball.nActive = n; g_ball.actMask = mask; g_ball.W = W; g_ball.anyDetect = n > 0;
+  if (n == 0 || W <= 0) { g_ball.rInst = 0; if (!track) g_ball.conf = 0; return; }
+  float ux = sx / W, uy = sy / W;
+  float r = clampf(sqrtf(ux * ux + uy * uy), 0, 1);
+  g_ball.rInst = r;
+  g_ball.ambiguous = r < 0.5f;
+  bool retarget = track && !useGate && aE >= 1.0f && !(r < 0.5f);   // track has no support, a new cluster has full evidence
+  if (!track || retarget) {
+    // provisional (or re-targeted) direction: take the evidence as-is, no smoothing against an obsolete value
+    g_ball.fx = ux; g_ball.fy = uy;
+  } else {
+    float a = clampf(dtUs / ((float)c.dirTauMs * 1000.0f), 0.0f, 1.0f);
+    g_ball.fx += a * (ux - g_ball.fx); g_ball.fy += a * (uy - g_ball.fy);
+  }
+  float rf = clampf(sqrtf(g_ball.fx * g_ball.fx + g_ball.fy * g_ball.fy), 0, 1);
+  g_ball.bearingDeg = wrapDeg180(atan2f(g_ball.fx, g_ball.fy) * RAD2DEG);
+  g_ball.conf = rf * (Ec < 1.0f ? Ec : 1.0f) * (unver ? 0.85f : 1.0f);   // heuristic, see HEALTH_AND_LOGGING.md
+  if (!track) {
+    // aMaxStreak >= acqMinStreak: the scan visits receivers in bearing order, so until one receiver has been hit twice in
+    // a row the other receivers have not been re-checked since the onset; a broadband onset would look like a ball
+    // seen by a few adjacent receivers. After one revisit the whole ring has been sampled and ambiguity is judged on it.
+    if (E >= 1.0f && !g_ball.ambiguous && aMaxStreak >= c.acqMinStreak) {
+      g_ball.valid = true; g_ball.validSinceMs = nowMs; g_ball.acquiredUs = nowUs; g_ball.q = 1.0f; g_ball.freshCycle = g_scan.cycleCount;
+      g_ball.lastGoodUs = nowUs; g_ball.lastDetectMs = nowMs; g_ball.lastGoodMs = nowMs;
+      if (g_ball.evOpen) latAdd(g_latAcq, nowUs - g_ball.firstEvidenceUs);
+    }
+  } else if (gFresh || retarget) {
+    g_ball.lastGoodUs = nowUs; g_ball.lastDetectMs = nowMs; g_ball.lastGoodMs = nowMs;
+    if (g_scan.cycleCount != g_ball.freshCycle) {         // first evidence in this scan cycle: update the quality estimate
+      uint32_t missed = g_scan.cycleCount - g_ball.freshCycle - 1u;
+      if (missed > 12u) missed = 12u;
+      for (uint32_t m = 0; m < missed; m++) g_ball.q *= (1.0f - 1.0f / 10.0f);
+      g_ball.q += (1.0f / 10.0f) * (1.0f - g_ball.q);
+      g_ball.freshCycle = g_scan.cycleCount;
+    }
+  }
+}
+
 static void irBallTimeout(const Config& c, uint32_t nowMs) {
   if (g_ball.evOpen && !g_ball.valid && (uint32_t)(micros() - g_ball.lastEvidenceUs) > 300000u) g_ball.evOpen = false;
-  if (g_ball.valid && elapsedMs(nowMs, g_ball.lastGoodMs) > c.lostHoldMs) {
+  bool expired = c.engine ? ((uint32_t)(micros() - g_ball.lastGoodUs) > irEffectiveHoldMs(c) * 1000u)
+                          : (elapsedMs(nowMs, g_ball.lastGoodMs) > c.lostHoldMs);
+  if (g_ball.valid && expired) {
     g_ball.lostUs = micros();
-    latAdd(g_latLoss, g_ball.lostUs - g_ball.lastEvidenceUs);
+    latAdd(g_latLoss, g_ball.lostUs - (c.engine ? g_ball.lastGoodUs : g_ball.lastEvidenceUs));
     g_ball.evOpen = false;
     g_ball.valid = false;
     g_ball.lostAtMs = nowMs;
@@ -423,6 +527,7 @@ static void irService(Config& c, uint32_t nowMs) {
     irOpenWindow(c, first);
   } else if ((uint32_t)(nowUs - g_scan.winStartUs) >= c.irWindowUs) {
     irCloseWindow(c, nowMs);
+    if (c.engine) irEstimateFast(c, micros(), nowMs);        // engine 1: every closed window updates the estimate
     bool wrapped;
     uint8_t next = irNextEnabled(c, g_scan.cur, &wrapped);
     if (wrapped) {
@@ -434,7 +539,7 @@ static void irService(Config& c, uint32_t nowMs) {
       g_scan.cycleCount++;
       g_scan.lastCycleMs = nowMs;
       g_scan.cycleStartUs = endUs;
-      irEstimate(c, nowMs);
+      if (!c.engine) irEstimate(c, nowMs);                    // engine 0 (legacy): once per scan cycle
       if (g_probe.mode && deadlineReached(nowMs, g_probe.endMs)) irProbeFinish(c, nowMs);
     }
     irOpenWindow(c, next);

@@ -11,7 +11,7 @@ guessing.
 > |---|---|
 > | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 20–21 % RAM |
 > | Real binary in a third-party emulator | boots to the health report with autonomy disabled; no motor line rises (boot-level only) |
-> | **Host simulation** (simulated ball/IMU/filesystem) | 69 test cases × 2 API shapes = 138 runs, 4,832 checks, all pass, ASan/UBSan clean |
+> | **Host simulation** (simulated ball/IMU/filesystem) | 70 test cases × 2 API shapes = 140 runs, 5,108 checks, all pass, ASan/UBSan clean |
 > | Static analysis (cppcheck, clang-tidy, Valgrind) | no defects found |
 > | Requires electrical inspection | **not done** (receiver pinout/supply, pull-downs, reset-state voltages, IMU board) |
 > | Requires testing with the real ball | **not done** (38 kHz receiver vs 40 kHz ball, range, coverage, side gap, interference) |
@@ -31,6 +31,7 @@ guessing.
 | `docs/HEALTH_AND_LOGGING.md` | Health monitor, fault codes, CSV schema, rotation, flight recorder, export |
 | `docs/CALIBRATION_AND_TEST_PLAN.md` | Calibration guide, first-power-on procedure, physical test plan |
 | `docs/IR_DETECTION_AUDIT.md` | Highest-priority risk: ball/receiver compatibility, timing, interference, geometry, physical test procedure |
+| `docs/LATENCY_OPTIMIZATION.md` | Simulated latency baseline vs optimised, reliability cost, physical limits |
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
 | `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
 | `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |

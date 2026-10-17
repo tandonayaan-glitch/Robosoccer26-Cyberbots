@@ -1,0 +1,75 @@
+CONFIG:
+scan: cycle=36.12 ms (min 36.12 max 36.12) | revisit interval per receiver = cycle | window=3000 us settle=10 us (settle overhead 0.33 % of cycle)
+ACQUISITION, ball appears, 1 receiver (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   19.2  p95=   34.5  max=   36.2 ms
+  ball confirmed (valid)             n= 96  median=  127.6  p95=  142.9  max=  144.6 ms
+  direction within 20 deg            n= 96  median=  127.6  p95=  142.9  max=  144.6 ms
+  navigation command (translation)   n= 96  median=  142.4  p95=  159.4  max=  163.0 ms
+  first motor output (PWM > 0)       n= 96  median=  142.4  p95=  159.4  max=  163.0 ms
+  wheels reach start PWM (minpwm)    n= 96  median=  142.4  p95=  159.4  max=  163.0 ms
+ACQUISITION, ball appears, 2 receivers (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   15.5  p95=   30.5  max=   33.6 ms
+  ball confirmed (valid)             n= 96  median=   57.4  p95=   71.7  max=   73.1 ms
+  direction within 20 deg            n= 96  median=   57.4  p95=   71.7  max=   73.1 ms
+  navigation command (translation)   n= 96  median=   72.1  p95=   88.9  max=   92.2 ms
+  first motor output (PWM > 0)       n= 96  median=   72.1  p95=   88.9  max=   92.2 ms
+  wheels reach start PWM (minpwm)    n= 96  median=   72.1  p95=   88.9  max=   92.2 ms
+ACQUISITION, ball appears, 3 receivers (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   13.7  p95=   29.7  max=   30.4 ms
+  ball confirmed (valid)             n= 96  median=   49.9  p95=   65.9  max=   66.6 ms
+  direction within 20 deg            n= 96  median=   49.9  p95=   65.9  max=   66.6 ms
+  navigation command (translation)   n= 96  median=   65.7  p95=   80.3  max=   86.1 ms
+  first motor output (PWM > 0)       n= 96  median=   65.7  p95=   80.3  max=   86.1 ms
+  wheels reach start PWM (minpwm)    n= 96  median=   65.7  p95=   80.3  max=   86.1 ms
+LOSS, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal  n= 96  median=   15.5  p95=   34.1  max=   35.7 ms
+  ball declared lost                 n= 96  median=  140.0  p95=  153.0  max=  154.6 ms
+  translation request cleared        n= 96  median=  153.4  p95=  170.0  max=  173.3 ms
+  translation PWM <= 10 % of steady  n= 96  median=  273.4  p95=  290.0  max=  293.3 ms
+LOSS, ball disappears, 2 receivers (removal -> stage):
+  age of newest evidence at removal  n= 96  median=   13.4  p95=   31.6  max=   33.0 ms
+  ball declared lost                 n= 96  median=  141.2  p95=  154.4  max=  155.0 ms
+  translation request cleared        n= 96  median=  155.3  p95=  171.0  max=  173.9 ms
+  translation PWM <= 10 % of steady  n= 96  median=  285.2  p95=  301.1  max=  303.9 ms
+LOSS, ball disappears, 3 receivers (removal -> stage):
+  age of newest evidence at removal  n= 96  median=    8.8  p95=   27.6  max=   29.9 ms
+  ball declared lost                 n= 96  median=  145.3  p95=  154.6  max=  155.3 ms
+  translation request cleared        n= 96  median=  160.1  p95=  171.7  max=  174.1 ms
+  translation PWM <= 10 % of steady  n= 96  median=  280.1  p95=  298.6  max=  303.1 ms
+DIRECTION UPDATE, ball jumps between sectors (jump -> stage):
+  adjacent sector 90 -> 120 estimate n= 48  median=   90.0  p95=  104.3  max=  105.8 ms
+  adjacent sector 90 -> 120 nav command n= 48  median=   52.2  p95=   69.7  max=   73.3 ms
+      worst excursion from the short arc: 0 deg
+  adjacent sector 90 -> 60 estimate  n= 48  median=   93.0  p95=  107.3  max=  108.8 ms
+  adjacent sector 90 -> 60 nav command n= 48  median=   53.4  p95=   67.3  max=   69.6 ms
+      worst excursion from the short arc: 0 deg
+  opposite sector 90 -> 270 estimate n= 48  median=  115.1  p95=  125.7  max=  127.4 ms
+  opposite sector 90 -> 270 nav command n= 48  median=  119.8  p95=  131.2  max=  133.8 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 0 estimate       n= 48  median=   90.0  p95=  104.3  max=  105.8 ms
+  front seam 330 -> 0 nav command    n= 48  median=   53.4  p95=   69.8  max=   71.6 ms
+      worst excursion from the short arc: 0 deg
+  front seam 0 -> 330 estimate       n= 48  median=   93.0  p95=  107.3  max=  108.8 ms
+  front seam 0 -> 330 nav command    n= 48  median=   71.7  p95=   85.3  max=   88.9 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 30 estimate      n= 48  median=  113.3  p95=  125.2  max=  126.8 ms
+  front seam 330 -> 30 nav command   n= 48  median=  109.6  p95=  120.5  max=  123.8 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 180 estimate      n= 48  median=   90.0  p95=  104.3  max=  105.8 ms
+  rear seam 150 -> 180 nav command   n= 48  median=   50.4  p95=   68.5  max=   72.1 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 180 -> 210 estimate      n= 48  median=   90.0  p95=  104.3  max=  105.8 ms
+  rear seam 180 -> 210 nav command   n= 48  median=   53.2  p95=   66.1  max=   68.4 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 210 estimate      n= 48  median=  113.3  p95=  125.4  max=  126.8 ms
+  rear seam 150 -> 210 nav command   n= 48  median=  100.2  p95=  113.9  max=  116.3 ms
+      worst excursion from the short arc: 0 deg
+FALSE LOSS on a brief dropout of a 2-receiver ball (trials 24 each):
+  gap  20 ms:  0/24 lost | gap  40 ms:  0/24 lost | gap  60 ms:  0/24 lost | gap  80 ms:  0/24 lost | gap 100 ms:  0/24 lost | gap 150 ms: 20/24 lost | gap 250 ms: 24/24 lost | 
+FALSE ACQUISITION by a ball-like burst on ONE receiver (trials 24 each):
+  burst  20 ms:  0/24 | burst  40 ms:  0/24 | burst  60 ms:  0/24 | burst  80 ms:  0/24 | burst 100 ms:  0/24 | burst 150 ms: 24/24 | burst 250 ms: 24/24 | 
+FALSE ACQUISITION by a ball-like burst on ALL receivers (coherent / random phase, 24 each):
+  burst  40 ms:  0/24 ,  0/24 | burst 100 ms:  0/24 ,  0/24 | burst 250 ms:  0/24 ,  0/24 | 
+FALSE LOSS under random per-visit misses (60 s each; 1-receiver ball | 2-receiver ball):
+  miss 10%:  0 |  0    miss 30%:  8 |  0    miss 50%:  9 |  5    
+SOAK: random single-receiver bursts (10-120 ms, 2 per second, 120 s): false acquisitions = 6

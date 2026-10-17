@@ -41,9 +41,9 @@ What the real build proved: LEDC (2.x channel API and 3.x pin API), `Wire`, `Lit
 
 Command: `./test/run_tests.sh` (cleans `/tmp/mockfs*`, then for **mock core v3 and v2** builds `g++ -std=c++20 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 -fsanitize=address,undefined` and runs every case in its own process).
 
-**Final result: 69 test cases × 2 core API shapes = 138 runs, 138 passed, 0 failed, 4,832 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
+**Final result: 70 test cases × 2 core API shapes = 140 runs, 140 passed, 0 failed, 5,108 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
 
-Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · current = **69**. The suite grew as audits added regression tests.
+Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · current = **70**. The suite grew as audits added regression tests.
 
 | Area (requirement) | Test cases |
 |---|---|
@@ -59,7 +59,7 @@ Reconciliation of the counts quoted during development (counted from `git show <
 | Storage / logging / export | `t_fs_missing`, `t_fs_write_failure`, `t_fs_full`, `t_fs_commands` (format + watchdog + no false stall), `t_log_rotation`, `t_log_queue_overflow`, `t_flight_recorder`, `t_export` (CRC and row count == rows on disk), `t_nonblocking` |
 | Reports | `t_health_report_text`, `t_fault_report_format` |
 
-Measured in simulation (not on hardware): scan cycle 36.1 ms; acquisition 125–189 ms; loss 537 ms; bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
+Measured in simulation (not on hardware): scan cycle 36.1 ms; acquisition 57–143 ms (see docs/LATENCY_OPTIMIZATION.md; legacy engine 153–240 ms); loss 141 ms (legacy 546 ms); bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
 
 ## 4. D – Static analysis (`./test/static_analysis.sh`)
 * cppcheck: no defects; only style notes remain (const-qualifiable parameters).

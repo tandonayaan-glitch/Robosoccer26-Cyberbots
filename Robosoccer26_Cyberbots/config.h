@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 5
+#define CFG_VERSION 8
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -46,6 +46,12 @@ struct Config {
   uint8_t irNoisyPerMs;          // more than this many pulses per ms => interference, not a ball
   uint8_t irSettleUs;            // mux settle time before a window opens
   uint8_t irHistMinOn;           // detections in the last 8 windows to switch a channel "active"
+  uint8_t engine;                // 0 = legacy history-fraction estimator, 1 = recency/streak evidence engine
+  uint8_t acqStreak;             // engine 1: consecutive hits that equal one unit of acquisition evidence (summed over receivers)
+  uint8_t acqMinStreak;          // engine 1: acquisition needs at least this many consecutive hits on one receiver (a full ring revisit)
+  uint8_t dirWindows;            // engine 1: most recent windows per receiver that feed the direction estimate
+  uint8_t gateDeg;               // engine 1: evidence must lie within +-gateDeg of the current bearing to refresh the ball
+  uint16_t dirTauMs;             // engine 1: direction smoothing time constant
   uint8_t irFullHits;            // hits (of the last 8 windows) at which a channel counts with full weight
   uint8_t acqCycles;             // consecutive scan cycles above acqConf needed to acquire the ball
   uint16_t irPeriodMinUs;        // pulse-period gate (0/0 = OFF): accept only mean pulse periods in [min,max] us
@@ -58,7 +64,8 @@ struct Config {
 
   // ---- navigation ----
   float acqConf;
-  uint16_t lostHoldMs;
+  uint16_t lostHoldMs;           // grace without track-consistent evidence before the ball is declared lost (strong signal)
+  uint16_t lostHoldMaxMs;        // engine 1: grace used for a weak/intermittent signal (quality-scaled up to this)
   float centerDeg;
   float approachSpeed;           // 0..1 of maxAuto
   float attackSpeed;
@@ -121,6 +128,12 @@ static const ParamDef PARAMS[] = {
   PD("irnoisy", PT_U8, irNoisyPerMs, 2, 50),
   PD("irsettle", PT_U8, irSettleUs, 2, 100),
   PD("irhistmin", PT_U8, irHistMinOn, 1, 8),
+  PD("engine", PT_U8, engine, 0, 1),
+  PD("acqstreak", PT_U8, acqStreak, 1, 6),
+  PD("acqminstreak", PT_U8, acqMinStreak, 1, 4),
+  PD("dirwindows", PT_U8, dirWindows, 1, 8),
+  PD("gatedeg", PT_U8, gateDeg, 30, 180),
+  PD("dirtau", PT_U16, dirTauMs, 5, 500),
   PD("irfullhits", PT_U8, irFullHits, 2, 8),
   PD("acqcycles", PT_U8, acqCycles, 1, 6),
   PD("irperlo", PT_U16, irPeriodMinUs, 0, 20000),
@@ -131,7 +144,8 @@ static const ParamDef PARAMS[] = {
   PD("maxgap", PT_F32, maxGapDeg, 30, 180),
   PD("mintrusted", PT_U8, minTrusted, 1, 12),
   PD("acqconf", PT_F32, acqConf, 0.2, 0.95),
-  PD("losthold", PT_U16, lostHoldMs, 100, 3000),
+  PD("losthold", PT_U16, lostHoldMs, 40, 3000),
+  PD("losthold_max", PT_U16, lostHoldMaxMs, 40, 3000),
   PD("center", PT_F32, centerDeg, 5, 60),
   PD("approach", PT_F32, approachSpeed, 0.15, 1.0),
   PD("attack", PT_F32, attackSpeed, 0.15, 1.0),
@@ -216,6 +230,12 @@ static void cfgDefaults(Config& c) {
   c.irNoisyPerMs = 3;     // ball ~1.2 pulses/ms; motor-PWM/interference is several per ms
   c.irSettleUs = 10;
   c.irHistMinOn = 2;
+  c.engine = 1;
+  c.acqStreak = 4;
+  c.acqMinStreak = 2;
+  c.dirWindows = 3;
+  c.gateDeg = 100;
+  c.dirTauMs = 40;
   c.irFullHits = 8;
   c.acqCycles = 2;
   c.irPeriodMinUs = 0;     // gate OFF until the real ball has been measured
@@ -226,7 +246,8 @@ static void cfgDefaults(Config& c) {
   c.maxGapDeg = 100.0f;
   c.minTrusted = 4;
   c.acqConf = 0.45f;
-  c.lostHoldMs = 500;
+  c.lostHoldMs = 120;
+  c.lostHoldMaxMs = 300;
   c.centerDeg = 20.0f;
   c.approachSpeed = 0.7f;
   c.attackSpeed = 1.0f;
@@ -308,6 +329,7 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   if (c.slowSpeed > c.attackSpeed) { c.slowSpeed = d.slowSpeed; c.attackSpeed = d.attackSpeed; bad++; repNote(rep, repN, "slow/attack"); }
   bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
   if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
+  if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }
   if (c.irStuckFailMs <= c.irStuckMs) { c.irStuckMs = d.irStuckMs; c.irStuckFailMs = d.irStuckFailMs; bad++; repNote(rep, repN, "irstuck"); }
   for (int i = 0; i < MUX_CHANNELS; i++) {
     ChCfg& h = c.ch[i];

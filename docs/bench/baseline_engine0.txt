@@ -1,0 +1,73 @@
+CONFIG:
+scan: cycle=36.12 ms (min 36.12 max 36.12) | revisit interval per receiver = cycle | window=3000 us settle=10 us (settle overhead 0.33 % of cycle)
+ACQUISITION, ball appears, 1 receiver (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   18.5  p95=   35.6  max=   36.7 ms
+  ball confirmed (valid)             n= 96  median=  223.2  p95=  240.4  max=  241.5 ms
+  direction within 20 deg            n= 96  median=  223.2  p95=  240.4  max=  241.5 ms
+  navigation command (translation)   n= 96  median=  239.7  p95=  256.6  max=  260.2 ms
+  first motor output (PWM > 0)       n= 96  median=  239.7  p95=  256.6  max=  260.2 ms
+  wheels reach start PWM (minpwm)    n= 96  median=  309.7  p95=  326.6  max=  330.2 ms
+ACQUISITION, ball appears, 2 receivers (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   17.2  p95=   32.6  max=   33.6 ms
+  ball confirmed (valid)             n= 96  median=  152.8  p95=  168.1  max=  169.1 ms
+  direction within 20 deg            n= 96  median=  152.8  p95=  168.1  max=  169.1 ms
+  navigation command (translation)   n= 96  median=  167.8  p95=  182.6  max=  187.1 ms
+  first motor output (PWM > 0)       n= 96  median=  167.8  p95=  182.6  max=  187.1 ms
+  wheels reach start PWM (minpwm)    n= 96  median=  237.8  p95=  252.6  max=  257.1 ms
+ACQUISITION, ball appears, 3 receivers (injection -> stage):
+  first evidence (DETECT window)     n= 96  median=   11.4  p95=   27.5  max=   29.9 ms
+  ball confirmed (valid)             n= 96  median=  118.2  p95=  135.6  max=  136.2 ms
+  direction within 20 deg            n= 96  median=  118.2  p95=  135.6  max=  136.2 ms
+  navigation command (translation)   n= 96  median=  133.6  p95=  151.1  max=  154.7 ms
+  first motor output (PWM > 0)       n= 96  median=  133.6  p95=  151.1  max=  154.7 ms
+  wheels reach start PWM (minpwm)    n= 96  median=  203.6  p95=  221.1  max=  224.7 ms
+LOSS, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal  n= 96  median=   16.6  p95=   34.7  max=   35.9 ms
+  ball declared lost                 n= 96  median=  545.8  p95=  561.1  max=  562.1 ms
+  translation request cleared        n= 96  median=  560.2  p95=  577.8  max=  580.1 ms
+  translation PWM <= 10 % of steady  n= 96  median=  750.2  p95=  767.8  max=  770.1 ms
+LOSS, ball disappears, 2 receivers (removal -> stage):
+  age of newest evidence at removal  n= 96  median=   13.8  p95=   30.8  max=   32.5 ms
+  ball declared lost                 n= 96  median=  548.3  p95=  563.2  max=  565.4 ms
+  translation request cleared        n= 96  median=  561.4  p95=  579.1  max=  582.8 ms
+  translation PWM <= 10 % of steady  n= 96  median=  761.4  p95=  779.1  max=  782.9 ms
+LOSS, ball disappears, 3 receivers (removal -> stage):
+  age of newest evidence at removal  n= 96  median=   11.2  p95=   28.1  max=   29.9 ms
+  ball declared lost                 n= 96  median=  549.0  p95=  564.0  max=  565.5 ms
+  translation request cleared        n= 96  median=  563.4  p95=  580.0  max=  582.4 ms
+  translation PWM <= 10 % of steady  n= 96  median=  753.4  p95=  770.0  max=  772.4 ms
+DIRECTION UPDATE, ball jumps between sectors (jump -> stage):
+  adjacent sector 90 -> 120 estimate n= 48  median=  220.9  p95=  236.7  max=  238.2 ms
+  adjacent sector 90 -> 120 nav command n= 48  median=  120.0  p95=  135.8  max=  137.3 ms
+      worst excursion from the short arc: 0 deg
+  adjacent sector 90 -> 60 estimate  n= 48  median=  224.7  p95=  240.7  max=  242.8 ms
+  adjacent sector 90 -> 60 nav command n= 48  median=  123.7  p95=  138.8  max=  143.4 ms
+      worst excursion from the short arc: 0 deg
+  opposite sector 90 -> 270 estimate n= 48  median=  206.1  p95=  221.1  max=  223.6 ms
+  opposite sector 90 -> 270 nav command n= 48  median=  211.8  p95=  226.9  max=  233.3 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 0 estimate       n= 48  median=  199.8  p95=  215.7  max=  217.1 ms
+  front seam 330 -> 0 nav command    n= 48  median=  129.3  p95=  143.5  max=  151.0 ms
+      worst excursion from the short arc: 0 deg
+  front seam 0 -> 330 estimate       n= 48  median=  199.8  p95=  215.7  max=  217.1 ms
+  front seam 0 -> 330 nav command    n= 48  median=  166.4  p95=  185.3  max=  188.4 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 30 estimate      n= 48  median=  268.3  p95=  282.1  max=  283.6 ms
+  front seam 330 -> 30 nav command   n= 48  median=  243.4  p95=  255.4  max=  263.6 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 180 estimate      n= 48  median=  214.9  p95=  230.7  max=  232.2 ms
+  rear seam 150 -> 180 nav command   n= 48  median=  112.8  p95=  128.5  max=  130.0 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 180 -> 210 estimate      n= 48  median=  211.9  p95=  227.7  max=  229.2 ms
+  rear seam 180 -> 210 nav command   n= 48  median=  107.4  p95=  123.7  max=  128.4 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 210 estimate      n= 48  median=  254.0  p95=  269.9  max=  271.3 ms
+  rear seam 150 -> 210 nav command   n= 48  median=  220.9  p95=  237.3  max=  243.8 ms
+      worst excursion from the short arc: 0 deg
+FALSE LOSS on a brief dropout of a 2-receiver ball (trials 24 each):
+  gap  20 ms:  0/24 lost | gap  40 ms:  0/24 lost | gap  60 ms:  0/24 lost | gap  80 ms:  0/24 lost | gap 100 ms:  0/24 lost | gap 150 ms:  0/24 lost | gap 250 ms:  0/24 lost | 
+FALSE ACQUISITION by a ball-like burst on ONE receiver (trials 24 each):
+  burst  20 ms:  0/24 | burst  40 ms:  0/24 | burst  60 ms:  0/24 | burst  80 ms:  0/24 | burst 100 ms:  0/24 | burst 150 ms:  6/24 | burst 250 ms: 24/24 | 
+FALSE ACQUISITION by a ball-like burst on ALL receivers (coherent / random phase, 24 each):
+  burst  40 ms:  0/24 ,  0/24 | burst 100 ms:  0/24 ,  0/24 | burst 250 ms:  0/24 ,  0/24 | 
+SOAK: random single-receiver bursts (10-120 ms, 2 per second, 120 s): false acquisitions = 4

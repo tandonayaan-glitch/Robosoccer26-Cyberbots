@@ -182,6 +182,31 @@ static bool benchBroadbandAcquires(uint32_t durMs, uint32_t phaseUs, bool cohere
   return got;
 }
 
+// Per-visit miss model: every time a window opens on a channel that currently carries the ball, the pulses are
+// suppressed for that window with probability p (receiver/AGC/phase misses). Returns false losses in `seconds`.
+static int benchMissLosses(int mode, double p, uint32_t seconds) {
+  benchPrepare();
+  benchEnableAuto();
+  int mask = 0;
+  if (mode == 1) ballAt(90, 10); else ballAt(75, 20);
+  for (int i = 0; i < 12; i++) if (g_simMode[i] == SIM_BALL) mask |= 1 << i;
+  benchRun(1500);
+  int losses = 0; bool wasValid = g_ball.valid; int lastCur = -1; uint64_t end = g_mockUs + (uint64_t)seconds * 1000000ULL;
+  while (g_mockUs < end) {
+    benchStep();
+    int cur = g_scan.open ? g_scan.cur : -1;
+    if (cur != lastCur) {
+      if (lastCur >= 0 && (mask >> lastCur & 1)) g_simMode[lastCur] = SIM_BALL;       // restore after the window
+      if (cur >= 0 && (mask >> cur & 1) && (rand() % 1000) < (int)(p * 1000.0)) g_simMode[cur] = SIM_IDLE;
+      lastCur = cur;
+    }
+    if (wasValid && !g_ball.valid) losses++;
+    wasValid = g_ball.valid;
+  }
+  clearBall();
+  return losses;
+}
+
 static int benchApplyArgs(int argc, char** argv) {
   for (int i = 2; i < argc; i++) {
     char* eq = strchr(argv[i], '=');
@@ -277,6 +302,9 @@ static int benchMain(int argc, char** argv) {
     for (int k = 0; k < 24; k++) { c += benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 24), true) ? 1 : 0; r += benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 24), false) ? 1 : 0; }
     printf("burst %3u ms: %2d/24 , %2d/24 | ", d, c, r);
   }
+  printf("\n");
+  printf("FALSE LOSS under random per-visit misses (60 s each; 1-receiver ball | 2-receiver ball):\n  ");
+  for (double pm : {0.1, 0.3, 0.5}) printf("miss %.0f%%: %2d | %2d    ", pm * 100.0, benchMissLosses(1, pm, 60), benchMissLosses(2, pm, 60));
   printf("\n");
   int fa = evalFalseAcquisitions(2.0, 120);
   printf("SOAK: random single-receiver bursts (10-120 ms, 2 per second, 120 s): false acquisitions = %d\n", fa);

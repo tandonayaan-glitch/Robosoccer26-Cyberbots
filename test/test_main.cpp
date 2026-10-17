@@ -186,7 +186,7 @@ static void t_ramp() {
     t += 10; mockAdvance(10000);
     motorsUpdate(g_cfg, t);
     float step = g_wheelCur[0] - prev;
-    CHECK(step <= g_cfg.accelPwmPerS * 0.010f + 1e-3f);
+    CHECK(step <= g_cfg.accelPwmPerS * 0.010f + (prev == 0 ? (float)g_cfg.minPwm : 0.0f) + 1e-3f);   // a start from rest jumps to minPwm
     CHECK(step >= 0);
     prev = g_wheelCur[0];
   }
@@ -223,7 +223,7 @@ static void t_ramp() {
   motorsSetWheelTarget(2, 200);
   g_motorsLastUpdateMs = t; t += 5000;
   motorsUpdate(g_cfg, t);
-  CHECK(g_wheelCur[2] <= g_cfg.accelPwmPerS * 0.1f + 1e-3f);
+  CHECK(g_wheelCur[2] <= g_cfg.accelPwmPerS * 0.1f + (float)g_cfg.minPwm + 1e-3f);
 }
 
 static void t_config() {
@@ -1147,10 +1147,26 @@ static void t_latency() {
   while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
   double lost = (double)(g_mockUs - t0) / 1000.0;
   printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lost, g_scan.cycleUs / 1000.0);
-  CHECK(acq1 < 400);
-  CHECK(acq2 < 400);
-  CHECK(lost < g_cfg.lostHoldMs + 150);                        // hold time + at most ~2 windows/cycles of freshness
+  CHECK(acq1 < 200);                                           // optimised engine: bound well under the legacy 240 ms
+  CHECK(acq2 < 100);
+  CHECK(lost < g_cfg.lostHoldMs + 100);                        // hold time + at most ~2 windows/cycles of freshness
   CHECK(acq1 > g_scan.cycleUs / 1000.0);                       // can never be faster than one scan
+}
+
+static bool benchBurstAcquires(uint32_t durMs, uint32_t phaseUs, int ch);
+static bool benchBroadbandAcquires(uint32_t durMs, uint32_t phaseUs, bool coherent);
+
+static void t_fast_engine_rejection() {
+  // The fast engine must not trade away rejection of ball-like bursts: with the default settings a burst shorter than the
+  // immunity time must never be acquired, whatever its phase relative to the scan (simulation only).
+  bootCal();
+  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
+  const uint32_t span = (uint32_t)(g_scan.cycleUs * 2);
+  for (uint32_t d : {20u, 60u, 90u})
+    for (int k = 0; k < 12; k++) CHECK(!benchBurstAcquires(d, (uint32_t)((uint64_t)span * k / 12), 5 + (k % 3)));
+  for (uint32_t d : {40u, 100u, 250u})
+    for (int k = 0; k < 12; k++) { CHECK(!benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 12), true)); CHECK(!benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 12), false)); }
+  CHECK(g_cfg.lostHoldMs <= g_cfg.lostHoldMaxMs);
 }
 
 static void t_side_zone_note() {
@@ -1838,7 +1854,7 @@ static const TestCase TESTS[] = {
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
   T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_boot_corrupt), T(t_cfg_save_fail), T(t_cfg_set),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_fast_engine_rejection), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_boot_corrupt), T(t_cfg_save_fail), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),

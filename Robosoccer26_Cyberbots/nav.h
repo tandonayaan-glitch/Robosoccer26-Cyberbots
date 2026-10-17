@@ -125,7 +125,7 @@ static void navApproach(const Config& c, uint32_t now) {
     float t = clampf((g_ball.conf - c.acqConf) / (1.0f - c.acqConf), 0.0f, 1.0f);
     speed = c.slowSpeed + t * (c.approachSpeed - c.slowSpeed);
   }
-  if (g_ball.ambiguous || elapsedMs(now, g_ball.lastDetectMs) > c.lostHoldMs / 2) speed = speed < c.slowSpeed ? speed : c.slowSpeed;
+  if (g_ball.ambiguous || elapsedMs(now, g_ball.lastDetectMs) > irEffectiveHoldMs(c) / 2) speed = speed < c.slowSpeed ? speed : c.slowSpeed;
   if (absf(th) > 120.0f) speed = speed < c.slowSpeed ? speed : c.slowSpeed;   // ball behind: creep
   speed *= scale;
 
