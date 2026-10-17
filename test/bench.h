@@ -39,6 +39,7 @@ struct Dist {
 };
 
 static uint32_t g_benchSeed = 12345;
+static int g_benchBurstPeriodUs = 0;                       // 0 = interference has the ball's pulse period; else its own period (42 % duty)
 static int g_benchN = 240;                                 // trials per latency distribution
 static void benchReseed(int scenario) { srand(g_benchSeed * 7919u + (unsigned)scenario); }
 static double benchRand() { return (double)(rand() % 100000) / 100000.0; }
@@ -242,9 +243,9 @@ static int burstMask(int shape, int base) {
   return 0xFFF;
 }
 static void burstOn(int shape, int mask) {
-  for (int i = 0; i < 12; i++) if (mask >> i & 1) { bwSet(i, SIM_BALL); g_simPhase[i] = (shape == 3) ? 0 : (uint64_t)(rand() % 833); }
+  for (int i = 0; i < 12; i++) if (mask >> i & 1) { bwSet(i, SIM_BALL); g_simPhase[i] = (shape == 3) ? 0 : (uint64_t)(rand() % 833); g_simChPeriod[i] = g_benchBurstPeriodUs; }
 }
-static void burstOff(int mask) { for (int i = 0; i < 12; i++) if (mask >> i & 1) bwSet(i, SIM_IDLE); }
+static void burstOff(int mask) { for (int i = 0; i < 12; i++) if (mask >> i & 1) { bwSet(i, SIM_IDLE); g_simChPeriod[i] = 0; } }
 
 static bool benchBurstAcquiresShape(int shape, uint32_t durMs, uint32_t phaseUs, int base) {
   benchPrepare();
@@ -543,6 +544,7 @@ static int benchApplyArgs(int argc, char** argv, std::string* suite) {
     if (!strcmp(argv[i], "suite")) { *suite = eq + 1; *eq = '='; continue; }
     if (!strcmp(argv[i], "seed")) { g_benchSeed = (uint32_t)atoi(eq + 1); *eq = '='; continue; }
     if (!strcmp(argv[i], "n")) { g_benchN = atoi(eq + 1); *eq = '='; continue; }
+    if (!strcmp(argv[i], "burstperiod")) { g_benchBurstPeriodUs = atoi(eq + 1); *eq = '='; continue; }
     if (!strcmp(argv[i], "verified")) { *eq = '='; continue; }
     const ParamDef* p = paramFind(argv[i]);
     if (!p) { fprintf(stderr, "unknown parameter %s\n", argv[i]); return 1; }
@@ -745,6 +747,30 @@ static int benchMain(int argc, char** argv) {
         char b[16]; snprintf(b, sizeof(b), " %d:%d", d, got); row += b;
       }
       printf("  %-12s E[accept | U(20,250)] = %.3f   (durations:accepted/96)%s\n", BURST_SHAPE[shape], area / 230.0, row.c_str());
+    }
+  }
+  if (want("young")) {
+    benchReseed(18);
+    printf("YOUNG TRACK: gap right after acquisition (ball acquired, +100 ms of signal, then silent for the gap, then returns; 48 phases). Cell = lost of 48 | median re-acquire ms\n");
+    for (int nrx = 1; nrx <= 2; nrx++) {
+      printf("  %d receiver%s:", nrx, nrx > 1 ? "s" : " ");
+      for (uint32_t gap : {40u, 80u, 120u, 160u, 200u, 250u, 300u}) {
+        int lost = 0; Dist re;
+        for (int k = 0; k < 48; k++) {
+          benchPrepare(); benchEnableAuto();
+          benchWaitUs((uint32_t)((uint64_t)span * k / 48));
+          if (nrx == 1) bwBall(90, 10); else bwBall(75, 20);
+          int mask = bwMask(); uint64_t t0 = g_mockUs;
+          while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
+          benchRun(100); bwOff(); bool l = false; uint64_t t1 = g_mockUs;
+          while (g_mockUs - t1 < (uint64_t)gap * 1000ULL) { benchStep(); if (!g_ball.valid) l = true; }
+          bwBallMask(mask); uint64_t t2 = g_mockUs;
+          while (g_mockUs - t2 < 1000000ULL && !(g_ball.valid && l)) { benchStep(); if (!g_ball.valid) l = true; if (g_ball.valid && l) { re.add(msSince(t2)); break; } if (g_ball.valid && !l) break; }
+          lost += l; bwClear();
+        }
+        printf(" | %3u ms: %2d lost %s", (unsigned)gap, lost, re.v.empty() ? "-" : std::to_string((int)re.pct(0.5)).c_str());
+      }
+      printf("\n");
     }
   }
   if (want("dbg2")) {

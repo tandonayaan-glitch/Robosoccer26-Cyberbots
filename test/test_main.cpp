@@ -2161,6 +2161,26 @@ static void t_engine_switch_at_run_time() {
   CHECK(allWheelsStopped());
 }
 
+
+static void t_e2_phantom_exposure() {
+  // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
+  // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
+  bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
+  g_cfg.acqSpan1Ms = 96; g_cfg.acqSpan2Ms = 30;                // the fast profile accepts short bursts
+  irRestartSchedule(); bwClear(); simRun(500);
+  std::vector<double> after;
+  for (int k = 0; k < 24; k++) {
+    bool a; double lostAfter;
+    benchBrief(2, 80, (uint32_t)(k * 3010), &a, &lostAfter);
+    if (a && lostAfter >= 0) after.push_back(lostAfter);
+  }
+  CHECK(after.size() >= 5);
+  std::sort(after.begin(), after.end());
+  double median = after.empty() ? 1e9 : after[after.size() / 2];
+  printf("  accepted %zu, median loss after the burst %.0f ms, worst %.0f ms\n", after.size(), median, after.empty() ? 0.0 : after.back());
+  CHECK(median <= 200.0);                                      // median was 299 ms; the worst case stays at the 300 ms cap
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2176,7 +2196,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

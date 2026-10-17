@@ -1,0 +1,232 @@
+START-UP (post-setup scheduling): 41 cycles since setup() finished, cycle min 36.12 max 36.12 ms, window overrun max 0 us
+CONFIG: seed=22345 n=240 suite=all | seed=22345
+ENGINE=2 window=3000 us settle=10 us hold=150..300 ms (flicker 290) acqstreak=4 acqspan=140/70 focus=1 reacq=300
+SCAN: ring cycle (time to open each enabled window once) = 36.12 ms nominal [min 36.12 max 36.12]; per-receiver revisit interval max seen: 36.12 ms (best receiver 36.12 ms); window overrun max 0 us
+ACQUISITION, ball appears, 1 receiver (onset -> stage; onset phase spread over 2 scan cycles):
+  first window closed on a ball receiver     n= 240  median=   18.2  p95=   34.3  p99=   35.8  max=   36.1 ms
+  first candidate evidence (DETECT window)   n= 240  median=   19.0  p95=   35.1  p99=   36.6  max=   36.9 ms
+  ball confirmed (valid)                     n= 240  median=  160.5  p95=  176.7  p99=  178.2  max=  178.4 ms
+  direction within 20 deg                    n= 240  median=  160.5  p95=  176.7  p99=  178.2  max=  178.4 ms
+  navigation command (translation)           n= 240  median=  160.5  p95=  176.7  p99=  178.2  max=  178.4 ms
+  first motor output (PWM > 0)               n= 240  median=  160.5  p95=  176.7  p99=  178.2  max=  178.4 ms
+  wheels reach start PWM (minpwm)            n= 240  median=  160.5  p95=  176.7  p99=  178.2  max=  178.4 ms
+ACQUISITION, ball appears, 2 receivers (onset -> stage; onset phase spread over 2 scan cycles):
+  first window closed on a ball receiver     n= 240  median=   16.4  p95=   31.9  p99=   32.8  max=   33.1 ms
+  first candidate evidence (DETECT window)   n= 240  median=   17.2  p95=   32.4  p99=   33.5  max=   34.2 ms
+  ball confirmed (valid)                     n= 240  median=   89.5  p95=  104.7  p99=  105.8  max=  106.5 ms
+  direction within 20 deg                    n= 240  median=   89.5  p95=  104.7  p99=  105.8  max=  106.5 ms
+  navigation command (translation)           n= 240  median=   89.5  p95=  104.7  p99=  105.8  max=  106.5 ms
+  first motor output (PWM > 0)               n= 240  median=   89.5  p95=  104.7  p99=  105.8  max=  106.5 ms
+  wheels reach start PWM (minpwm)            n= 240  median=   89.5  p95=  104.7  p99=  105.8  max=  106.5 ms
+ACQUISITION, ball appears, 3 receivers (onset -> stage; onset phase spread over 2 scan cycles):
+  first window closed on a ball receiver     n= 240  median=   14.4  p95=   28.9  p99=   30.0  max=   30.1 ms
+  first candidate evidence (DETECT window)   n= 240  median=   15.4  p95=   29.4  p99=   30.6  max=   31.2 ms
+  ball confirmed (valid)                     n= 240  median=   87.7  p95=  101.7  p99=  102.9  max=  103.5 ms
+  direction within 20 deg                    n= 240  median=   87.7  p95=  101.7  p99=  102.9  max=  103.5 ms
+  navigation command (translation)           n= 240  median=   87.7  p95=  101.7  p99=  102.9  max=  103.5 ms
+  first motor output (PWM > 0)               n= 240  median=   87.7  p95=  101.7  p99=  102.9  max=  103.5 ms
+  wheels reach start PWM (minpwm)            n= 240  median=   87.7  p95=  101.7  p99=  102.9  max=  103.5 ms
+  1 receiver, 30 % misses: confirmed         n= 240  median=  180.7  p95=  262.5  p99=  310.3  max=  361.5 ms
+  2 receivers, 30 % misses: confirmed        n= 240  median=   99.9  p95=  152.3  p99=  190.5  max=  232.6 ms
+  1 receiver, 50 % misses: confirmed         n= 240  median=  207.3  p95=  395.6  p99=  616.0  max=  754.3 ms
+  2 receivers, 50 % misses: confirmed        n= 240  median=  128.2  p95=  256.8  p99=  285.9  max=  299.1 ms
+  2 receivers, 20 ms loop stall every ~150 ms n= 240  median=   89.7  p95=  104.7  p99=  105.8  max=  106.2 ms
+  1 receiver, onset on a 100 us grid over one ring cycle n= 362  median=  160.5  p95=  176.7  p99=  178.0  max=  178.4 ms
+      worst onset phase 14200 us -> 178.4 ms
+LOSS after a STRONG track, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   17.2  p95=   34.2  p99=   35.7  max=   36.0 ms
+  ball declared lost                         n= 240  median=  134.5  p95=  150.2  p99=  151.1  max=  152.1 ms
+  translation request cleared                n= 240  median=  134.5  p95=  150.2  p99=  151.1  max=  152.1 ms
+  translation PWM first < 90 % of steady     n= 240  median=   45.0  p95=   61.5  p99=   64.4  max=   64.9 ms
+  translation PWM <= 10 % of steady          n= 240  median=  184.4  p95=  199.8  p99=  201.6  max=  209.5 ms
+LOSS after a STRONG track, ball disappears, 2 receivers (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   16.6  p95=   30.7  p99=   32.1  max=   32.9 ms
+  ball declared lost                         n= 240  median=  134.3  p95=  150.4  p99=  151.4  max=  151.5 ms
+  translation request cleared                n= 240  median=  134.3  p95=  150.4  p99=  151.4  max=  151.5 ms
+  translation PWM first < 90 % of steady     n= 240  median=   59.9  p95=   71.2  p99=   72.6  max=   74.8 ms
+  translation PWM <= 10 % of steady          n= 240  median=  189.1  p95=  206.8  p99=  211.0  max=  211.2 ms
+LOSS after a STRONG track, ball disappears, 3 receivers (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   14.6  p95=   28.0  p99=   29.2  max=   29.9 ms
+  ball declared lost                         n= 240  median=  136.3  p95=  150.8  p99=  151.6  max=  151.8 ms
+  translation request cleared                n= 240  median=  136.3  p95=  150.8  p99=  151.6  max=  151.8 ms
+  translation PWM first < 90 % of steady     n= 240  median=   47.8  p95=   62.8  p99=   64.6  max=   65.2 ms
+  translation PWM <= 10 % of steady          n= 240  median=  190.9  p95=  208.3  p99=  210.6  max=  211.2 ms
+  WEAK track 30 % misses, 1 rx: declared lost n= 120  median=  285.3  p95=  291.3  p99=  291.6  max=  292.1 ms
+  WEAK track 30 % misses, 1 rx: PWM <= 10 %  n= 120  median=  335.6  p95=  348.0  p99=  350.4  max=  350.7 ms
+  WEAK track 30 % misses, 2 rx: declared lost n= 120  median=  280.7  p95=  290.7  p99=  291.3  max=  291.3 ms
+  WEAK track 30 % misses, 2 rx: PWM <= 10 %  n= 120  median=  334.6  p95=  350.2  p99=  350.7  max=  350.8 ms
+  WEAK track 50 % misses, 1 rx: declared lost n= 120  median=  285.6  p95=  291.5  p99=  291.7  max=  292.0 ms
+  WEAK track 50 % misses, 1 rx: PWM <= 10 %  n= 120  median=  336.6  p95=  350.3  p99=  351.0  max=  351.2 ms
+  WEAK track 50 % misses, 2 rx: declared lost n= 120  median=  284.7  p95=  291.6  p99=  292.1  max=  294.0 ms
+  WEAK track 50 % misses, 2 rx: PWM <= 10 %  n= 120  median=  340.7  p95=  350.8  p99=  351.8  max=  353.5 ms
+  WEAK track 70 % misses, 1 rx: declared lost n= 120  median=  279.5  p95=  295.5  p99=  299.0  max=  301.3 ms
+  WEAK track 70 % misses, 1 rx: PWM <= 10 %  n= 120  median=  332.1  p95=  348.6  p99=  351.2  max=  356.0 ms
+  WEAK track 70 % misses, 2 rx: declared lost n= 120  median=  287.6  p95=  299.7  p99=  300.9  max=  301.4 ms
+  WEAK track 70 % misses, 2 rx: PWM <= 10 %  n= 120  median=  341.5  p95=  357.2  p99=  360.7  max=  368.2 ms
+DIRECTION UPDATE, ball jumps between sectors (jump -> stage):
+  adjacent sector 90 -> 120 estimate         n= 120  median=   74.2  p95=   85.6  p99=   86.8  max=   87.4 ms
+  adjacent sector 90 -> 120 nav command      n= 120  median=   38.6  p95=   53.4  p99=   55.5  max=   55.7 ms
+      worst excursion from the short arc: 0 deg
+  adjacent sector 90 -> 60 estimate          n= 120  median=   72.3  p95=   87.4  p99=   88.6  max=   89.2 ms
+  adjacent sector 90 -> 60 nav command       n= 120  median=   35.2  p95=   52.3  p99=   54.0  max=   55.3 ms
+      worst excursion from the short arc: 0 deg
+  opposite sector 90 -> 270 estimate         n= 120  median=  160.2  p95=  176.5  p99=  177.7  max=  178.3 ms
+  opposite sector 90 -> 270 nav command      n= 120  median=  160.2  p95=  176.5  p99=  177.7  max=  178.3 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 0 estimate               n= 120  median=   73.9  p95=   86.3  p99=   87.9  max=   88.0 ms
+  front seam 330 -> 0 nav command            n= 120  median=   38.9  p95=   53.5  p99=   55.7  max=   56.7 ms
+      worst excursion from the short arc: 0 deg
+  front seam 0 -> 330 estimate               n= 120  median=   72.3  p95=   86.9  p99=   88.5  max=   88.6 ms
+  front seam 0 -> 330 nav command            n= 120  median=   58.2  p95=   70.8  p99=   73.6  max=   74.0 ms
+      worst excursion from the short arc: 0 deg
+  front seam 330 -> 30 estimate              n= 120  median=   98.0  p95=  111.5  p99=  112.7  max=  112.7 ms
+  front seam 330 -> 30 nav command           n= 120  median=   92.4  p95=  106.3  p99=  108.3  max=  108.6 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 180 estimate              n= 120  median=   74.2  p95=   86.2  p99=   87.4  max=   88.0 ms
+  rear seam 150 -> 180 nav command           n= 120  median=   38.7  p95=   53.4  p99=   56.0  max=   56.2 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 180 -> 210 estimate              n= 120  median=   73.9  p95=   86.3  p99=   87.9  max=   88.0 ms
+  rear seam 180 -> 210 nav command           n= 120  median=   39.1  p95=   53.7  p99=   55.9  max=   56.9 ms
+      worst excursion from the short arc: 0 deg
+  rear seam 150 -> 210 estimate              n= 120  median=   97.6  p95=  110.9  p99=  112.5  max=  112.7 ms
+  rear seam 150 -> 210 nav command           n= 120  median=   84.7  p95=   99.8  p99=  102.2  max=  103.2 ms
+      worst excursion from the short arc: 0 deg
+  adjacent 90 -> 120 with 30 % misses        n= 120  median=   85.9  p95=  143.1  p99=  249.2  max=  392.0 ms
+MOVING BALL circling the robot (receivers see +-10 deg / +-20 deg around the ball): bearing error vs truth, signed mean (= lag), losses per revolution, fraction of time valid
+    30 deg/s, misses  0%, 1-rx view: mean|err|   6.0  p95  13.2  max  14.4  signed   -2.9 deg | losses 12 | valid 0.747
+    30 deg/s, misses  0%, 2-rx view: mean|err|   3.8  p95   9.0  max  10.8  signed   -2.6 deg | losses 0 | valid 1.000
+    30 deg/s, misses 30%, 1-rx view: mean|err|   7.2  p95  16.2  max  18.6  signed   -4.7 deg | losses 12 | valid 0.836
+    30 deg/s, misses 30%, 2-rx view: mean|err|   4.3  p95  10.8  max  15.6  signed   -3.2 deg | losses 0 | valid 1.000
+    90 deg/s, misses  0%, 1-rx view: mean|err|   9.3  p95  21.0  max  23.4  signed   -7.3 deg | losses 0 | valid 1.000
+    90 deg/s, misses  0%, 2-rx view: mean|err|   7.4  p95  11.2  max  13.4  signed   -7.4 deg | losses 0 | valid 1.000
+    90 deg/s, misses 30%, 1-rx view: mean|err|  10.9  p95  23.4  max  30.6  signed  -10.4 deg | losses 3 | valid 0.960
+    90 deg/s, misses 30%, 2-rx view: mean|err|   9.8  p95  24.7  max  42.6  signed   -9.4 deg | losses 0 | valid 1.000
+   180 deg/s, misses  0%, 1-rx view: mean|err|  17.8  p95  27.0  max  31.3  signed  -17.8 deg | losses 0 | valid 1.000
+   180 deg/s, misses  0%, 2-rx view: mean|err|  15.9  p95  19.2  max  21.8  signed  -15.9 deg | losses 0 | valid 1.000
+   180 deg/s, misses 30%, 1-rx view: mean|err|  19.8  p95  39.0  max  49.5  signed  -19.5 deg | losses 1 | valid 0.787
+   180 deg/s, misses 30%, 2-rx view: mean|err|  18.4  p95  26.8  max  40.9  signed  -18.4 deg | losses 0 | valid 1.000
+   360 deg/s, misses  0%, 1-rx view: mean|err|  35.7  p95  78.3  max  96.0  signed  -35.7 deg | losses 0 | valid 1.000
+   360 deg/s, misses  0%, 2-rx view: mean|err|  31.7  p95  39.7  max  41.7  signed  -31.7 deg | losses 0 | valid 1.000
+   360 deg/s, misses 30%, 1-rx view: mean|err|  34.0  p95  57.9  max  65.3  signed  -34.0 deg | losses 0 | valid 1.000
+   360 deg/s, misses 30%, 2-rx view: mean|err|  31.8  p95  47.0  max  60.9  signed  -31.8 deg | losses 0 | valid 1.000
+   720 deg/s, misses  0%, 1-rx view: mean|err|  53.4  p95  65.8  max  66.3  signed  -53.4 deg | losses 0 | valid 1.000
+   720 deg/s, misses  0%, 2-rx view: mean|err|  53.5  p95  64.2  max  65.1  signed  -53.5 deg | losses 0 | valid 1.000
+   720 deg/s, misses 30%, 1-rx view: mean|err| 100.7  p95 171.6  max 174.9  signed  -45.5 deg | losses 1 | valid 0.701
+   720 deg/s, misses 30%, 2-rx view: mean|err|  52.5  p95  62.9  max  63.6  signed  -52.5 deg | losses 0 | valid 1.000
+BRIEF APPEARANCE (ball visible for d ms then gone; 48 phases): acquired count / median and p95 time from the end of the signal to the loss declaration
+  1 receiver : |  40 ms:  0/48 lost@- |  60 ms:  0/48 lost@- |  80 ms:  0/48 lost@- | 100 ms:  0/48 lost@- | 150 ms: 48/48 lost@149/189 | 200 ms: 48/48 lost@146/150 | 300 ms: 48/48 lost@134/150 | 600 ms: 48/48 lost@157/172
+  2 receivers: |  40 ms:  0/48 lost@- |  60 ms:  0/48 lost@- |  80 ms: 16/48 lost@170/231 | 100 ms: 45/48 lost@149/231 | 150 ms: 48/48 lost@149/151 | 200 ms: 48/48 lost@137/150 | 300 ms: 48/48 lost@171/185 | 600 ms: 48/48 lost@165/181
+APPROACH SPEED while tracking (mean commanded translation PWM over 6 s after 2 s of settling; fraction of the clean-signal value):
+  misses  0%, 1 rx: mean translation  170.0 PWM = 1.00 of clean 1-rx
+  misses  0%, 2 rx: mean translation  145.1 PWM = 0.85 of clean 1-rx
+  misses 10%, 1 rx: mean translation  169.1 PWM = 0.99 of clean 1-rx
+  misses 10%, 2 rx: mean translation  144.9 PWM = 0.85 of clean 1-rx
+  misses 30%, 1 rx: mean translation  170.0 PWM = 1.00 of clean 1-rx
+  misses 30%, 2 rx: mean translation  144.9 PWM = 0.85 of clean 1-rx
+  misses 50%, 1 rx: mean translation  170.0 PWM = 1.00 of clean 1-rx
+  misses 50%, 2 rx: mean translation  145.2 PWM = 0.85 of clean 1-rx
+  misses 70%, 1 rx: mean translation  169.7 PWM = 1.00 of clean 1-rx
+  misses 70%, 2 rx: mean translation  145.5 PWM = 0.86 of clean 1-rx
+BALL MODULATION PERIOD sweep (42 % duty; the real ball's modulation is UNVERIFIED): a longer period gives fewer pulses per 3 ms window, i.e. a naturally flickering signal
+  period  600 us: 2-rx acquired 48/48 median    89 p95   104 ms | steady loss median   135 p95   151 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period  833 us: 2-rx acquired 48/48 median    90 p95   104 ms | steady loss median   136 p95   150 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 1000 us: 2-rx acquired 48/48 median    90 p95   104 ms | steady loss median   135 p95   151 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 1250 us: 2-rx acquired 48/48 median    90 p95   104 ms | steady loss median   135 p95   150 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 1500 us: 2-rx acquired 48/48 median    90 p95   105 ms | steady loss median   135 p95   150 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 2000 us: 2-rx acquired 48/48 median   149 p95   236 ms | steady loss median   286 p95   288 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 2500 us: 2-rx acquired 48/48 median   261 p95   598 ms | steady loss median   287 p95   299 ms (n=24) | false losses/min 1rx 0.0 2rx 0.0
+  period 3000 us: 2-rx acquired  0/48 median    -1 p95    -1 ms | steady loss median    -1 p95    -1 ms (n=0) | false losses/min 1rx 0.0 2rx 0.0
+YOUNG TRACK: gap right after acquisition (ball acquired, +100 ms of signal, then silent for the gap, then returns; 48 phases). Cell = lost of 48 | median re-acquire ms
+  1 receiver : |  40 ms:  0 lost - |  80 ms:  0 lost - | 120 ms:  0 lost - | 160 ms: 48 lost 52 | 200 ms: 48 lost 49 | 250 ms: 48 lost 71 | 300 ms: 48 lost 57
+  2 receivers: |  40 ms:  0 lost - |  80 ms:  0 lost - | 120 ms:  0 lost - | 160 ms: 48 lost 37 | 200 ms: 48 lost 70 | 250 ms: 48 lost 56 | 300 ms: 48 lost 42
+DIRECTION ACCURACY of a static ball (bearings every 7.5 deg, 3 s each, 20 ms samples; error vs truth): mean |err| / worst / samples lost
+  misses  0%, receiver fov +-10 deg: mean |err|  5.00 deg, mean jitter(std)  0.00 deg, worst    7.5 deg, lost samples 1812
+  misses  0%, receiver fov +-20 deg: mean |err|  3.76 deg, mean jitter(std)  0.01 deg, worst    7.5 deg, lost samples 0
+  misses 30%, receiver fov +-10 deg: mean |err|  5.00 deg, mean jitter(std)  0.00 deg, worst    7.5 deg, lost samples 1812
+  misses 30%, receiver fov +-20 deg: mean |err|  3.94 deg, mean jitter(std)  0.16 deg, worst    7.5 deg, lost samples 0
+  misses 50%, receiver fov +-10 deg: mean |err|  5.00 deg, mean jitter(std)  0.00 deg, worst    7.5 deg, lost samples 1812
+  misses 50%, receiver fov +-20 deg: mean |err|  4.11 deg, mean jitter(std)  0.32 deg, worst   12.1 deg, lost samples 0
+DROPOUT of a tracked ball (ball vanishes for gap, then returns; 48 phases each). Cell = declared lost / left APPROACH / median re-acquire ms:
+  strong, 1 receiver         |  20: 0/ 0/- |  40: 0/ 0/- |  60: 0/ 0/- |  80: 0/ 0/- | 100: 0/ 0/- | 120: 9/ 9/64 | 150:46/46/52 | 200:48/48/54 | 250:48/48/54 | 300:48/48/55
+  strong, 2 receivers        |  20: 0/ 0/- |  40: 0/ 0/- |  60: 0/ 0/- |  80: 0/ 0/- | 100: 0/ 0/- | 120: 2/ 3/63 | 150:44/44/50 | 200:48/48/51 | 250:48/48/52 | 300:48/48/51
+  weak 30 % misses, 1 rx     |  20: 0/ 0/- |  40: 0/ 0/- |  60: 0/ 0/- |  80: 0/ 0/- | 100: 0/ 0/- | 120: 0/ 0/- | 150: 0/ 0/- | 200: 0/ 0/- | 250: 5/ 5/61 | 300:48/48/81
+  weak 50 % misses, 1 rx     |  20: 0/ 0/- |  40: 0/ 0/- |  60: 0/ 0/- |  80: 0/ 0/- | 100: 0/ 0/- | 120: 0/ 0/- | 150: 0/ 0/- | 200: 0/ 0/- | 250: 0/ 0/- | 300:48/48/107
+  weak 50 % misses, 2 rx     |  20: 0/ 0/- |  40: 0/ 0/- |  60: 0/ 0/- |  80: 0/ 0/- | 100: 0/ 0/- | 120: 0/ 0/- | 150: 0/ 0/- | 200: 0/ 0/- | 250: 1/ 1/47 | 300:48/48/70
+FALSE LOSS under independent per-visit misses (120 s each; false losses per minute | fraction of ball time reported valid):
+  1 receiver :  miss 10%:  0.50/min 0.999 |  miss 30%:  0.00/min 1.000 |  miss 50%:  0.00/min 1.000 |  miss 70%:  0.00/min 1.000 |
+  2 receivers:  miss 10%:  0.00/min 1.000 |  miss 30%:  0.00/min 1.000 |  miss 50%:  0.00/min 1.000 |  miss 70%:  0.00/min 1.000 |
+  3 receivers:  miss 10%:  0.00/min 1.000 |  miss 30%:  0.00/min 1.000 |  miss 50%:  0.00/min 1.000 |  miss 70%:  0.00/min 1.000 |
+FALSE ACQUISITION by ball-like bursts with NO ball present (48 phases each; count acquired):
+  1 receiver     |  20 ms: 0/48 |  40 ms: 0/48 |  60 ms: 0/48 |  80 ms: 0/48 | 100 ms: 0/48 | 120 ms: 0/48 | 140 ms: 0/48 | 160 ms:23/48 | 180 ms:48/48 | 200 ms:48/48 | 250 ms:48/48 | 500 ms:48/48
+  2 neighbours   |  20 ms: 0/48 |  40 ms: 0/48 |  60 ms: 0/48 |  80 ms:20/48 | 100 ms:40/48 | 120 ms:48/48 | 140 ms:48/48 | 160 ms:48/48 | 180 ms:48/48 | 200 ms:48/48 | 250 ms:48/48 | 500 ms:48/48
+  3 neighbours   |  20 ms: 0/48 |  40 ms: 0/48 |  60 ms: 0/48 |  80 ms:13/48 | 100 ms:43/48 | 120 ms:48/48 | 140 ms:48/48 | 160 ms:48/48 | 180 ms:48/48 | 200 ms:48/48 | 250 ms:48/48 | 500 ms:48/48
+  ring coherent  |  20 ms: 0/48 |  40 ms: 0/48 |  60 ms: 0/48 |  80 ms: 0/48 | 100 ms: 0/48 | 120 ms: 0/48 | 140 ms: 0/48 | 160 ms: 0/48 | 180 ms: 0/48 | 200 ms: 0/48 | 250 ms: 0/48 | 500 ms: 0/48
+  ring random    |  20 ms: 0/48 |  40 ms: 0/48 |  60 ms: 0/48 |  80 ms: 0/48 | 100 ms: 0/48 | 120 ms: 0/48 | 140 ms: 0/48 | 160 ms: 0/48 | 180 ms: 0/48 | 200 ms: 0/48 | 250 ms: 0/48 | 500 ms: 0/48
+INTERFERENCE WHILE TRACKING a 2-receiver ball at 75 deg (48 phases each): worst bearing error p95 / max, false losses, retargets (>40 deg):
+  opposite receiver      |  40 ms: err   0.1/  0.1 lost  0 ret  0 | 100 ms: err   0.1/  0.1 lost  0 ret  0 | 250 ms: err   0.1/  0.1 lost  0 ret  0
+  receiver next to ball  |  40 ms: err  10.8/ 10.8 lost  0 ret  0 | 100 ms: err  12.6/ 12.6 lost  0 ret  0 | 250 ms: err  14.4/ 14.4 lost  0 ret  0
+  rest of ring           |  40 ms: err  15.2/ 15.2 lost  0 ret  0 | 100 ms: err  18.5/ 18.5 lost  0 ret  0 | 250 ms: err  15.9/ 15.9 lost  0 ret  0
+  ball gone, steady source OPPOSITE: old track abandoned n=  48  median=  132.1  p95=  147.9  p99=      -  max=  149.4 ms
+  ball gone, steady source NEIGHBOUR: old track abandoned n=  48  median=   95.3  p95=  109.8  p99=      -  max=  110.3 ms
+CHANNEL FAULTS (ball at 90 deg on receivers 2,3,4). acquire = ball confirmed, loss = removal -> declared. 'early' = fault not yet diagnosed, 'late' = after 3 s:
+ fault: none
+    acquire (early)                          n=  24  median=   84.1  p95=  101.7  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   82.2  p95=  100.3  p99=      -  max=  103.3 ms
+    loss (early)                             n=  24  median=  138.9  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: ball receiver dead (stuck inactive)
+    acquire (early)                          n=  24  median=   88.6  p95=  101.7  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   83.7  p95=   98.9  p99=      -  max=  100.3 ms
+    loss (early)                             n=  24  median=  143.4  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: ball receiver stuck active
+    acquire (early)                          n=  24  median=   88.6  p95=  101.7  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   85.2  p95=  100.3  p99=      -  max=  103.3 ms
+    loss (early)                             n=  24  median=  143.4  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: neighbour stuck active
+    acquire (early)                          n=  24  median=   84.1  p95=  101.7  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   82.2  p95=   99.4  p99=      -  max=  100.3 ms
+    loss (early)                             n=  24  median=  137.4  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: far receiver noisy
+    acquire (early)                          n=  24  median=   84.1  p95=  102.1  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   82.2  p95=  100.3  p99=      -  max=  103.3 ms
+    loss (early)                             n=  24  median=  138.9  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: far receiver stuck active
+    acquire (early)                          n=  24  median=   84.1  p95=  101.7  p99=      -  max=  102.1 ms
+    acquire (late)                           n=  24  median=   82.2  p95=  100.3  p99=      -  max=  103.3 ms
+    loss (early)                             n=  24  median=  138.9  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  139.6  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+ fault: neighbour disabled
+    acquire (early)                          n=  24  median=   84.1  p95=   98.7  p99=      -  max=   99.1 ms
+    acquire (late)                           n=  24  median=   85.2  p95=   97.3  p99=      -  max=  100.3 ms
+    loss (early)                             n=  24  median=  144.9  p95=  150.9  p99=      -  max=  150.9 ms
+    loss (late)                              n=  24  median=  141.1  p95=  150.1  p99=      -  max=  150.1 ms
+      false acquisitions with no ball in 60 s: 0   false losses/min for a 30 %-miss ball: 0
+SCHEDULER STALLS (loop does not run for the stall time; 60 s each; strong 2-receiver ball | weak 30% 1-receiver ball): false losses / invalid windows / max revisit ms / max window overrun us
+  stall  10 ms every ~0.7 s:  strong: 0/85/46/10000   weak: 0/84/82/10000
+  stall  20 ms every ~0.7 s:  strong: 0/85/56/20000   weak: 0/79/92/20000
+  stall  50 ms every ~0.7 s:  strong: 0/77/86/50000   weak: 0/76/122/50000
+  stall 100 ms every ~0.7 s:  strong: 0/74/136/100000   weak: 0/77/172/100000
+  stall 200 ms every ~0.7 s:  strong: 0/65/236/199950   weak: 0/67/272/200000
+MIXED SOAK with ground truth (random ball segments with 0-50 % misses, dropouts 20-300 ms, bursts 10-250 ms of random shape):
+  seed 22345: 125 ball segments, 4 missed (never acquired in >=0.9 s), false acquisitions 44 (4.40/min), false losses 6 (0.60/min), losses during dropouts 38, bursts 407 (eligible 131, accepted 49 = 37 %), phantom tracking 2.2 s/min, valid while ball 94.4 %
+    ball-segment start -> first valid        n= 160  median=  157.9  p95= 3485.7  p99= 5282.2  max= 5835.8 ms
+    segment end -> declared lost             n= 121  median=  201.6  p95=  443.7  p99=  578.0  max=  670.5 ms
+  seed 22346: 124 ball segments, 3 missed (never acquired in >=0.9 s), false acquisitions 57 (5.70/min), false losses 6 (0.60/min), losses during dropouts 34, bursts 413 (eligible 119, accepted 56 = 47 %), phantom tracking 2.8 s/min, valid while ball 94.0 %
+    ball-segment start -> first valid        n= 153  median=  167.3  p95= 3856.8  p99= 5345.6  max= 5526.3 ms
+    segment end -> declared lost             n= 122  median=  263.3  p95=  426.3  p99=  566.1  max=  642.6 ms
+  seed 22347: 121 ball segments, 4 missed (never acquired in >=0.9 s), false acquisitions 53 (5.30/min), false losses 7 (0.70/min), losses during dropouts 26, bursts 433 (eligible 141, accepted 61 = 43 %), phantom tracking 3.0 s/min, valid while ball 95.3 %
+    ball-segment start -> first valid        n= 141  median=  149.4  p95= 3640.1  p99= 4579.3  max= 5461.6 ms
+    segment end -> declared lost             n= 118  median=  176.4  p95=  446.7  p99=  741.5  max=  831.1 ms
+HOST CPU (x86 wall clock per loop() call incl. mock signal generation; NOT ESP32 time): idle 98 ns, tracking 58 ns (host-relative comparison between engines only)
+HOST CPU estimator only: 688 ns per call (engine 2), called once per 3 ms window (engine 0: once per 36 ms cycle)
+TOTAL host time 85.3 s for 787444072 loop iterations

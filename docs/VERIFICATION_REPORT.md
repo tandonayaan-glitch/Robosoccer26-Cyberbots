@@ -6,7 +6,7 @@ Every claim in this repository carries one of these evidence classes. Nothing is
 |---|---|---|
 | **A. REAL-BUILD** | Compiled by the real Arduino-ESP32 core + Xtensa GCC | **Done for 2.0.17 and 3.0.7** (§1) |
 | **B. EMU** | The real compiled binary executed in a third-party ESP32 emulator | Boot-level only (§2) |
-| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 87 cases × 2 API shapes (§3) |
+| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 88 cases × 2 API shapes (§3) |
 | **D. STATIC** | cppcheck, clang-tidy, Valgrind, sanitizers, compiler warnings | Done (§4) |
 | **E. ELECTRICAL** | Needs inspection/measurement of the real circuit | **Not done** |
 | **F. BALL** | Needs the real competition ball | **Not done** |
@@ -20,8 +20,8 @@ Every claim in this repository carries one of these evidence classes. Nothing is
 
 | Core | Compiler | arduino-cli | Result | Flash | RAM (static) | Warnings |
 |---|---|---|---|---|---|---|
-| Arduino-ESP32 **2.0.17** (IDF 4.4.7) | xtensa-esp32-elf-gcc 8.4.0 (esp-2021r2-patch5) | 0.35.3 | **success** | 420,401 B (32 %) | 70,500 B (21 %) | **0** |
-| Arduino-ESP32 **3.0.7** (IDF 5.1.4) | xtensa-esp32-elf-gcc 12.2 (esp-x32 2302) | 1.1.1 | **success** | 442,257 B (33 %) | 69,344 B (21 %) | **0** |
+| Arduino-ESP32 **2.0.17** (IDF 4.4.7) | xtensa-esp32-elf-gcc 8.4.0 (esp-2021r2-patch5) | 0.35.3 | **success** | 420,409 B (32 %) | 70,500 B (21 %) | **0** |
+| Arduino-ESP32 **3.0.7** (IDF 5.1.4) | xtensa-esp32-elf-gcc 12.2 (esp-x32 2302) | 1.1.1 | **success** | 442,265 B (33 %) | 69,344 B (21 %) | **0** |
 
 Command (per core): `arduino-cli compile --fqbn esp32:esp32:esp32 --warnings all Robosoccer26_Cyberbots`.
 
@@ -43,7 +43,7 @@ Command: `./test/run_tests.sh` (cleans `/tmp/mockfs*`, then for **mock core v3 a
 
 **Final result: 70 test cases × 2 core API shapes = 140 runs, 140 passed, 0 failed, 5,108 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
 
-Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · `89c3503` = 70 · current = **87** (the engine-2 regression tests listed below were added). The suite grew as audits added regression tests.
+Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · `89c3503` = 70 · current = **88** (the engine-2 regression tests listed below were added). The suite grew as audits added regression tests.
 
 | Area (requirement) | Test cases |
 |---|---|
@@ -58,7 +58,7 @@ Reconciliation of the counts quoted during development (counted from `git show <
 | Serial interface | `t_cli_robust` (CR/LF, NUL, high bytes, 4000-byte fuzz, overlong/unterminated lines), `t_diag_no_motion`, `t_live_ir_rate` |
 | Storage / logging / export | `t_fs_missing`, `t_fs_write_failure`, `t_fs_full`, `t_fs_commands` (format + watchdog + no false stall), `t_log_rotation`, `t_log_queue_overflow`, `t_flight_recorder`, `t_export` (CRC and row count == rows on disk), `t_nonblocking` |
 | Reports | `t_health_report_text`, `t_fault_report_format` |
-| Detector (engine 2) and its fallback | `t_e2_broadband_tail` (arc left after a broadband burst is not a ball), `t_e2_stall_is_not_absence`, `t_e2_focus_scheduling` (strong track: no extra windows; flickering track: focus, no receiver starved), `t_e2_grace_period_bounds`, `t_e2_dropout_survival`, `t_e2_reacquisition`, `t_e2_stop_after_loss` (brake before search, no wheel reversal), `t_e2_view_transitions`, `t_e2_stale_not_followed`, `t_e2_micros_wrap_steady`, `t_e2_micros_wrap_flicker`, `t_startup_schedule`, `t_scan_revisit_metrics`, `t_e2_config_params`, `t_irprofile`, `t_legacy_fallback`, `t_engine_switch_at_run_time`, `t_fast_engine_rejection`, `t_latency` |
+| Detector (engine 2) and its fallback | `t_e2_broadband_tail` (arc left after a broadband burst is not a ball), `t_e2_stall_is_not_absence`, `t_e2_focus_scheduling` (strong track: no extra windows; flickering track: focus, no receiver starved), `t_e2_grace_period_bounds`, `t_e2_dropout_survival`, `t_e2_reacquisition`, `t_e2_stop_after_loss` (brake before search, no wheel reversal), `t_e2_view_transitions`, `t_e2_phantom_exposure`, `t_e2_stale_not_followed`, `t_e2_micros_wrap_steady`, `t_e2_micros_wrap_flicker`, `t_startup_schedule`, `t_scan_revisit_metrics`, `t_e2_config_params`, `t_irprofile`, `t_legacy_fallback`, `t_engine_switch_at_run_time`, `t_fast_engine_rejection`, `t_latency` |
 
 Measured in simulation (not on hardware; docs/LATENCY_OPTIMIZATION.md): ring cycle 36.1 ms; acquisition (default profile, median/p95) 160/177 ms with 1 receiver, 90/105 ms with 2, 87/102 ms with 3 (legacy engine 224/240, 152/168, 118/134; `:irprofile fast` 127/144, 58/72, 52/66); steady-track loss 134/149 ms (legacy 545/561), flickering-track loss 285/291 ms; bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
 

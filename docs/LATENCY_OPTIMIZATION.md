@@ -290,17 +290,17 @@ The stalled windows are discarded (counted, never interpreted); the longest wait
 | soak (600 s × 3 sub-seeds per file) | legacy | engine 2 |
 |---|---|---|
 | runs | 9 | 9 |
-| ball segments / segments never acquired in ≥ 0.9 s | 1057 / 136 | 1092 / 36 |
-| eligible bursts that became a phantom track | 41 % (340 of 839) | 45 % (473 of 1061) |
-| phantom acquisitions per minute (count) | 3.8 | 5.1 |
-| time spent tracking a phantom, s per minute | 6.4 | 3.0 |
-| false losses per minute (ball present, no dropout in progress) | 1.13 | 0.51 |
+| ball segments / segments never acquired in ≥ 0.9 s | 1057 / 136 | 1076 / 30 |
+| eligible bursts that became a phantom track | 41 % (340 of 839) | 44 % (497 of 1129) |
+| phantom acquisitions per minute (count) | 3.8 | 5.3 |
+| time spent tracking a phantom, s per minute | 6.4 | 2.7 |
+| false losses per minute (ball present, no dropout in progress) | 1.13 | 0.59 |
 | losses during injected dropouts (20-300 ms) | 38 | 316 |
-| share of ball time reported valid | 92.7 % | 94.6 % |
-| mean over runs of the median 'segment start → valid' (ms) | 219 | 162 |
-| mean over runs of the median 'segment end → declared lost' (ms) | 540 | 224 |
+| share of ball time reported valid | 92.7 % | 94.7 % |
+| mean over runs of the median 'segment start → valid' (ms) | 219 | 159 |
+| mean over runs of the median 'segment end → declared lost' (ms) | 540 | 225 |
 
-Engine 2 produces **more** phantom acquisitions than the legacy engine in this busy mix (5.1 against 3.8 per minute, 45 % against 41 % of eligible bursts) but spends **half** the time on them (3.0 against 6.4 s per minute) because a phantom is dropped after 150-300 ms instead of 500 ms. It also loses the ball in **many more injected dropouts** (316 against 38): every silence longer than the grace of a steady track (§7.2) ends the track, and the ball is found again within about 55 ms. The per-shape tables of §7.4, measured on a quiet system, are the clean immunity comparison; the soak mixes everything and its eligibility depends on how long each engine keeps a track.
+Engine 2 produces **more** phantom acquisitions than the legacy engine in this busy mix (5.3 against 3.8 per minute, 44 % against 41 % of eligible bursts) but spends **less than half** the time on them (2.7 against 6.4 s per minute) because a phantom is dropped after 150-300 ms instead of 500 ms. It also loses the ball in **many more injected dropouts** (316 against 38): every silence longer than the grace of a steady track (§7.2) ends the track, and the ball is found again within about 55 ms. The per-shape tables of §7.4, measured on a quiet system, are the clean immunity comparison; the soak mixes everything and its eligibility depends on how long each engine keeps a track.
 
 ### 7.9 Ball moving around the robot (ball position updated every 10 ms)
 
@@ -333,10 +333,10 @@ bearing error against the true bearing; 'lag' is the signed mean error. '1-rx vi
 
 | ball visible for … | 40 ms | 60 ms | 80 ms | 100 ms | 150 ms | 200 ms | 300 ms | 600 ms |
 |---|---|---|---|---|---|---|---|---|
-| 1 receiver: acquired of 48, loss declared after the signal ended (median/p95 ms): legacy → engine 2 | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 8 (-) → 48 (278/300) | 48 (-) → 48 (146/150) | 48 (545/560) → 48 (133/149) | 48 (544/560) → 48 (157/172) |
-| 2 receivers: acquired of 48, loss declared after the signal ended (median/p95 ms): legacy → engine 2 | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 12 (-) → 20 (299/301) | 42 (-) → 46 (296/301) | 48 (557/563) → 48 (149/151) | 48 (547/563) → 48 (137/150) | 48 (546/562) → 48 (171/190) | 48 (547/563) → 48 (165/181) |
+| 1 receiver: acquired of 48, loss declared after the signal ended (median/p95 ms): legacy → engine 2 | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 8 (-) → 48 (149/189) | 48 (-) → 48 (146/150) | 48 (545/560) → 48 (134/150) | 48 (544/560) → 48 (157/171) |
+| 2 receivers: acquired of 48, loss declared after the signal ended (median/p95 ms): legacy → engine 2 | 0 (-) → 0 (-) | 0 (-) → 0 (-) | 12 (-) → 14 (170/231) | 42 (-) → 44 (149/231) | 48 (557/563) → 48 (149/151) | 48 (547/563) → 48 (137/150) | 48 (546/562) → 48 (171/190) | 48 (547/563) → 48 (165/181) |
 
-A ball that disappears right after being accepted is a *young* track: its grace is long (about 300 ms) because the sample is small.
+A ball that disappears right after being accepted is a *young* track: its grace is judged cautiously (up to 300 ms in the worst case, because the sample is small); with the follow-up of §11 the median is about 150-170 ms.
 
 ### 7.11 Modulation period of the ball (unverified in reality; 42 % duty)
 
@@ -369,7 +369,7 @@ Host wall clock (x86, not ESP32), per `loop()` call without / with a track and p
 
 ## 8. Tests
 
-`./test/run_tests.sh`: 87 cases × 2 core API shapes = 174 runs, 12,088 checks, 0 failed, ASan + UBSan, `-Wall -Wextra -Wshadow`. New in this work: `t_e2_*`, `t_startup_schedule`,
+`./test/run_tests.sh`: 88 cases × 2 core API shapes = 176 runs, 12,092 checks, 0 failed, ASan + UBSan, `-Wall -Wextra -Wshadow`. New in this work: `t_e2_*`, `t_startup_schedule`,
 `t_scan_revisit_metrics`, `t_irprofile`, `t_legacy_fallback`, `t_engine_switch_at_run_time`, `t_latency` (now separates young and steady tracks). Static analysis: `docs/bench/static_analysis.txt`
 (cppcheck: style notes only; clang-tidy: one known analyzer artefact; Valgrind memcheck clean on 12 heavy cases). Real builds: Arduino-ESP32 2.0.17 and 3.0.7, 0 warnings
 (`docs/bench/real_build_final.txt`); stack frames from `-fstack-usage`: `irService` 288 bytes including the inlined estimator (`docs/bench/stack_usage_2.0.17.txt`).
@@ -407,3 +407,48 @@ Host wall clock (x86, not ESP32), per `loop()` call without / with a track and p
 
 `Robosoccer26_Cyberbots/irscan.h` (engine 2, scheduler, scan metrics), `config.h` (new parameters, version 9), `nav.h` (event-driven transitions, brake before search, graded fade), `Robosoccer26_Cyberbots.ino`
 (early control tick), `report.h`, `cli.h` (`:irprofile`), `test/bench.h`, `test/test_main.cpp`, `tools/`, `docs/`. Unchanged: `pins.h`, `motors.h`, `imu.h`, `health.h`, `storage.h`, `logger.h` relative to `89c3503`.
+
+## 11. Follow-up: why `fast` accepts more bursts, and what could be done about it
+
+**Cause (exact).** A burst that looks like a ball can only be told apart from one by how long the evidence lasts, so the probability of accepting a burst of
+duration *d* equals the probability that a real ball's acquisition would be finished within *d*: `P(accept | d) = P(latency <= d)`. For bursts uniform in 20-250 ms this gives
+`E[accept] = (250 - mean latency) / 230`. Measured against the tables: 1 receiver fast 0.53 (predicted from 127 ms: 0.53), balanced 0.39 (160 ms: 0.39); 2 neighbours fast 0.83 (58 ms: 0.83), balanced 0.70 (90 ms: 0.70);
+3 neighbours fast 0.87 (52 ms: 0.86), balanced 0.72 (87 ms: 0.71). So `fast` is not "less careful" in some separable step: it is simply faster by 33 / 32 / 35 ms, and every millisecond of latency saved is paid for in accepted bursts.
+Where the saving comes from: with one receiver the 4-hit evidence unit gives 3 ring revisits (108 ms) and `fast`'s span of 96 ms is not even binding, while `balanced` adds 32 ms (span 140 ms);
+with neighbours the ring-revisit check (36 ms) is the floor of `fast` (span 30 ms) and `balanced` adds 34 ms (span 70 ms).
+
+**Candidates tried against the existing benchmark** (host simulation; none is hardware evidence):
+
+| Candidate | Result | Decision |
+|---|---|---|
+| Use the remaining latency slack for longer spans (`acqspan2` 45 instead of 30; `acqspan1` is not binding below 108 ms, so there is no slack for one receiver) | measured earlier (`docs/bench/v3_sweeps_seed12345.txt`-style grid, span1 130): span2 45 gives 2-receiver p95 77 ms (misses the 75 ms target) for E[accept] 2 nb 0.81 against 0.83; 1-receiver unchanged | rejected: the target is missed for a gain inside the sampling error (±0.02) |
+| "Busy environment" penalty: stretch the spans by up to 100-200 % while ball-like episodes keep ending without a ball | soak share of eligible bursts accepted 46.5 % (fast) -> 47.1 % (100) / 44.4 % (200); medians of genuine acquisition in the busy soak 118-156 ms -> 116-187 ms (100) / 141-179 ms (200); quiet-system tables unchanged by construction | rejected: no measurable rejection gain; the code was removed |
+| Pulse-period gate (`:irgate auto`, existing) | bursts whose pulse period differs from the ball's by more than the gate (+-35 %): E[accept] 0.53 -> 0.00 (period 1500 us); inside the gate (1000 us) or equal to the ball's: unchanged (0.53 -> 0.53) | the right tool, but only against sources with a different rhythm, and only once the real ball's period is measured; independent of the profile. Unchanged, still off by default |
+| Shorter first grace period of a new track (the first grace was judged at the ring revisit rate although new tracks are watched with focus windows) | does not change acceptance or any quiet metric; **median time a phantom survives after a short accepted burst: 299 -> 151 ms** (2 receivers, 80 ms burst; worst case still 299 ms); soak phantom time per minute: no significant change (noise of the soak is about ±0.4 s/min) | **adopted** (one line in `irscan.h`, regression test `t_e2_phantom_exposure`) |
+
+**Result.** Burst acceptance of `fast` cannot be improved at the same latency with the information the receivers provide; what could be improved is the cost of an accepted phantom, and that is. `fast` stays
+an explicit opt-in (`:irprofile fast`) and the default is unchanged (140 / 70 ms; acquisition and every quiet-system figure unchanged from §6-§7).
+
+Default against `fast` with the final code, three seeds (raw: `docs/bench/v4_engine2_*_seed*.txt`; table: `tools/bench_compare.py`):
+
+| metric | default (balanced) | fast |
+|---|---|---|
+| acq p95 1/2/3 rx (ms, per seed) | 177/105/102 ; 177/105/102 ; 177/105/102 | 144/72/66 ; 144/72/66 ; 144/72/66 |
+| E[accept] 1rx/2nb/3nb (tables, per seed) | 0.39/0.71/0.72 ; 0.39/0.72/0.71 ; 0.39/0.70/0.72 | 0.53/0.83/0.87 ; 0.53/0.83/0.86 ; 0.53/0.84/0.87 |
+| ring bursts accepted (all durations) | 0 | 0 |
+| soak bursts accepted % (per seed) | 44 ; 42 ; 45 | 47 ; 52 ; 46 |
+| soak phantom s/min (per seed) | 2.7 ; 2.7 ; 2.7 | 3.3 ; 3.7 ; 2.3 |
+| soak phantom acquisitions /min (per seed) | 5.3 ; 5.1 ; 5.4 | 5.2 ; 6.3 ; 5.0 |
+| soak false losses /min (per seed) | 0.63 ; 0.63 ; 0.50 | 0.47 ; 0.50 ; 0.47 |
+| false losses/min at 10-70% misses (max) | 0.00 ; 0.50 ; 0.00 | 0.00 ; 0.50 ; 0.00 |
+| steady dropout survived (ms) | 100 ; 100 ; 100 | 100 ; 100 ; 100 |
+| flickering (50%) dropout survived (ms) | 250 ; 250 ; 250 | 200 ; 250 ; 200 |
+| re-acquisition after a lost steady gap (ms) | 55 ; 54 ; 54 | 54 ; 54 ; 54 |
+| brief 2rx 80 ms: acquired of 48 (loss median/p95) | 14 (170/231) ; 16 (170/231) ; 13 (171/232) | 48 (150/183) ; 48 (150/182) ; 48 (150/181) |
+| brief 2rx 100 ms: acquired of 48 (loss median/p95) | 44 (149/231) ; 45 (149/231) ; 44 (150/231) | 48 (149/151) ; 48 (149/151) ; 48 (149/151) |
+
+Reading: acquisition p95 is 33 / 33 / 36 ms lower with `fast` (1 / 2 / 3 receivers) and it meets the 150 / 75 ms targets; in exchange 14 / 12 / 15 points more of the bursts in the expected-acceptance tables are accepted
+(the soak shows +3, +10 and +1 points; its noise is several points; phantom acquisitions per minute 5.1-5.4 against 5.0-6.3, phantom time 2.7 against 2.3-3.7 s per minute); ring bursts are rejected by both; steady dropout tolerance (100 ms),
+re-acquisition (54 ms) and the false-loss rates are the same (flickering-track dropout tolerance 250 ms for the default, 200-250 ms for `fast`: a difference of one or two trials of 48); a short 2-receiver burst (80 ms) becomes a phantom in
+48/48 trials with `fast` against 13-16 of 48 with the default (100 ms: 48 against 44-45) and is dropped after about 150-170 ms (median) in both. One false loss in 120 s was seen at 10 % misses with one receiver (seed 22345, both profiles, also before this
+change): four misses in a row, which the miss budget of 5 visits at `losseps` 4 accepts with probability 10^-4 per visit, i.e. about 0.3 events per 120 s; `losseps 5` removes that class at about +15 ms median steady loss latency (`docs/bench/v3_sweeps_seed12345.txt`).

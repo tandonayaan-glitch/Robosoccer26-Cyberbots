@@ -616,7 +616,8 @@ static void irEstimate2(const Config& c, uint32_t nowUs, uint32_t nowMs, uint8_t
     if (accept) {
       g_ball.valid = true; g_ball.validSinceMs = nowMs; g_ball.acquiredUs = nowUs;
       g_ball.lastGoodUs = nowUs; g_ball.lastDetectMs = nowMs; g_ball.lastGoodMs = nowMs; g_ball.lastUpdateUs = nowUs;
-      irSupportStats(c, gMask, &g_ball.trackM, &g_ball.trackFlick); g_ball.revisitUs = ringUs; g_ball.holdUs = irHoldUs2(c);
+      irSupportStats(c, gMask, &g_ball.trackM, &g_ball.trackFlick); g_ball.revisitUs = c.focusOn ? ringUs / 4u : ringUs;   // a new track is watched with focus windows: its first grace is judged at that rate
+      g_ball.holdUs = irHoldUs2(c);
       if (g_ball.evOpen) latAdd(g_latAcq, nowUs - g_ball.firstEvidenceUs);
     }
     irFocus2(c, nowUs);

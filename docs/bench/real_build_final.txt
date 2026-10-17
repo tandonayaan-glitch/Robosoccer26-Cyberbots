@@ -1,8 +1,8 @@
 === Arduino-ESP32 2.0.17 (real core, FQBN esp32:esp32:esp32 = ESP32 Dev Module, default 4MB-with-spiffs partitions) ===
-Sketch uses 420401 bytes (32%) of program storage space. Maximum is 1310720 bytes.
+Sketch uses 420409 bytes (32%) of program storage space. Maximum is 1310720 bytes.
 Global variables use 70500 bytes (21%) of dynamic memory, leaving 257180 bytes for local variables. Maximum is 327680 bytes.
 exit=0 warnings=0
 === Arduino-ESP32 3.0.7 (real core, FQBN esp32:esp32:esp32 = ESP32 Dev Module, default 4MB-with-spiffs partitions) ===
-Sketch uses 442257 bytes (33%) of program storage space. Maximum is 1310720 bytes.
+Sketch uses 442265 bytes (33%) of program storage space. Maximum is 1310720 bytes.
 Global variables use 69344 bytes (21%) of dynamic memory, leaving 258336 bytes for local variables. Maximum is 327680 bytes.
 exit=0 warnings=0
