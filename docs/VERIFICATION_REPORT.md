@@ -60,7 +60,7 @@ Reconciliation of the counts quoted during development (counted from `git show <
 | Reports | `t_health_report_text`, `t_fault_report_format` |
 | Detector (engine 2) and its fallback | `t_e2_broadband_tail` (arc left after a broadband burst is not a ball), `t_e2_stall_is_not_absence`, `t_e2_focus_scheduling` (strong track: no extra windows; flickering track: focus, no receiver starved), `t_e2_grace_period_bounds`, `t_e2_dropout_survival`, `t_e2_reacquisition`, `t_e2_stop_after_loss` (brake before search, no wheel reversal), `t_e2_view_transitions`, `t_e2_stale_not_followed`, `t_e2_micros_wrap_steady`, `t_e2_micros_wrap_flicker`, `t_startup_schedule`, `t_scan_revisit_metrics`, `t_e2_config_params`, `t_irprofile`, `t_legacy_fallback`, `t_engine_switch_at_run_time`, `t_fast_engine_rejection`, `t_latency` |
 
-Measured in simulation (not on hardware): scan cycle 36.1 ms; acquisition 57–143 ms (see docs/LATENCY_OPTIMIZATION.md; legacy engine 153–240 ms); loss 141 ms (legacy 546 ms); bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
+Measured in simulation (not on hardware; docs/LATENCY_OPTIMIZATION.md): ring cycle 36.1 ms; acquisition (default profile, median/p95) 160/177 ms with 1 receiver, 90/105 ms with 2, 87/102 ms with 3 (legacy engine 224/240, 152/168, 118/134; `:irprofile fast` 127/144, 58/72, 52/66); steady-track loss 134/149 ms (legacy 545/561), flickering-track loss 285/291 ms; bearing jump while a ball circles the robot at 60°/s ≤ 6° per 50 ms with no loss event.
 
 ## 4. D – Static analysis (`./test/static_analysis.sh`)
 * cppcheck: no defects; only style notes remain (const-qualifiable parameters).

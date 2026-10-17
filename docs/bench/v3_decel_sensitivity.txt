@@ -1,0 +1,32 @@
+## decel=600
+LOSS after a STRONG track, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   17.9  p95=   34.4  p99=   35.8  max=   36.0 ms
+  ball declared lost                         n= 240  median=  134.2  p95=  150.4  p99=  151.7  max=  152.0 ms
+  translation request cleared                n= 240  median=  134.2  p95=  150.4  p99=  151.7  max=  152.0 ms
+  translation PWM first < 90 % of steady     n= 240  median=   54.9  p95=   72.3  p99=   75.2  max=   76.0 ms
+  translation PWM <= 10 % of steady          n= 240  median=  283.7  p95=  299.8  p99=  301.2  max=  301.8 ms
+LOSS after a STRONG track, ball disappears, 2 receivers (removal -> stage):
+## decel=1200
+LOSS after a STRONG track, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   17.9  p95=   34.2  p99=   35.8  max=   36.1 ms
+  ball declared lost                         n= 240  median=  134.3  p95=  150.0  p99=  151.0  max=  152.0 ms
+  translation request cleared                n= 240  median=  134.3  p95=  150.0  p99=  151.0  max=  152.0 ms
+  translation PWM first < 90 % of steady     n= 240  median=   44.5  p95=   61.3  p99=   64.3  max=   64.9 ms
+  translation PWM <= 10 % of steady          n= 240  median=  184.2  p95=  199.5  p99=  200.7  max=  211.1 ms
+LOSS after a STRONG track, ball disappears, 2 receivers (removal -> stage):
+## decel=2400
+LOSS after a STRONG track, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   19.0  p95=   34.1  p99=   35.8  max=   36.1 ms
+  ball declared lost                         n= 240  median=  132.8  p95=  149.0  p99=  151.6  max=  152.2 ms
+  translation request cleared                n= 240  median=  132.8  p95=  149.0  p99=  151.6  max=  152.2 ms
+  translation PWM first < 90 % of steady     n= 240  median=   38.5  p95=   60.8  p99=   63.3  max=   63.8 ms
+  translation PWM <= 10 % of steady          n= 240  median=  158.3  p95=  172.9  p99=  175.4  max=  177.1 ms
+LOSS after a STRONG track, ball disappears, 2 receivers (removal -> stage):
+## decel=4000
+LOSS after a STRONG track, ball disappears, 1 receiver (removal -> stage):
+  age of newest evidence at removal          n= 240  median=   18.9  p95=   33.3  p99=   35.4  max=   36.0 ms
+  ball declared lost                         n= 240  median=  132.4  p95=  148.8  p99=  151.2  max=  151.7 ms
+  translation request cleared                n= 240  median=  132.4  p95=  148.8  p99=  151.2  max=  151.7 ms
+  translation PWM first < 90 % of steady     n= 240  median=   38.2  p95=   54.3  p99=   62.1  max=   63.5 ms
+  translation PWM <= 10 % of steady          n= 240  median=  147.9  p95=  162.9  p99=  165.5  max=  169.3 ms
+LOSS after a STRONG track, ball disappears, 2 receivers (removal -> stage):
