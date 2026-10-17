@@ -20,25 +20,26 @@ struct FaultMeta {
   Severity sev;
   bool latched;          // true: stays active until the operator runs ":recover"
   const char* action;    // what the firmware does about it
+  const char* certainty; // how sure the evidence is (confirmed vs suspected)
 };
 
 static const FaultMeta FMETA[F_COUNT] = {
-  {"IR_NO_CHANNELS",  "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped"},
-  {"IR_SCAN_STALL",   "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped"},
-  {"IR_TRUSTED_LOW",  "IR coverage",     SEV_CRITICAL, false, "too few trusted receivers: ball seeking disabled"},
-  {"IR_GAP",          "IR coverage",     SEV_DEGRADED, false, "reduced speed, wide blind sector"},
-  {"IR_CHANNEL",      "IR receiver",     SEV_DEGRADED, false, "suspect/failed channels excluded from navigation"},
-  {"IMU_MISSING",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, turn-toward-ball fallback"},
-  {"IMU_TIMEOUT",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, retrying init"},
-  {"IMU_INVALID",     "MPU6050",         SEV_DEGRADED, false, "invalid samples rejected, heading hold disabled"},
-  {"FS_UNAVAILABLE",  "Storage",         SEV_DEGRADED, false, "persistent logging off; Serial + RAM recorder continue"},
-  {"FS_WRITE",        "Storage",         SEV_DEGRADED, false, "persistent logging paused/off; control unaffected"},
-  {"CFG_REPLACED",    "Configuration",   SEV_WARN,     false, "safe defaults used for invalid fields"},
-  {"BROWNOUT_RESET",  "Power",           SEV_WARN,     false, "autonomous stays disabled until 'a'; check supply"},
-  {"ABNORMAL_RESET",  "Firmware/CPU",    SEV_WARN,     false, "autonomous stays disabled until 'a'; see log"},
-  {"MOTOR_INIT",      "Drivetrain",      SEV_CRITICAL, true,  "motion disabled until :recover"},
-  {"LOOP_STALL",      "Control loop",    SEV_CRITICAL, true,  "motors stopped; run :recover after cause is removed"},
-  {"LOG_DROPS",       "Logging",         SEV_WARN,     false, "records dropped; diagnostics reduced"},
+  {"IR_NO_CHANNELS",  "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "certain: configuration has no enabled channel"},
+  {"IR_SCAN_STALL",   "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "certain: no completed scan for >600 ms"},
+  {"IR_TRUSTED_LOW",  "IR coverage",     SEV_CRITICAL, false, "too few trusted receivers: ball seeking disabled", "certain: count of trusted channels"},
+  {"IR_GAP",          "IR coverage",     SEV_DEGRADED, false, "reduced speed, wide blind sector", "estimate: configured bearings + assumed fov, not measured"},
+  {"IR_CHANNEL",      "IR receiver",     SEV_DEGRADED, false, "suspect/failed channels excluded from navigation", "symptom measured; cause (receiver/wiring/interference) unproven"},
+  {"IMU_MISSING",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, turn-toward-ball fallback", "no I2C ACK; wiring vs dead chip not distinguishable"},
+  {"IMU_TIMEOUT",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, retrying init", "bus errors observed; cause unproven"},
+  {"IMU_INVALID",     "MPU6050",         SEV_DEGRADED, false, "invalid samples rejected, heading hold disabled", "frames failed plausibility checks; cause unproven"},
+  {"FS_UNAVAILABLE",  "Storage",         SEV_DEGRADED, false, "persistent logging off; Serial + RAM recorder continue", "mount failed; may be a missing LittleFS partition"},
+  {"FS_WRITE",        "Storage",         SEV_DEGRADED, false, "persistent logging paused/off; control unaffected", "write or read-back failed"},
+  {"CFG_REPLACED",    "Configuration",   SEV_WARN,     false, "safe defaults used for invalid fields", "certain"},
+  {"BROWNOUT_RESET",  "Power",           SEV_WARN,     false, "autonomous stays disabled until 'a'; check supply", "reset-reason register: certain it was a brownout reset"},
+  {"ABNORMAL_RESET",  "Firmware/CPU",    SEV_WARN,     false, "autonomous stays disabled until 'a'; see log", "reset-reason register"},
+  {"MOTOR_INIT",      "Drivetrain",      SEV_CRITICAL, true,  "motion disabled until :recover", "certain: LEDC attach returned failure"},
+  {"LOOP_STALL",      "Control loop",    SEV_CRITICAL, true,  "motors stopped; run :recover after cause is removed", "measured loop gap"},
+  {"LOG_DROPS",       "Logging",         SEV_WARN,     false, "records dropped; diagnostics reduced", "certain: counter"},
 };
 
 struct FaultState {
@@ -106,17 +107,17 @@ static void faultRaise(FaultCode c, const char* fmt, ...) {
     f.count++;
     f.firstMs = now;
     f.lastPrintMs = now;
-    // Observed evidence + uncertainty + action + mode + recovery status, as required.
-    say(FMETA[c].sev == SEV_CRITICAL ? "FAULT" : "WARN",
-        "%s sev=%s comp=%s evidence=\"%s\" action=\"%s\" recovery=%s",
-        FMETA[c].code, sevName(FMETA[c].sev), FMETA[c].comp, f.evidence, FMETA[c].action,
-        FMETA[c].latched ? "needs :recover" : "automatic when verified");
     char note[96];
     snprintf(note, sizeof(note), "%s;%s", FMETA[c].code, f.evidence);
     logEvent("F", note);
     if (FMETA[c].sev >= SEV_DEGRADED) frTrigger(FMETA[c].code);
     if (FMETA[c].sev == SEV_CRITICAL) g_stats.safetyStops++;
     condEvaluate();
+    // timestamp (prefix), severity, component, code, evidence, certainty, action, current mode, recovery
+    say(FMETA[c].sev == SEV_CRITICAL ? "FAULT" : "WARN",
+        "%s sev=%s comp=%s evidence=\"%s\" certainty=\"%s\" action=\"%s\" mode=%s recovery=%s",
+        FMETA[c].code, sevName(FMETA[c].sev), FMETA[c].comp, f.evidence, FMETA[c].certainty, FMETA[c].action,
+        condName(g_cond), FMETA[c].latched ? "needs :recover" : "automatic when verified");
   } else if (elapsedMs(now, f.lastPrintMs) >= 10000) {
     f.lastPrintMs = now;
     say("WARN", "%s still active: %s", FMETA[c].code, f.evidence);

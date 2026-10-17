@@ -60,7 +60,9 @@ static void printIrStream(const Config& c) {
     else if (g_ir[i].detect) tag = 'd';
     p += snprintf(line + p, sizeof(line) - (size_t)p, " %u%c%u", i, tag, (unsigned)g_ir[i].edges);
   }
-  say("INFO", "%s | cyc=%luus ball=%s dir=%.0f conf=%.2f", line, UL(g_scan.cycleUs), g_ball.valid ? "Y" : "n", g_ball.bearingDeg, g_ball.conf);
+  char dir[12] = "--";
+  if (g_ball.anyDetect) snprintf(dir, sizeof(dir), "%.0f", g_ball.bearingDeg);   // only when justified by a detection
+  say("INFO", "%s | cyc=%luus ball=%s dir=%s conf=%.2f", line, UL(g_scan.cycleUs), g_ball.valid ? "Y" : "n", dir, g_ball.conf);
 }
 
 static void printNavStatus(const Config& c, uint32_t now) {
@@ -77,8 +79,8 @@ static void printImu(const Config& c, uint32_t now) {
   if (!g_imu.present) { say("INFO", "MPU6050: NOT FOUND (no answer at 0x68/0x69). Heading hold off, fallback in use."); return; }
   say("INFO", "MPU6050 addr=0x%02X whoami=0x%02X ok=%d fresh=%d calibrated=%d bias=%.3f dps", g_imu.addr, g_imu.whoami, g_imu.ok, imuFresh(c, now), g_imu.calibrated, g_imu.bias);
   say("INFO", " accel g: %.3f %.3f %.3f | gyro dps: %.2f %.2f %.2f", g_imu.ax, g_imu.ay, g_imu.az, g_imu.gx, g_imu.gy, g_imu.gz);
-  say("INFO", " relative heading (cw+): %.1f deg %s | samples=%lu errors=%lu timeouts=%lu invalid=%lu recoveries=%lu gaps=%lu",
-      g_imu.yaw, g_imu.yawValid ? "" : "(INVALID)", UL(g_imu.samples), UL(g_imu.errCount), UL(g_imu.timeoutCount), UL(g_imu.invalidCount), UL(g_imu.recoveries), UL(g_imu.gaps));
+  say("INFO", " relative heading (cw+): %.1f deg %s | samples=%lu errors=%lu timeouts=%lu invalid=%lu recoveries=%lu gaps=%lu reinit-attempts=%lu",
+      g_imu.yaw, g_imu.yawValid ? "" : "(INVALID)", UL(g_imu.samples), UL(g_imu.errCount), UL(g_imu.timeoutCount), UL(g_imu.invalidCount), UL(g_imu.recoveries), UL(g_imu.gaps), UL(g_imu.initAttempts));
   say("INFO", " heading is gyro-integrated and RELATIVE: it drifts and is not an absolute compass bearing");
 }
 
@@ -144,6 +146,7 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
   say(tag, "stats: ball losses=%lu reacquired=%lu (avg %lu ms) search=%lu ms | imu timeouts=%lu degraded transitions=%lu safety stops=%lu | log dropped=%lu storage failures=%lu",
       UL(g_stats.ballLossEvents), UL(g_stats.reacquisitions), UL(g_stats.reacquisitions ? g_stats.reacquireTotalMs / g_stats.reacquisitions : 0),
       UL(g_stats.searchTotalMs), UL(g_stats.imuTimeouts), UL(g_stats.degradedTransitions), UL(g_stats.safetyStops), UL(g_stats.logDropped), UL(g_stats.storageFailures));
+  say(tag, "stats: channels that failed an operator-run controlled test: mask 0x%04X | imu re-init attempts=%lu recoveries=%lu | scan overruns=%lu", (unsigned)g_stats.channelTestFailMask, UL(g_imu.initAttempts), UL(g_stats.imuRecoveries), UL(g_stats.scanOverruns));
   say(tag, "limits: no wheel feedback (PWM shown is COMMANDED); no distance/IR strength; coverage and ball compatibility unproven until tested; software failsafes do not replace wiring/current limits");
   say(tag, "========================================================");
 }

@@ -22,7 +22,7 @@ static void printHelp() {
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ch <n> <en|pol|trust|bear|tilt> <v> | :chreset <n> | :learn <deg> | :verify <n> | :cov | :zero | :gcal | :diag <on|off>");
-  say("INFO", ":mtest <wheel> then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
+  say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
 
@@ -41,7 +41,7 @@ static void cmdTestMode() {
   say("TEST", "TEST MODE: motors are OFF and nothing moves by itself. Bench checklist:");
   say("TEST", " 1) wheels off the ground, robot secured, motor power switch reachable");
   say("TEST", " 2) per wheel: :mtest FL  then :confirm  -> watch rotation -> :mok FL (correct) or :mrev FL (wrong, then repeat)");
-  say("TEST", " 3) body moves with f b l r q e (short bursts) and check strafe/rotation directions; ':roller O' if strafe is mirrored");
+  say("TEST", " 3) :dtest then :confirm runs forward/back/strafe/rotate; or use f b l r q e in short bursts. ':roller O' if strafe is mirrored");
   say("TEST", " 4) IR: hold the ball at a receiver -> :verify <ch>; sweep the ball around -> :learn <deg>; ':ch <n> bear <deg>' to record bearings");
   say("TEST", " 5) :save to persist. 'h' shows what is verified and what is NOT TESTED.");
 }
@@ -169,6 +169,7 @@ static void cliExecLine(char* line, uint32_t now) {
     else { imuStartCalibration(); say("INFO", "gyro bias calibration started - keep the robot completely still (~2 s)"); }
   }
   else if (!strcmp(cmd, "mtest")) { int w = t[1] ? wheelByName(t[1]) : -1; if (!navMotorTestArm(c, w, now)) say("WARN", "usage: :mtest <FL|FR|BL|BR>"); }
+  else if (!strcmp(cmd, "dtest")) navMotorTestArm(c, 0, now, true);
   else if (!strcmp(cmd, "confirm")) navMotorTestConfirm(now);
   else if (!strcmp(cmd, "mok")) { int w = t[1] ? wheelByName(t[1]) : -1; if (w < 0) say("WARN", "usage: :mok <wheel>"); else { c.motorVerified |= (uint8_t)(1u << w); say("INFO", "%s direction recorded as operator-confirmed (':save' to keep). Rotation was never measured by the robot.", WHEEL_PINS[w].name); } }
   else if (!strcmp(cmd, "mrev")) { int w = t[1] ? wheelByName(t[1]) : -1; if (w < 0) say("WARN", "usage: :mrev <wheel>"); else { c.reverse[w] ^= 1; c.motorVerified &= (uint8_t)~(1u << w); say("INFO", "%s reversal now %d - repeat :mtest %s to check", WHEEL_PINS[w].name, c.reverse[w], WHEEL_PINS[w].name); } }

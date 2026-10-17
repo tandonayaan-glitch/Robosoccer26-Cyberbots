@@ -19,10 +19,14 @@ static float g_lastBearing = 0;
 static uint32_t g_lastNavTick = 0;
 
 struct MotorTest {
-  uint8_t state;       // 0 idle, 1 armed (needs :confirm), 2 forward, 3 pause, 4 reverse, 5 settle
+  uint8_t state;       // 0 idle, 1 armed (needs :confirm), 2 forward/step, 3 pause, 4 reverse, 5 settle
   uint8_t wheel;
+  uint8_t drive;       // 1 = whole-drivetrain test (6 body motions), 0 = single wheel
+  uint8_t step;
   uint32_t until;
 };
+static const char* DT_STEP_NAME[6] = {"FORWARD", "BACKWARD", "STRAFE LEFT", "STRAFE RIGHT", "ROTATE CLOCKWISE", "ROTATE COUNTER-CLOCKWISE"};
+static const float DT_VEC[6][3] = {{0, 1, 0}, {0, -1, 0}, {-1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
 static MotorTest g_mtest;
 
 static void navSetState(NavState s, const char* why) {
@@ -213,6 +217,19 @@ static void navTick(const Config& c, uint32_t now) {
         if (deadlineReached(now, t.until)) { t.state = 0; navSetState(NAV_IDLE, "motor test confirmation timed out"); }
         break;
       }
+      if (t.drive) {                                   // complete drivetrain test: six body motions
+        if (t.state == 2) motorsDrive(c, DT_VEC[t.step][0], DT_VEC[t.step][1], DT_VEC[t.step][2], c.testPwm);
+        else motorsDrive(c, 0, 0, 0, c.testPwm);
+        if (deadlineReached(now, t.until)) {
+          if (t.state == 2) { t.state = 3; t.until = now + 700; }
+          else if (++t.step >= 6) {
+            say("TEST", "drivetrain test finished. Each motion should have matched its label. If strafe was mirrored use ':roller O'; a wrong single wheel -> ':mrev <wheel>'.");
+            t.state = 0; motorsDrive(c, 0, 0, 0, c.testPwm);
+            navSetState(NAV_IDLE, "drivetrain test complete");
+          } else { t.state = 2; t.until = now + 900; say("TEST", "step %u/6: %s", (unsigned)t.step + 1, DT_STEP_NAME[t.step]); }
+        }
+        break;
+      }
       for (int i = 0; i < WHEEL_COUNT; i++) motorsSetWheelTarget((uint8_t)i, 0);
       if (t.state == 2) motorsSetWheelTarget(t.wheel, (float)c.testPwm);
       if (t.state == 4) motorsSetWheelTarget(t.wheel, -(float)c.testPwm);
@@ -259,15 +276,21 @@ static int wheelByName(const char* s) {
   return -1;
 }
 
-static bool navMotorTestArm(const Config& c, int wheel, uint32_t now) {
+static bool navMotorTestArm(const Config& c, int wheel, uint32_t now, bool drive = false) {
   if (wheel < 0) return false;
   if (drivetrainFault()) { say("SAFETY", "motor test REFUSED: drivetrain fault active"); return false; }
   g_autoEnabled = false;
   motorsStopNow();
   g_mtest.state = 1;
   g_mtest.wheel = (uint8_t)wheel;
+  g_mtest.drive = drive ? 1 : 0;
+  g_mtest.step = 0;
   g_mtest.until = now + 15000;
   navSetState(NAV_TEST, "motor test armed");
+  if (drive) {
+    say("TEST", "DRIVETRAIN TEST: LIFT THE WHEELS OFF THE GROUND and secure the robot. Send ':confirm' within 15 s: six 0.9 s motions at PWM %u (forward, backward, strafe left/right, rotate cw/ccw) with pauses; 's' aborts.", (unsigned)c.testPwm);
+    return true;
+  }
   say("TEST", "MOTOR TEST %s: LIFT THE WHEELS OFF THE GROUND and secure the robot, keep a hand on the motor-power switch. Then send ':confirm' within 15 s (PWM %u, 1 s forward then 1 s backward).",
       WHEEL_PINS[wheel].name, (unsigned)c.testPwm);
   return true;
@@ -276,6 +299,7 @@ static bool navMotorTestArm(const Config& c, int wheel, uint32_t now) {
 static bool navMotorTestConfirm(uint32_t now) {
   if (g_mtest.state != 1) { say("TEST", "nothing to confirm (use :mtest <FL|FR|BL|BR> first)"); return false; }
   g_mtest.state = 2;
+  if (g_mtest.drive) { g_mtest.step = 0; g_mtest.until = now + 900; say("TEST", "step 1/6: %s", DT_STEP_NAME[0]); return true; }
   g_mtest.until = now + 1000;
   say("TEST", "running %s forward... (send 's' or '!' to abort)", WHEEL_PINS[g_mtest.wheel].name);
   return true;

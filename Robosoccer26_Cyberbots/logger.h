@@ -349,7 +349,9 @@ static void logService(const Config& c, uint32_t nowMs) {
   uint32_t period = quiet ? 5000u : c.snapshotMs;       // idle: slow, to spare flash
   if (elapsedMs(nowMs, g_lastSnapMs) >= period) {
     g_lastSnapMs = nowMs;
-    logRow('S', nullptr);
+    char note[24];
+    snprintf(note, sizeof(note), "drop=%lu;wf=%lu", UL(g_logDropped % 100000), UL(g_fsFailTotal % 100000));   // dropped records / write failures
+    logRow('S', note);
     g_loopMaxUs = 0;
   }
   if (c.detailMs && elapsedMs(nowMs, g_lastDetailMs) >= c.detailMs) {
@@ -445,11 +447,13 @@ static void exportService() {
       g_exp.ringIdx++;
       exportEmit(line);
     } else {
-      if (!fsLock(0)) break;
       size_t n = 0;
-      if (g_exp.file.available()) n = g_exp.file.readBytesUntil('\n', line, sizeof(line) - 2);
-      fsUnlock();
-      if (n == 0 && !g_exp.file.available()) break;
+      bool got = false;
+      if (fsLock(0)) {
+        if (g_exp.file.available()) { n = g_exp.file.readBytesUntil('\n', line, sizeof(line) - 2); got = true; }
+        fsUnlock();
+      }
+      if (!got) break;
       line[n] = '\n'; line[n + 1] = 0;
       exportEmit(line);
     }

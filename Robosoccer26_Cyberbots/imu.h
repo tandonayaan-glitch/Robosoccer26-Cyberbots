@@ -25,7 +25,7 @@ struct ImuState {
   float calSum, calSumSq;
   uint16_t calN;
   uint32_t lastGoodMs, lastUs, lastReadUs, lastTryMs;
-  uint32_t samples, errCount, timeoutCount, invalidCount, recoveries, gaps, sameFrames;
+  uint32_t samples, errCount, timeoutCount, invalidCount, recoveries, gaps, sameFrames, initAttempts;
   int16_t lastRaw[7];
   bool hadFault;
 };
@@ -72,6 +72,8 @@ static bool whoAmIPlausible(uint8_t w) {
 // Probe + configure. `full` adds a device reset (boot only: it waits 100 ms).
 static bool imuInit(const Config& c, bool full) {
   g_imu.lastTryMs = millis();
+  g_imu.initAttempts++;
+  if (!full) logEvent("R", "imu_reinit_attempt");
   if (g_imuWireStarted) Wire.end();
   i2cBusRecover();
   Wire.begin((int)PIN_I2C_SDA, (int)PIN_I2C_SCL, 400000u);

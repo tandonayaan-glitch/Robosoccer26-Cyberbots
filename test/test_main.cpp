@@ -797,6 +797,26 @@ static void t_resets() {
   CHECK(!faultActive(F_BROWNOUT_RESET));
 }
 
+static void t_fault_report_format() {
+  bootCal();
+  simRun(500);
+  Serial.out.clear();
+  g_mpu.mode = 1;
+  simRun(1500);
+  // timestamp, severity, component, code, evidence, certainty, action, mode, recovery
+  CHECK(outHas("IMU_TIMEOUT sev=DEGRADED comp=MPU6050 evidence=\""));
+  CHECK(outHas("certainty=\"bus errors observed; cause unproven\""));
+  CHECK(outHas("action=\"heading hold disabled, retrying init\" mode=DEGRADED recovery=automatic when verified"));
+  size_t p = Serial.out.find("IMU_TIMEOUT sev=");
+  CHECK(p != std::string::npos && Serial.out.rfind("[WARN] ", p) != std::string::npos);     // tag + timestamp prefix
+  // repeated identical warnings do not flood the port
+  simRun(20000);
+  CHECK(outCount("IMU_TIMEOUT sev=") == 1);
+  CHECK(outCount("IMU_TIMEOUT still active") <= 3);
+  // snapshot rows carry drop / write-failure counters
+  CHECK(g_logDropped == 0);
+}
+
 static void t_reset_wdt() {
   g_mockReset = ESP_RST_TASK_WDT;
   setup();
@@ -963,6 +983,25 @@ static void t_motor_test() {
   CHECK(wheelDir(W_FR) > 0);
   send("s"); simRun(20);
   CHECK(allWheelsStopped());
+}
+
+static void t_drive_test() {
+  bootCal();
+  simRun(300);
+  anyWheelEverMoved = false;
+  send(":dtest\n"); simRunTracking(1000);
+  CHECK(g_mtest.state == 1 && g_mtest.drive && !anyWheelEverMoved);
+  send(":confirm\n");
+  simRun(600);   CHECK(wheelDir(0) > 0 && wheelDir(1) > 0 && wheelDir(2) > 0 && wheelDir(3) > 0);          // forward
+  simRun(1600);  CHECK(wheelDir(0) < 0 && wheelDir(1) < 0 && wheelDir(2) < 0 && wheelDir(3) < 0);          // backward
+  simRun(1600);  CHECK(wheelDir(0) < 0 && wheelDir(1) > 0 && wheelDir(2) > 0 && wheelDir(3) < 0);          // strafe left
+  simRun(1600);  CHECK(wheelsMatchStrafeRight());                                                           // strafe right
+  simRun(1600);  CHECK(wheelDir(0) > 0 && wheelDir(1) < 0 && wheelDir(2) > 0 && wheelDir(3) < 0);          // clockwise
+  simRun(1600);  CHECK(wheelDir(0) < 0 && wheelDir(1) > 0 && wheelDir(2) < 0 && wheelDir(3) > 0);          // counter-clockwise
+  for (int i = 0; i < 4; i++) CHECK(g_pwmDuty[WHEEL_PINS[i].en] <= g_cfg.testPwm);
+  simRun(3000);
+  CHECK(allWheelsStopped() && g_mtest.state == 0 && g_navState == NAV_IDLE);
+  CHECK(outHas("drivetrain test finished"));
 }
 
 static void t_cfg_set() {
@@ -1308,8 +1347,8 @@ static const TestCase TESTS[] = {
   T(t_ir_system_loss), T(t_ir_trusted_low), T(t_ir_scan_stall), T(t_ir_overrun), T(t_ir_coverage), T(t_ir_probe),
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
-  T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_cfg_set),
+  T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),

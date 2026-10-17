@@ -128,7 +128,7 @@ void setup() {
   outFlushBlocking(1500);
 
 #ifndef HOST_TEST
-  xTaskCreatePinnedToCore(logTask, "logw", 6144, nullptr, 1, nullptr, 0);   // flash writes live off the control core
+  xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, nullptr, 0);   // flash writes live off the control core
 #endif
   wdtBegin();
   g_lastLoopUs = micros();
