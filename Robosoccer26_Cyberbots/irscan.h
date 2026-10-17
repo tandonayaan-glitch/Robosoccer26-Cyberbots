@@ -89,6 +89,9 @@ struct ScanState {
   float cycleAvgUs;
   uint8_t enabledCount;
   uint32_t lastWinPlannedUs;
+  uint32_t winOverrunMaxUs;                    // longest (actual - planned) window length seen: loop lateness
+  uint32_t revisitMaxUs[MUX_CHANNELS];         // longest time between two window openings of the same receiver
+  uint32_t lastOpenUs[MUX_CHANNELS];           // 0 = never opened since the schedule (re)started
 };
 static ScanState g_scan;
 
@@ -237,6 +240,11 @@ static void irOpenWindow(const Config& c, uint8_t ch) {
   g_isrActiveLevel = c.ch[ch].activeLow ? 0 : 1;
   g_isrEdges = 0; g_isrActAcc = 0; g_isrFirst = 0; g_isrLast = 0;
   uint32_t t = micros();
+  if (g_scan.lastOpenUs[ch]) {
+    uint32_t rv = t - g_scan.lastOpenUs[ch];
+    if (rv > g_scan.revisitMaxUs[ch]) g_scan.revisitMaxUs[ch] = rv;
+  }
+  g_scan.lastOpenUs[ch] = t ? t : 1u;
   g_isrInActive = (digitalRead(PIN_MUX_SIG) == g_isrActiveLevel);
   g_isrActStart = t;
   g_scan.winStartUs = t;
@@ -290,6 +298,7 @@ static void irCloseWindow(Config& c, uint32_t nowMs) {
   uint32_t t = micros();
   uint32_t actual = t - g_scan.winStartUs;
   uint8_t ch = g_scan.cur;
+  if (actual > g_scan.lastWinPlannedUs && actual - g_scan.lastWinPlannedUs > g_scan.winOverrunMaxUs) g_scan.winOverrunMaxUs = actual - g_scan.lastWinPlannedUs;
   bool endActive = (digitalRead(PIN_MUX_SIG) == g_isrActiveLevel);
   bool startActive = false;
   uint32_t acc = g_isrActAcc;
@@ -511,6 +520,8 @@ static void irRestartSchedule() {
   g_scan.open = false;
   g_scan.cycleStartUs = micros();
   g_scan.cycleMinUs = 0xFFFFFFFFu; g_scan.cycleMaxUs = 0; g_scan.cycleAvgUs = 0; g_scan.cycleCount = 0;
+  g_scan.winOverrunMaxUs = 0;
+  for (uint8_t i = 0; i < MUX_CHANNELS; i++) { g_scan.revisitMaxUs[i] = 0; g_scan.lastOpenUs[i] = 0; }
   g_scan.lastCycleMs = millis();
 }
 
