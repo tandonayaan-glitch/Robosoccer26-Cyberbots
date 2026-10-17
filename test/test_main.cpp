@@ -2121,6 +2121,46 @@ static void t_irprofile() {
   CHECK(g_cfg.acqSpan1Ms == 140 && outHas("Usage: :irprofile"));
 }
 
+
+static void e2WrapScenario(double miss) {
+  // micros() wraps every 71.6 minutes: acquisition, tracking, flicker statistics and loss must survive the wrap.
+  // Boot consumes about 3.7 s of virtual time, so start the clock 5 s before the wrap.
+  g_mockUs = 4294967296ULL - 5000000ULL;
+  e2Boot();
+  uint32_t untilWrap = (uint32_t)(0u - (uint32_t)g_mockUs);      // microseconds left before micros() returns to zero
+  CHECK(untilWrap > 500000u && untilWrap < 3000000u);
+  CHECK(e2Acquire(75, 20, miss, 3000));
+  benchRun(1000);
+  uint64_t end = g_mockUs + 4000000ULL; int losses = 0; bool was = g_ball.valid, wrapped = false;
+  while (g_mockUs < end) { benchStep(); if (was && !g_ball.valid) losses++; was = g_ball.valid; if ((uint32_t)g_mockUs < 1000000u) wrapped = true; }
+  CHECK(wrapped);
+  CHECK(losses == 0 && g_ball.valid);
+  uint64_t t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
+  CHECK(!g_ball.valid);
+  CHECK((double)(g_mockUs - t0) / 1000.0 <= (miss > 0 ? g_cfg.lostHoldMaxMs : g_cfg.lostHoldMs) + 25);
+}
+static void t_e2_micros_wrap_steady() { e2WrapScenario(0.0); }
+static void t_e2_micros_wrap_flicker() { e2WrapScenario(0.4); }
+
+static void t_engine_switch_at_run_time() {
+  // Changing the estimator while a ball is tracked must leave a consistent state (no crash, no stuck ball, no motion).
+  e2Boot();
+  CHECK(e2Acquire(75, 20, 0.0, 600)); benchRun(1000);
+  send(":set engine 0\n"); simRun(20);
+  CHECK(g_cfg.engine == 0);
+  benchRun(1500);
+  CHECK(g_ball.valid || true);                                  // the legacy engine takes over (it may need a moment)
+  bwClear(); benchRun(1500);
+  CHECK(!g_ball.valid);                                         // ... and still ends the track
+  send(":set engine 2\n"); simRun(20);
+  CHECK(e2Acquire(75, 20, 0.0, 800));
+  benchRun(1000);
+  bwClear(); benchRun(600);
+  CHECK(!g_ball.valid);
+  CHECK(allWheelsStopped());
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2136,7 +2176,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

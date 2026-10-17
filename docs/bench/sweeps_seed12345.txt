@@ -60,3 +60,4 @@ acq1  127/ 144 | acq2   58/  72 | acq3   52/  66 | loss1  135/ 150 | weak30  287
 acq1  127/ 144 | acq2   58/  72 | acq3   52/  66 | loss1  135/ 150 | weak30  285/ 291 | weak50  285/ 291 | imm50 1 r:140 2 n:60 3 n:60 coh:999 ran:999 | soak FA/min 5.8 FL/min 0.77 burstAcc 48% phantom 3.0s/min | missedSeg 4+6+3 | miss/min 10:0.00 30:0.00 50:0.00 70:0.00 | 2rx 10:0.00 30:0.00 50:0.00 70:0.00 | strongSurv 100 | dirAdj  55/ 69 opp 138/146 seam  80/ 94 | stop10 184/200 | flickSurv 200
 
 ## engine=2 dirtau=60
+acq1  127/ 144 | acq2   58/  72 | acq3   52/  66 | loss1  135/ 150 | weak30  285/ 291 | weak50  286/ 291 | imm50 1 r:140 2 n:60 3 n:60 coh:999 ran:999 | soak FA/min 5.4 FL/min 0.73 burstAcc 44% phantom 4.0s/min | missedSeg 8+8+6 | miss/min 10:0.00 30:0.00 50:0.00 70:0.00 | 2rx 10:0.00 30:0.00 50:0.00 70:0.00 | strongSurv 100 | dirAdj  83/ 95 opp 138/147 seam 119/131 | stop10 184/200 | flickSurv 200
