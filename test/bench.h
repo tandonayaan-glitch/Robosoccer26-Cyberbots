@@ -146,6 +146,9 @@ static LossResult benchLoss(int mode, uint32_t phaseUs, float truth, double miss
     if (r.nav < 0 && g_reqVx == 0 && g_reqVy == 0) r.nav = msSince(t0);
     if (r.firstDrop < 0 && benchTranslation() < 0.9 * steady) r.firstDrop = msSince(t0);
     if (r.motor < 0 && benchTranslation() <= 0.1 * steady) r.motor = msSince(t0);
+    if (getenv("LOSSTRACE") && (uint64_t)(g_mockUs - t0) % 10000 < 50)
+      printf("t=%4.0f ms valid=%d nav=%d req=(%.2f,%.2f,w=%.2f) wheels=%6.1f %6.1f %6.1f %6.1f tr=%.1f\n", msSince(t0), g_ball.valid, (int)g_navState, g_reqVx, g_reqVy, g_reqW,
+             (double)g_wheelOut[0], (double)g_wheelOut[1], (double)g_wheelOut[2], (double)g_wheelOut[3], benchTranslation());
     if (r.declared >= 0 && r.nav >= 0 && r.motor >= 0) break;
   }
   return r;
@@ -259,10 +262,11 @@ static bool benchBroadbandAcquires(uint32_t durMs, uint32_t phaseUs, bool cohere
 
 // A burst hits while a ball is being tracked at 90 deg. where: 0 = opposite receiver, 1 = receiver next to the ball, 2 = ring.
 struct InterfTrack { double maxErr = 0; bool lost = false; bool retarget = false; };
-static InterfTrack benchInterfTrack(int where, uint32_t durMs, uint32_t phaseUs) {
+static InterfTrack benchInterfTrack(int where, uint32_t durMs, uint32_t phaseUs, double missP = 0.0, bool oneRx = false) {
   benchPrepare();
   benchEnableAuto();
-  bwBall(75, 20);
+  const float truth = oneRx ? 90.0f : 75.0f;
+  if (oneRx) bwBall(90, 8, missP); else bwBall(75, 20, missP);
   benchRun(1500);
   benchWaitUs(phaseUs);
   int ballMask = bwMask();
@@ -274,7 +278,7 @@ static InterfTrack benchInterfTrack(int where, uint32_t durMs, uint32_t phaseUs)
     benchStep();
     if (g_mockUs - t0 >= (uint64_t)durMs * 1000ULL) burstOff(mask);
     if (!g_ball.valid) r.lost = true;
-    else { float e = fabsf(angDiffDeg(g_ball.bearingDeg, 75)); if (e > r.maxErr) r.maxErr = e; if (e > 40) r.retarget = true; }
+    else { float e = fabsf(angDiffDeg(g_ball.bearingDeg, truth)); if (e > r.maxErr) r.maxErr = e; if (e > 40) r.retarget = true; }
   }
   bwClear();
   return r;
@@ -382,7 +386,8 @@ static StallResult benchStalls(uint32_t stallMs, uint32_t everyMs, uint32_t seco
 
 // ---- I. mixed-scenario soak with ground truth ---------------------------------------------------------------
 struct SoakResult {
-  int ballSegments = 0, missedSegments = 0, falseAcq = 0, falseLoss = 0, dropoutLoss = 0, burstsInjected = 0;
+  int ballSegments = 0, missedSegments = 0, falseAcq = 0, falseLoss = 0, dropoutLoss = 0, burstsInjected = 0, burstsEligible = 0, burstsAccepted = 0;
+  double phantomSec = 0;
   double seconds = 0, validWhileBall = 0, ballSeconds = 0;
   Dist acq, loss;
 };
@@ -396,7 +401,8 @@ static SoakResult benchSoak(uint32_t totalSeconds, uint32_t seed) {
   bool ballTruth = false; uint64_t truthEnd = 0, graceUntil = 0, dropUntil = 0;
   bool wasValid = g_ball.valid; bool segAcquired = false; uint64_t segStart = 0; int segMask = 0; double segMiss = 0;
   uint64_t nextEvent = g_mockUs + 200000; int phase = 0;           // 0 idle, 1 ball
-  uint64_t burstEnd = 0; int burstMask_ = 0; bool inDrop = false;
+  bool lossWatch = false; bool burstElig = false, burstGot = false; uint64_t phantomStart = 0; bool phantomRun = false;
+  uint64_t burstEnd = 0; int burstMask_ = 0; bool inDrop = false; int dbgShape = -1; uint64_t dbgBurstStart = 0, dbgBurstLen = 0;
   uint64_t nextBurst = g_mockUs + 500000;
   while (g_mockUs < end) {
     uint64_t now = g_mockUs;
@@ -411,43 +417,115 @@ static SoakResult benchSoak(uint32_t totalSeconds, uint32_t seed) {
         segMask = bwMask(); if (!segMask) bwBall(deg, 20, segMiss), segMask = bwMask();
         nextEvent = now + (uint64_t)(600 + rand() % 5400) * 1000ULL;
       } else {                                                         // end of segment: ball vanishes for 0.4 - 3 s
-        phase = 0; ballTruth = false; truthEnd = now; bwOff(); segMask = 0;
+        phase = 0; ballTruth = false; truthEnd = now; bwOff(); segMask = 0; lossWatch = g_ball.valid;
         if (!segAcquired && now - segStart >= 900000ULL) R.missedSegments++;
         nextEvent = now + (uint64_t)(400 + rand() % 2600) * 1000ULL;
         graceUntil = now + (uint64_t)g_cfg.lostHoldMaxMs * 1000ULL + 100000ULL;
       }
     }
-    if (phase == 1 && !inDrop && (rand() % 4000) == 0) {               // dropout of 20-300 ms
+    if (phase == 1 && !inDrop && !getenv("NODROP") && (rand() % 70000) == 0) {               // dropout of 20-300 ms
       inDrop = true; dropUntil = now + (uint64_t)(20 + rand() % 281) * 1000ULL; bwOff();
     }
     if (inDrop && now >= dropUntil) { inDrop = false; bwBallMask(segMask, segMiss); }
     if (burstEnd && now >= burstEnd) { burstOff(burstMask_); burstEnd = 0; if (phase == 1 && !inDrop) bwBallMask(segMask, segMiss); }
-    if (!burstEnd && now >= nextBurst) {                                // interference burst: 10 - 250 ms, random shape
+    if (!burstEnd && now >= nextBurst && !getenv("NOBURST")) {                                // interference burst: 10 - 250 ms, random shape
       int shape = rand() % 5; int base = rand() % 12; burstMask_ = burstMask(shape, base);
       if (phase == 1) burstMask_ &= ~segMask;                           // do not cover the ball's own receivers
-      if (burstMask_) { burstOn(shape, burstMask_); burstEnd = now + (uint64_t)(10 + rand() % 241) * 1000ULL; R.burstsInjected++; }
+      burstElig = (!g_ball.valid && phase == 0);
+      if (burstMask_) { if (burstElig) { R.burstsEligible++; burstGot = false; } burstOn(shape, burstMask_); dbgBurstLen = (uint64_t)(10 + rand() % 241) * 1000ULL; burstEnd = now + dbgBurstLen; dbgShape = shape; dbgBurstStart = now; R.burstsInjected++; }
       nextBurst = now + (uint64_t)(300 + rand() % 2200) * 1000ULL;
     }
     benchStep();
     bool v = g_ball.valid;
+    if (burstElig && v && !burstGot && !ballTruth) { burstGot = true; R.burstsAccepted++; }
+    if (!wasValid && v && !ballTruth) { phantomRun = true; phantomStart = now; }
+    if (wasValid && !v && phantomRun) { R.phantomSec += (double)(now - phantomStart) / 1e6; phantomRun = false; }
     if (!wasValid && v) {
       if (ballTruth) { segAcquired = true; R.acq.add(msSince(segStart)); }
       else if (now > graceUntil || true) {
         // acquisition while no ball is present: false unless it is the re-acquisition right after a genuine dropout
         R.falseAcq++;
+        if (getenv("SOAKDBG")) printf("    FA at t=%.3f s: burst active=%d (shape %d, mask %03x, started %.0f ms ago, len %.0f ms) since segment end %.0f ms, bearing %.0f nActive %d lastLostAge %.0f ms\n",
+            (double)(now - 5000000ULL) / 1e6, burstEnd != 0, dbgShape, burstMask_, (double)(now - dbgBurstStart) / 1e3, (double)(dbgBurstLen) / 1e3, (double)(now - truthEnd) / 1e3, g_ball.bearingDeg, g_ball.nActive,
+            g_ball.lostUs ? (double)(uint32_t)(micros() - g_ball.lostUs) / 1e3 : -1.0);
+        if (getenv("SOAKDBG")) for (int i = 0; i < 12; i++) if (g_ir[i].S > 0) printf("       ch%d S=%.1f hitAge=%.0f ms epAge=%.0f ms ha=%.1f hb=%.1f simMode=%d\n", i, g_ir[i].S, (double)(uint32_t)(micros() - g_ir[i].lastHitUs) / 1e3, (double)(uint32_t)(micros() - g_ir[i].epStartUs) / 1e3, g_ir[i].ha, g_ir[i].hb, g_simMode[i]);
       }
     }
     if (wasValid && !v) {
       if (ballTruth && !inDrop) {
-        if (dropUntil && now - dropUntil < 400000ULL) R.dropoutLoss++; else R.falseLoss++;
+        if (dropUntil && now - dropUntil < 400000ULL) R.dropoutLoss++; else {
+          R.falseLoss++;
+          if (getenv("SOAKDBG")) printf("    FL at t=%.3f s: segment age %.0f ms, miss %.1f, mask %03x, burst active=%d (mask %03x), last drop ended %.0f ms ago, trackM %d flick %.2f hold %lu ms\n",
+              (double)(now - 5000000ULL) / 1e6, (double)(now - segStart) / 1e3, segMiss, segMask, burstEnd != 0, burstMask_, dropUntil ? (double)(now - dropUntil) / 1e3 : -1.0, (int)g_ball.trackM, g_ball.trackFlick, (unsigned long)(g_ball.holdUs / 1000));
+        }
       } else if (ballTruth && inDrop) R.dropoutLoss++;
-      else if (!ballTruth) R.loss.add(msSince(truthEnd));
+      else if (!ballTruth && lossWatch) { R.loss.add(msSince(truthEnd)); }
+      lossWatch = false;
     }
     if (ballTruth) { R.ballSeconds += 5e-5; if (v) R.validWhileBall += 5e-5; }
     wasValid = v;
   }
   bwClear();
   return R;
+}
+
+// ---- direction accuracy and stability of a STATIC ball ---------------------------------------------------------
+struct DaccResult { double meanAbs = 0, maxAbs = 0, std = 0; int n = 0, lost = 0; };
+static DaccResult benchDacc(float deg, float fov, double missP) {
+  benchPrepare(); benchEnableAuto();
+  bwBall(deg, fov, missP);
+  benchRun(2000);
+  DaccResult r; double sum = 0, sum2 = 0; uint64_t end = g_mockUs + 3000000ULL; uint64_t nextS = g_mockUs;
+  while (g_mockUs < end) {
+    benchStep();
+    if (g_mockUs >= nextS) {
+      nextS += 20000;
+      if (!g_ball.valid) { r.lost++; continue; }
+      double e = angDiffDeg(g_ball.bearingDeg, deg);
+      sum += fabs(e); sum2 += e * e; r.n++; if (fabs(e) > r.maxAbs) r.maxAbs = fabs(e);
+    }
+  }
+  if (r.n) { r.meanAbs = sum / r.n; r.std = sqrt(fmax(0.0, sum2 / r.n - (sum / r.n) * (sum / r.n))); }
+  bwClear();
+  return r;
+}
+
+// ---- moving ball -----------------------------------------------------------------------------------------------
+struct SweepResult { double meanErr = 0, p95 = 0, maxErr = 0, meanSigned = 0; int losses = 0; double validFrac = 0; };
+static SweepResult benchSweep(double degPerSec, double missP, bool twoRx) {
+  benchPrepare(); benchEnableAuto();
+  double th0 = 0; bwBall((float)th0, twoRx ? 20.0f : 10.0f, missP);
+  benchRun(1500);
+  Dist err; double sum = 0, sumSigned = 0; int n = 0; SweepResult r; bool was = g_ball.valid;
+  uint64_t t0 = g_mockUs; uint64_t end = t0 + (uint64_t)(360.0 / degPerSec * 1e6);
+  uint64_t nextMove = t0; uint64_t validSteps = 0, steps = 0;
+  while (g_mockUs < end) {
+    double th = fmod(degPerSec * (double)(g_mockUs - t0) / 1e6, 360.0);
+    if (g_mockUs >= nextMove) { nextMove += 10000; bwBall((float)th, twoRx ? 20.0f : 10.0f, missP); }
+    benchStep();
+    steps++; if (g_ball.valid) validSteps++;
+    if (was && !g_ball.valid) r.losses++;
+    was = g_ball.valid;
+    if (g_ball.valid && (g_mockUs - t0) % 20000 < 50) { double e = angDiffDeg(g_ball.bearingDeg, (float)th); err.add(fabs(e)); sum += fabs(e); sumSigned += e; n++; }
+  }
+  if (n) { r.meanErr = sum / n; r.maxErr = err.pct(1.0); r.p95 = err.pct(0.95); r.meanSigned = sumSigned / n; }
+  r.validFrac = steps ? (double)validSteps / (double)steps : 0;
+  bwClear();
+  return r;
+}
+
+// Ball present for durMs on `nrx` receivers, then gone. acquired / time from the end of the signal to the loss declaration.
+static void benchBrief(int nrx, uint32_t durMs, uint32_t phaseUs, bool* acquired, double* lostAfterEnd) {
+  benchPrepare(); benchEnableAuto();
+  benchWaitUs(phaseUs);
+  if (nrx == 1) bwBall(90, 10); else bwBall(75, 20);
+  uint64_t t0 = g_mockUs; *acquired = false; *lostAfterEnd = -1;
+  while (g_mockUs - t0 < (uint64_t)durMs * 1000ULL) { benchStep(); if (g_ball.valid) *acquired = true; }
+  bwOff();
+  uint64_t t1 = g_mockUs; bool valid = g_ball.valid;
+  if (valid) *acquired = true;
+  while (g_mockUs - t1 < 1500000ULL) { benchStep(); if (g_ball.valid) *acquired = true; if (valid && !g_ball.valid) { *lostAfterEnd = msSince(t1); break; } }
+  bwClear();
 }
 
 // ---- J. start-up and CPU -----------------------------------------------------------------------------------------
@@ -468,7 +546,7 @@ static int benchApplyArgs(int argc, char** argv, std::string* suite) {
   return 0;
 }
 
-static void benchEstimateOnce() { irEstimateFast(g_cfg, micros(), millis()); }
+static void benchEstimateOnce() { if (g_cfg.engine == 2) irEstimate2(g_cfg, micros(), millis(), 3, false, 0); else irEstimateFast(g_cfg, micros(), millis()); }
 
 static void benchStartup() {
   // setup() ends with irRestartSchedule(): statistics cover only the cycles after that point
@@ -582,6 +660,52 @@ static int benchMain(int argc, char** argv) {
     Dist e; for (int k = 0; k < N / 2; k++) e.addIf(benchDir(90, 120, (uint32_t)((uint64_t)span * k / (N / 2)), 0.3).est);
     e.print("adjacent 90 -> 120 with 30 % misses");
   }
+  if (want("sweep")) {
+    benchReseed(13);
+    printf("MOVING BALL circling the robot (receivers see +-10 deg / +-20 deg around the ball): bearing error vs truth, signed mean (= lag), losses per revolution, fraction of time valid\n");
+    for (double w : {30.0, 90.0, 180.0, 360.0, 720.0})
+      for (double pm : {0.0, 0.3})
+        for (int two = 0; two < 2; two++) {
+          SweepResult r = benchSweep(w, pm, two == 1);
+          printf("  %4.0f deg/s, misses %2.0f%%, %d-rx view: mean|err| %5.1f  p95 %5.1f  max %5.1f  signed %+6.1f deg | losses %d | valid %.3f\n", w, pm * 100, two ? 2 : 1, r.meanErr, r.p95, r.maxErr, r.meanSigned, r.losses, r.validFrac);
+        }
+  }
+  if (want("brief")) {
+    benchReseed(14);
+    printf("BRIEF APPEARANCE (ball visible for d ms then gone; 48 phases): acquired count / median and p95 time from the end of the signal to the loss declaration\n");
+    for (int nrx = 1; nrx <= 2; nrx++) {
+      printf("  %d receiver%s:", nrx, nrx > 1 ? "s" : " ");
+      for (uint32_t d : {40u, 60u, 80u, 100u, 150u, 200u, 300u, 600u}) {
+        int acq = 0; Dist l;
+        for (int k = 0; k < 48; k++) { bool a; double la; benchBrief(nrx, d, (uint32_t)((uint64_t)span * k / 48), &a, &la); acq += a; if (la >= 0) l.add(la); }
+        printf(" | %3u ms: %2d/48 lost@%s", (unsigned)d, acq, l.v.empty() ? "-" : (std::to_string((int)l.pct(0.5)) + "/" + std::to_string((int)l.pct(0.95))).c_str());
+      }
+      printf("\n");
+    }
+  }
+  if (want("dbg")) {
+    benchReseed(98);
+    for (double pm : {0.0, 0.3, 0.5}) for (int oneRx = 0; oneRx < 2; oneRx++) for (int where = 0; where < 3; where++) {
+      int lost = 0, ret = 0; double maxe = 0;
+      for (uint32_t d : {40u, 100u, 250u}) for (int k = 0; k < 24; k++) { InterfTrack r = benchInterfTrack(where, d, (uint32_t)((uint64_t)span * k / 24), pm, oneRx); lost += r.lost; ret += r.retarget; if (r.maxErr > maxe) maxe = r.maxErr; }
+      printf("  weak ball miss %.0f%% %s, interference %d: false losses %d/72 retargets %d maxerr %.0f\n", pm * 100, oneRx ? "1rx" : "2rx", where, lost, ret, maxe);
+    }
+  }
+  if (want("dbg2")) {
+    benchReseed(99); benchPrepare(); benchEnableAuto(); bwBall(120, 10, 0.5); 
+    for (int i = 0; i < 40; i++) { benchRun(200); printf("t=%4d valid=%d trackM=%u flick=%.2f hold=%lu | ch4: S=%.2f ha=%.2f hb=%.2f missRun=%u mask=%x focus=%x\n", i * 200, g_ball.valid, (unsigned)g_ball.trackM, g_ball.trackFlick, (unsigned long)(g_ball.holdUs / 1000), g_ir[4].S, g_ir[4].ha, g_ir[4].hb, (unsigned)g_ir[4].missRun, (unsigned)g_ball.actMask, (unsigned)g_focusMask); }
+  }
+  if (want("dacc")) {
+    benchReseed(12);
+    printf("DIRECTION ACCURACY of a static ball (bearings every 7.5 deg, 3 s each, 20 ms samples; error vs truth): mean |err| / worst / samples lost\n");
+    for (double pm : {0.0, 0.3, 0.5}) {
+      for (float fov : {10.0f, 20.0f}) {
+        double sumMean = 0, worst = 0, sumStd = 0; int lost = 0, cnt = 0;
+        for (float deg = 0; deg < 360.0f; deg += 7.5f) { DaccResult r = benchDacc(deg, fov, pm); if (r.n) { sumMean += r.meanAbs; sumStd += r.std; cnt++; } if (r.maxAbs > worst) worst = r.maxAbs; lost += r.lost; }
+        printf("  misses %2.0f%%, receiver fov +-%2.0f deg: mean |err| %5.2f deg, mean jitter(std) %5.2f deg, worst %6.1f deg, lost samples %d\n", pm * 100, fov, cnt ? sumMean / cnt : -1, cnt ? sumStd / cnt : -1, worst, lost);
+      }
+    }
+  }
   if (want("drop")) {
     benchReseed(7);
     printf("DROPOUT of a tracked ball (ball vanishes for gap, then returns; 48 phases each). Cell = declared lost / left APPROACH / median re-acquire ms:\n");
@@ -609,7 +733,7 @@ static int benchMain(int argc, char** argv) {
     printf("FALSE ACQUISITION by ball-like bursts with NO ball present (48 phases each; count acquired):\n");
     for (int shape = 0; shape < 5; shape++) {
       printf("  %-14s", BURST_SHAPE[shape]);
-      for (uint32_t d : {20u, 40u, 60u, 80u, 100u, 120u, 150u, 250u, 500u}) {
+      for (uint32_t d : {20u, 40u, 60u, 80u, 100u, 120u, 140u, 160u, 180u, 200u, 250u, 500u}) {
         int got = 0;
         for (int k = 0; k < 48; k++) got += benchBurstAcquiresShape(shape, d, (uint32_t)((uint64_t)span * k / 48), 3 + (k % 7)) ? 1 : 0;
         printf(" | %3u ms:%2d/48", (unsigned)d, got);
@@ -660,8 +784,9 @@ static int benchMain(int argc, char** argv) {
     printf("MIXED SOAK with ground truth (random ball segments with 0-50 %% misses, dropouts 20-300 ms, bursts 10-250 ms of random shape):\n");
     for (uint32_t sd = 0; sd < 3; sd++) {
       SoakResult r = benchSoak(600, g_benchSeed + sd);
-      printf("  seed %u: %d ball segments, %d missed (never acquired in >=0.9 s), false acquisitions %d (%.2f/min), false losses %d (%.2f/min), losses during dropouts %d, bursts %d, valid while ball %.1f %%\n",
+      printf("  seed %u: %d ball segments, %d missed (never acquired in >=0.9 s), false acquisitions %d (%.2f/min), false losses %d (%.2f/min), losses during dropouts %d, bursts %d (eligible %d, accepted %d = %.0f %%), phantom tracking %.1f s/min, valid while ball %.1f %%\n",
              (unsigned)(g_benchSeed + sd), r.ballSegments, r.missedSegments, r.falseAcq, r.falseAcq / (r.seconds / 60.0), r.falseLoss, r.falseLoss / (r.seconds / 60.0), r.dropoutLoss, r.burstsInjected,
+             r.burstsEligible, r.burstsAccepted, r.burstsEligible ? 100.0 * r.burstsAccepted / r.burstsEligible : 0.0, r.phantomSec / (r.seconds / 60.0),
              r.ballSeconds > 0 ? 100.0 * r.validWhileBall / r.ballSeconds : 0.0);
       r.acq.print("  ball-segment start -> first valid"); r.loss.print("  segment end -> declared lost");
     }

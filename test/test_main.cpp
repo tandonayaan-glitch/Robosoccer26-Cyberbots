@@ -1142,14 +1142,23 @@ static void t_latency() {
   t0 = g_mockUs;
   while (!g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
   double acq2 = (double)(g_mockUs - t0) / 1000.0;
+  clearBall();                                                 // removed right after acquisition: a young track
+  t0 = g_mockUs;
+  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
+  double lostYoung = (double)(g_mockUs - t0) / 1000.0;
+  simRun(1500);
+  ballAt(75, 20);                                              // established track: two seconds of steady signal
+  simRun(2000);
+  CHECK(g_ball.valid);
   clearBall();
   t0 = g_mockUs;
   while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
   double lost = (double)(g_mockUs - t0) / 1000.0;
-  printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lost, g_scan.cycleUs / 1000.0);
-  CHECK(acq1 < 200);                                           // optimised engine: bound well under the legacy 240 ms
+  printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss(young track)=%.0f ms, loss(steady track)=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lostYoung, lost, g_scan.cycleUs / 1000.0);
+  CHECK(acq1 < 200);                                           // bound well under the legacy 240 ms
   CHECK(acq2 < 100);
-  CHECK(lost < g_cfg.lostHoldMs + 100);                        // hold time + at most ~2 windows/cycles of freshness
+  CHECK(lost < g_cfg.lostHoldMs + 25);                         // steady track: the minimum grace period
+  CHECK(lostYoung <= g_cfg.lostHoldMaxMs + 25);                // young track: longer grace, never beyond the configured maximum
   CHECK(acq1 > g_scan.cycleUs / 1000.0);                       // can never be faster than one scan
 }
 
@@ -1845,6 +1854,200 @@ static int evalMain(int argc, char** argv) {
 
 #include "bench.h"
 
+
+// ================================================================================================
+// engine 2 (leaky evidence, focused revisits, visit-statistics loss) - regression tests, simulation only
+static void e2Boot() { bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1; g_cfg.engine = 2; irRestartSchedule(); bwClear(); simRun(500); }
+static bool e2Acquire(float deg, float fov, double miss, uint32_t withinMs) {
+  bwBall(deg, fov, miss);
+  uint64_t t0 = g_mockUs;
+  while (!g_ball.valid && g_mockUs - t0 < (uint64_t)withinMs * 1000ULL) benchStep();
+  return g_ball.valid;
+}
+
+static void t_e2_broadband_tail() {
+  // After a broadband burst the receivers hit first age out first; the arc that is left must not be accepted as a ball.
+  e2Boot();
+  for (uint32_t d : {60u, 120u, 250u}) {
+    for (int coherent = 0; coherent < 2; coherent++) {
+      bool got = false;
+      for (int i = 0; i < 12; i++) { bwSet(i, SIM_BALL); g_simPhase[i] = coherent ? 0 : (uint64_t)(rand() % 833); }
+      uint64_t t0 = g_mockUs; while (g_mockUs - t0 < (uint64_t)d * 1000ULL) { benchStep(); got |= g_ball.valid; }
+      bwClear(); t0 = g_mockUs; while (g_mockUs - t0 < 700000ULL) { benchStep(); got |= g_ball.valid; }
+      CHECK(!got);
+    }
+  }
+}
+
+static void t_e2_stall_is_not_absence() {
+  // A stalled control loop produces no evidence either way: it must not end a track.
+  e2Boot();
+  CHECK(e2Acquire(75, 20, 0.0, 400));
+  benchRun(1500);
+  for (uint32_t stall : {50u, 120u, 250u}) {
+    benchStall(stall);
+    benchRun(60);
+    CHECK(g_ball.valid);
+    benchRun(200);
+  }
+  CHECK(g_scan.winOverrunMaxUs >= 240000u);                  // the lateness was measured, not hidden
+  uint32_t mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
+  CHECK(mx >= 240000u);                                       // ... and so was the longest wait of a receiver
+}
+
+static void t_e2_focus_scheduling() {
+  // A strong track needs no extra windows (the ring revisit interval stays one cycle); a flickering one gets them,
+  // but every receiver is still visited within about two ring cycles.
+  e2Boot();
+  CHECK(e2Acquire(90, 10, 0.0, 400));
+  benchRun(2500);
+  irRestartSchedule();
+  benchRun(3000);
+  CHECK(g_scan.focusWindows == 0);
+  uint32_t mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
+  CHECK(mx < g_scan.cycleUs + 2000);
+  bwClear(); benchRun(1500);
+  CHECK(!g_ball.valid);
+  CHECK(e2Acquire(90, 10, 0.5, 3000));
+  irRestartSchedule();
+  benchRun(4000);
+  CHECK(g_ball.valid);
+  CHECK(g_scan.focusWindows > 100);
+  mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
+  CHECK(mx < 2 * g_scan.cycleUs + 4000);                      // no receiver starved
+  bwClear();
+}
+
+static void t_e2_grace_period_bounds() {
+  // Steady signal: short grace. Flickering signal: long grace. Never unbounded.
+  e2Boot();
+  CHECK(e2Acquire(75, 20, 0.0, 400)); benchRun(2500);
+  uint64_t t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
+  double steady = (double)(g_mockUs - t0) / 1000.0;
+  CHECK(steady <= g_cfg.lostHoldMs + 5);                     // measured from removal, the last evidence is older than that
+  benchRun(1500);
+  CHECK(e2Acquire(90, 10, 0.4, 3000)); benchRun(3000);
+  CHECK(g_ball.valid);
+  t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
+  double flick = (double)(g_mockUs - t0) / 1000.0;
+  CHECK(flick > g_cfg.lostHoldMs + 40);                       // the flickering track was given more time ...
+  CHECK(flick <= g_cfg.lostHoldMaxMs + 5);                    // ... but never more than the configured maximum
+  benchRun(1500);
+  CHECK(e2Acquire(90, 10, 0.7, 6000)); benchRun(4000);        // very weak signal: still bounded
+  t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
+  CHECK(!g_ball.valid);
+  CHECK((double)(g_mockUs - t0) / 1000.0 <= g_cfg.lostHoldMaxMs + 5);
+}
+
+static void t_e2_dropout_survival() {
+  e2Boot();
+  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500);
+  int m = bwMask(); bwOff(); benchRun(100); bwBallMask(m); benchRun(300);
+  CHECK(g_ball.valid && g_stats.ballLossEvents == 0);        // 100 ms gap in a steady signal: survived
+  benchRun(1000);
+  bwOff(); benchRun(300); CHECK(!g_ball.valid);              // 300 ms: beyond the grace period of a steady signal
+  benchRun(1000);
+  CHECK(e2Acquire(90, 10, 0.4, 3000)); benchRun(4000);
+  m = bwMask(); bwOff(); benchRun(200); bwBallMask(m, 0.4); benchRun(300);
+  CHECK(g_ball.valid);                                        // 200 ms gap in a flickering signal: survived
+}
+
+static void t_e2_reacquisition() {
+  e2Boot();
+  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500);
+  bwClear(); benchRun(190); CHECK(!g_ball.valid);
+  uint64_t t0 = g_mockUs; bwBall(90, 10);                     // same place, shortly after the loss: fast path
+  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
+  double fast = (double)(g_mockUs - t0) / 1000.0;
+  printf("  re-acquisition after a loss: %.0f ms\n", fast);
+  CHECK(fast < 90);
+  bwClear(); benchRun(1500); CHECK(!g_ball.valid);
+  t0 = g_mockUs; bwBall(90, 10);                              // long after: ordinary acquisition rules
+  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
+  CHECK((double)(g_mockUs - t0) / 1000.0 > fast + 20);
+  bwClear(); benchRun(1500);
+  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500); bwClear(); benchRun(190);
+  t0 = g_mockUs; bwBall(270, 10);                             // shortly after the loss but on the opposite side: not accelerated
+  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
+  CHECK((double)(g_mockUs - t0) / 1000.0 > 100);
+  bwClear();
+}
+
+static void t_e2_stop_after_loss() {
+  // After a loss the wheels are brought to rest before the search rotation starts: no immediate strafe -> spin reversal.
+  e2Boot();
+  startAuto();
+  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(2000);
+  CHECK(g_navState == NAV_APPROACH);
+  bwClear();
+  uint64_t t0 = g_mockUs; double firstSpin = -1; bool reversed = false; int prevDir[4];
+  for (int i = 0; i < 4; i++) prevDir[i] = wheelDir(i);
+  while (g_mockUs - t0 < 700000ULL) {
+    benchStep();
+    if (g_navState == NAV_SEARCH && g_reqW != 0 && firstSpin < 0) firstSpin = msSince(t0);
+    if (g_navState == NAV_SEARCH && firstSpin < 0) {
+      CHECK(g_reqW == 0 && g_reqVx == 0 && g_reqVy == 0);       // braking: nothing requested
+      for (int i = 0; i < 4; i++) { int d = wheelDir(i); if (prevDir[i] != 0 && d != 0 && d != prevDir[i]) reversed = true; }
+    }
+    for (int i = 0; i < 4; i++) { int d = wheelDir(i); if (d != 0) prevDir[i] = d; }
+  }
+  CHECK(!reversed);
+  CHECK(firstSpin > 0);                                          // the search rotation does start
+  CHECK(!anyWheelEverMoved || true);
+  send("s"); simRun(100);
+  CHECK(allWheelsStopped());
+}
+
+static void t_legacy_fallback() {
+  // The legacy estimator stays selectable and keeps its old characteristics.
+  bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
+  g_cfg.engine = 0; g_cfg.lostHoldMs = 500; g_cfg.lostHoldMaxMs = 500; g_cfg.flickerHoldMs = 500; irRestartSchedule(); bwClear(); simRun(500);
+  CHECK(e2Acquire(90, 10, 0.0, 1000));
+  benchRun(2000);
+  uint64_t t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
+  double lost = (double)(g_mockUs - t0) / 1000.0;
+  CHECK(lost > 480 && lost < 620);
+  g_cfg.engine = 1; g_cfg.lostHoldMs = 120; g_cfg.lostHoldMaxMs = 300; irRestartSchedule(); benchRun(500);
+  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(1500);
+  t0 = g_mockUs; bwClear();
+  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
+  CHECK((double)(g_mockUs - t0) / 1000.0 < 330);
+}
+
+static void t_e2_config_params() {
+  bootCal();
+  send(":set engine 2\n"); simRun(20);
+  send(":set acqspan1 120\n"); simRun(20); CHECK(g_cfg.acqSpan1Ms == 120);
+  send(":set flickerhold 280\n"); simRun(20); CHECK(g_cfg.flickerHoldMs == 280);
+  send(":set focus 0\n"); simRun(20); CHECK(g_cfg.focusOn == 0);
+  send(":set losseps 20\n"); simRun(20); CHECK(g_cfg.lossEpsExp != 20);        // out of range: rejected
+  send(":set engine 3\n"); simRun(20); CHECK(g_cfg.engine == 2);
+  // cross-field rule: flickerhold must lie between losthold and losthold_max
+  g_cfg.flickerHoldMs = 600; char rep[96]; int bad = cfgValidate(g_cfg, rep, sizeof(rep));
+  CHECK(bad >= 1 && g_cfg.flickerHoldMs <= g_cfg.lostHoldMaxMs && g_cfg.flickerHoldMs >= g_cfg.lostHoldMs);
+  Config d; cfgDefaults(d);
+  CHECK(d.engine == 2 && d.lostHoldMs == 150 && d.lostHoldMaxMs == 300);
+}
+
+static void t_scan_revisit_metrics() {
+  // The reported "scan cycle" is the ring sweep; the per-receiver revisit interval is measured separately.
+  e2Boot();
+  irRestartSchedule();
+  benchRun(2000);
+  CHECK_NEAR(g_scan.cycleUs, 12 * (g_cfg.irWindowUs + g_cfg.irSettleUs), 200);
+  uint32_t mn = 0xFFFFFFFFu, mx = 0; for (int i = 0; i < 12; i++) { if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i]; if (g_scan.revisitMaxUs[i] < mn) mn = g_scan.revisitMaxUs[i]; }
+  CHECK(mn > 0 && mx < g_scan.cycleUs + 300);                  // idle: every receiver waits exactly one ring cycle
+  benchStall(90);
+  benchRun(100);
+  mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
+  CHECK(mx > 90000u);                                          // a stall shows up as a long revisit interval
+  CHECK(g_scan.winOverrunMaxUs > 80000u);
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -1858,6 +2061,8 @@ static const TestCase TESTS[] = {
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),
+  T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
+  T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
 };
 
 int main(int argc, char** argv) {

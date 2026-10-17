@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 8
+#define CFG_VERSION 9
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -52,6 +52,12 @@ struct Config {
   uint8_t dirWindows;            // engine 1: most recent windows per receiver that feed the direction estimate
   uint8_t gateDeg;               // engine 1: evidence must lie within +-gateDeg of the current bearing to refresh the ball
   uint16_t dirTauMs;             // engine 1: direction smoothing time constant
+  uint16_t acqSpan1Ms;           // engine 2: evidence on ONE receiver must have lasted this long before the ball is acquired
+  uint16_t acqSpan2Ms;           // engine 2: ... for two or more neighbouring receivers (after one full ring look-around)
+  uint16_t epIdleMs;             // engine 2: evidence is forgotten after this long without a hit
+  uint8_t focusOn;               // engine 2: spend every second window on the receivers of a candidate / weak track
+  uint8_t lossEpsExp;            // engine 2: a run of misses is "loss" when its probability at the measured hit rate is below 10^-this
+  uint16_t reacqMs;              // engine 2: after a loss, evidence consistent with the last bearing is accepted faster for this long
   uint8_t irFullHits;            // hits (of the last 8 windows) at which a channel counts with full weight
   uint8_t acqCycles;             // consecutive scan cycles above acqConf needed to acquire the ball
   uint16_t irPeriodMinUs;        // pulse-period gate (0/0 = OFF): accept only mean pulse periods in [min,max] us
@@ -65,7 +71,8 @@ struct Config {
   // ---- navigation ----
   float acqConf;
   uint16_t lostHoldMs;           // grace without track-consistent evidence before the ball is declared lost (strong signal)
-  uint16_t lostHoldMaxMs;        // engine 1: grace used for a weak/intermittent signal (quality-scaled up to this)
+  uint16_t lostHoldMaxMs;        // engines 1/2: upper bound of the grace period (weak / intermittent signals)
+  uint16_t flickerHoldMs;        // engine 2: grace period for a signal that was already flickering (>= 25 % of visits missed)
   float centerDeg;
   float approachSpeed;           // 0..1 of maxAuto
   float attackSpeed;
@@ -128,7 +135,13 @@ static const ParamDef PARAMS[] = {
   PD("irnoisy", PT_U8, irNoisyPerMs, 2, 50),
   PD("irsettle", PT_U8, irSettleUs, 2, 100),
   PD("irhistmin", PT_U8, irHistMinOn, 1, 8),
-  PD("engine", PT_U8, engine, 0, 1),
+  PD("engine", PT_U8, engine, 0, 2),
+  PD("acqspan1", PT_U16, acqSpan1Ms, 20, 1000),
+  PD("acqspan2", PT_U16, acqSpan2Ms, 0, 1000),
+  PD("epidle", PT_U16, epIdleMs, 50, 2000),
+  PD("focus", PT_U8, focusOn, 0, 1),
+  PD("losseps", PT_U8, lossEpsExp, 1, 9),
+  PD("reacq", PT_U16, reacqMs, 0, 3000),
   PD("acqstreak", PT_U8, acqStreak, 1, 6),
   PD("acqminstreak", PT_U8, acqMinStreak, 1, 4),
   PD("dirwindows", PT_U8, dirWindows, 1, 8),
@@ -146,6 +159,7 @@ static const ParamDef PARAMS[] = {
   PD("acqconf", PT_F32, acqConf, 0.2, 0.95),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
   PD("losthold_max", PT_U16, lostHoldMaxMs, 40, 3000),
+  PD("flickerhold", PT_U16, flickerHoldMs, 40, 3000),
   PD("center", PT_F32, centerDeg, 5, 60),
   PD("approach", PT_F32, approachSpeed, 0.15, 1.0),
   PD("attack", PT_F32, attackSpeed, 0.15, 1.0),
@@ -230,7 +244,13 @@ static void cfgDefaults(Config& c) {
   c.irNoisyPerMs = 3;     // ball ~1.2 pulses/ms; motor-PWM/interference is several per ms
   c.irSettleUs = 10;
   c.irHistMinOn = 2;
-  c.engine = 1;
+  c.engine = 2;
+  c.acqSpan1Ms = 96;
+  c.acqSpan2Ms = 30;
+  c.epIdleMs = 250;
+  c.focusOn = 1;
+  c.lossEpsExp = 4;
+  c.reacqMs = 300;
   c.acqStreak = 4;
   c.acqMinStreak = 2;
   c.dirWindows = 3;
@@ -246,8 +266,9 @@ static void cfgDefaults(Config& c) {
   c.maxGapDeg = 100.0f;
   c.minTrusted = 4;
   c.acqConf = 0.45f;
-  c.lostHoldMs = 120;
+  c.lostHoldMs = 150;
   c.lostHoldMaxMs = 300;
+  c.flickerHoldMs = 290;
   c.centerDeg = 20.0f;
   c.approachSpeed = 0.7f;
   c.attackSpeed = 1.0f;
@@ -330,6 +351,7 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
   if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
   if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }
+  if (c.flickerHoldMs < c.lostHoldMs || c.flickerHoldMs > c.lostHoldMaxMs) { c.flickerHoldMs = c.lostHoldMs; bad++; repNote(rep, repN, "flickerhold"); }
   if (c.irStuckFailMs <= c.irStuckMs) { c.irStuckMs = d.irStuckMs; c.irStuckFailMs = d.irStuckFailMs; bad++; repNote(rep, repN, "irstuck"); }
   for (int i = 0; i < MUX_CHANNELS; i++) {
     ChCfg& h = c.ch[i];

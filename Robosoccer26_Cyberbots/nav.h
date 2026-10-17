@@ -11,7 +11,7 @@ static uint32_t g_navSince = 0;
 static uint32_t g_manualUntilMs = 0;
 static uint8_t g_searchAttempt = 0;
 static int8_t g_searchDir = 1;
-static uint32_t g_searchStartMs = 0, g_lostAtMs = 0, g_pauseUntilMs = 0;
+static uint32_t g_searchStartMs = 0, g_lostAtMs = 0, g_pauseUntilMs = 0, g_searchBrakeUntilMs = 0;
 static bool g_lostPending = false;          // a loss happened and has not been re-acquired yet
 static float g_refYaw = 0;
 static bool g_centered = false;
@@ -144,8 +144,11 @@ static void navApproach(const Config& c, uint32_t now) {
   motorsDrive(c, vx, vy, w, c.maxAuto);
 }
 
-static void navEnterSearch(const char* why) {
+static void navEnterSearch(const char* why, bool brake = false) {
   g_searchStartMs = millis();
+  // After a loss the wheels are still driving the old approach. Come to rest first (the ramp limits how fast that can be),
+  // then rotate: going straight from a strafe to a spin would reverse two wheels through the dead-time pause for nothing.
+  g_searchBrakeUntilMs = brake ? g_searchStartMs + 20u + (uint32_t)g_cfg.maxAuto * 1000u / (g_cfg.decelPwmPerS ? g_cfg.decelPwmPerS : 1u) : g_searchStartMs;
   g_searchDir = (g_lastBearing >= 0) ? 1 : -1;
   navSetState(NAV_SEARCH, why);
 }
@@ -171,13 +174,13 @@ static void navTick(const Config& c, uint32_t now) {
       break;
 
     case NAV_SEEK:
-      if (g_ball.valid) { g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, "ball acquired"); }
+      if (g_ball.valid) { g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, "ball acquired"); navApproach(c, now); }
       else if (elapsedMs(now, g_navSince) > 1000) { g_searchAttempt = 1; navEnterSearch("no ball at start"); }
       else motorsDrive(c, 0, 0, 0, c.maxAuto);
       break;
 
     case NAV_APPROACH:
-      if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch("ball lost"); }
+      if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch("ball lost", true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
       else navApproach(c, now);
       break;
 
@@ -192,10 +195,13 @@ static void navTick(const Config& c, uint32_t now) {
         }
         if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
         navSetState(NAV_APPROACH, "ball re-acquired");
+        navApproach(c, now);
       } else if (elapsedMs(now, g_searchStartMs) > c.searchTimeoutMs) {
         motorsDrive(c, 0, 0, 0, c.maxAuto);
         if (g_searchAttempt >= c.searchAttempts) navSetState(NAV_WAIT, "search attempts exhausted");
         else { g_searchAttempt++; g_pauseUntilMs = now + c.searchPauseMs; navSetState(NAV_SEARCH_PAUSE, "search timeout"); }
+      } else if (!deadlineReached(now, g_searchBrakeUntilMs)) {
+        motorsDrive(c, 0, 0, 0, c.maxAuto);                                                        // wheels coming to rest
       } else {
         motorsDrive(c, 0, 0, (float)g_searchDir * c.searchSpin * navSensorScale(c), c.maxAuto);   // slow rotation
       }
@@ -209,7 +215,7 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_WAIT:                                   // stopped, still watching; never spins forever
       motorsDrive(c, 0, 0, 0, c.maxAuto);
-      if (g_ball.valid) { if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, "ball appeared"); }
+      if (g_ball.valid) { if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, "ball appeared"); navApproach(c, now); }
       else if (elapsedMs(now, g_navSince) > 60000) { g_autoEnabled = false; navSetState(NAV_IDLE, "no ball for 60 s: autonomous disabled"); }
       break;
 

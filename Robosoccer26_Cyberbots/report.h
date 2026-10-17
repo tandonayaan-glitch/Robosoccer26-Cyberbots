@@ -31,8 +31,12 @@ static const char* resetReasonName(esp_reset_reason_t r) {
 static void printIrSnapshot(const Config& c) {
   uint8_t nT, nU;
   float gap = irCoverageGap(c, &nT, &nU);
-  say("INFO", "IR snapshot: %u enabled channel(s), scan cycle %lu us (avg %.0f, max %lu), cycles=%lu, window=%u us",
+  uint32_t revMax = 0;
+  for (uint8_t i = 0; i < MUX_CHANNELS; i++) if (g_scan.revisitMaxUs[i] > revMax) revMax = g_scan.revisitMaxUs[i];
+  say("INFO", "IR snapshot: %u enabled channel(s), ring cycle %lu us (avg %.0f, max %lu), cycles=%lu, window=%u us",
       (unsigned)irCountEnabled(c), UL(g_scan.cycleUs), g_scan.cycleAvgUs, UL(g_scan.cycleMaxUs), UL(g_scan.cycleCount), (unsigned)c.irWindowUs);
+  say("INFO", "scan timing: longest time any receiver waited between two windows %lu us, longest late window %lu us, focus windows %lu, engine %u (ring cycle = time to open each enabled window once)",
+      UL(revMax), UL(g_scan.winOverrunMaxUs), UL(g_scan.focusWindows), (unsigned)c.engine);
   say("INFO", " ch label bearing   raw det act edges per_us  hits8 rej status          (raw: pin level 1=idle for active-low; det: this window; act: smoothed; rej: windows rejected by the period gate)");
   for (uint8_t i = 0; i < MUX_CHANNELS; i++) {
     if (!c.ch[i].enabled) continue;
@@ -74,6 +78,8 @@ static void printNavStatus(const Config& c, uint32_t now) {
       g_ball.conf, (unsigned)g_ball.actMask, g_ball.rInst, UL(g_ball.lastDetectMs ? elapsedMs(now, g_ball.lastDetectMs) : 0));
   if (isnan(g_hdgErr)) say("NAV", "heading: hold %s (imu %s)", c.hdgEnable ? "inactive" : "disabled", imuHeadingUsable(c, now) ? "usable" : "unavailable");
   else say("NAV", "heading: ref %.1f yaw %.1f error %.1f deg", g_refYaw, g_imu.yaw, g_hdgErr);
+  say("NAV", "track: grace period %lu ms (steady signal %u ms, flickering %u ms, max %u ms), misses tolerated %u, measured miss fraction %.2f",
+      UL(irEffectiveHoldMs(c)), (unsigned)c.lostHoldMs, (unsigned)c.flickerHoldMs, (unsigned)c.lostHoldMaxMs, (unsigned)g_ball.trackM, g_ball.trackFlick);
   say("NAV", "ball latency (firmware-measured, excludes the ball switching on/off): acquisition n=%lu last=%lu mean=%lu max=%lu ms | loss n=%lu last=%lu mean=%lu max=%lu ms",
       UL(g_latAcq.n), UL(g_latAcq.lastUs / 1000), UL(g_latAcq.n ? (uint32_t)(g_latAcq.sumUs / g_latAcq.n / 1000) : 0), UL(g_latAcq.maxUs / 1000),
       UL(g_latLoss.n), UL(g_latLoss.lastUs / 1000), UL(g_latLoss.n ? (uint32_t)(g_latLoss.sumUs / g_latLoss.n / 1000) : 0), UL(g_latLoss.maxUs / 1000));

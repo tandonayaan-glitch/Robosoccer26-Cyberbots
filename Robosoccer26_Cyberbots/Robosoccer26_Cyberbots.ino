@@ -28,6 +28,7 @@
 static const uint32_t WDT_TIMEOUT_MS = 3000;        // hung loop => reset (outputs return to inputs: external pull-downs!)
 static const uint32_t LOOP_STALL_FATAL_MS = 1000;   // a single loop gap this long => SAFE_STOP (latched)
 static uint32_t g_lastHealthMs = 0, g_lastCtlMs = 0;
+static bool g_ctlBallValid = false;           // last ball state seen by the control tick (an edge triggers an early tick)
 #ifdef HOST_TEST
 static bool g_hostWriterInline = true;
 #endif
@@ -160,6 +161,10 @@ void loop() {
     imuHealth(g_cfg, now);
     faultUpdate(F_FS_UNAVAILABLE, !g_fsRwOk, g_cfg.recoverVerifyMs, g_fsDetail);
     condEvaluate();
+  }
+  if (g_ball.valid != g_ctlBallValid) {           // acquisition / loss: do not wait for the next 10 ms tick
+    g_ctlBallValid = g_ball.valid;
+    g_lastCtlMs = now - 10u;
   }
   if (elapsedMs(now, g_lastCtlMs) >= 10) {         // 100 Hz control tick
     g_lastCtlMs = now;
