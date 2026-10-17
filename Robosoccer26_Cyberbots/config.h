@@ -243,8 +243,8 @@ static void cfgDefaults(Config& c) {
   c.irSettleUs = 10;
   c.irHistMinOn = 2;
   c.engine = 2;
-  c.acqSpan1Ms = 96;
-  c.acqSpan2Ms = 30;
+  c.acqSpan1Ms = 140;
+  c.acqSpan2Ms = 70;
   c.epIdleMs = 250;
   c.focusOn = 1;
   c.lossEpsExp = 4;

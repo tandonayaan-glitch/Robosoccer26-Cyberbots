@@ -1156,7 +1156,7 @@ static void t_latency() {
   double lost = (double)(g_mockUs - t0) / 1000.0;
   printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss(young track)=%.0f ms, loss(steady track)=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lostYoung, lost, g_scan.cycleUs / 1000.0);
   CHECK(acq1 < 200);                                           // bound well under the legacy 240 ms
-  CHECK(acq2 < 100);
+  CHECK(acq2 < 120);
   CHECK(lost < g_cfg.lostHoldMs + 25);                         // steady track: the minimum grace period
   CHECK(lostYoung <= g_cfg.lostHoldMaxMs + 25);                // young track: longer grace, never beyond the configured maximum
   CHECK(acq1 > g_scan.cycleUs / 1000.0);                       // can never be faster than one scan
@@ -2061,7 +2061,7 @@ static void t_startup_schedule() {
   bwBall(75, 20);                                              // now a ball appears
   uint64_t t0 = g_mockUs; double acq = -1;
   while (g_mockUs - t0 < 600000ULL) { benchStep(); if (acq < 0 && g_ball.valid) acq = msSince(t0); trackWheelMotion(); }
-  CHECK(acq > 0 && acq < 100);
+  CHECK(acq > 0 && acq < 130);
   CHECK(!anyWheelEverMoved);                                   // autonomy is off: sensing alone moves nothing
   bwClear();
 }
@@ -2107,6 +2107,20 @@ static void t_e2_stale_not_followed() {
   send("s"); simRun(100);
 }
 
+
+static void t_irprofile() {
+  bootCal();
+  CHECK(g_cfg.acqSpan1Ms == 140 && g_cfg.acqSpan2Ms == 70);     // default = balanced
+  send(":irprofile fast\n"); simRun(20);
+  CHECK(g_cfg.acqSpan1Ms == 96 && g_cfg.acqSpan2Ms == 30);
+  send(":irprofile safe\n"); simRun(20);
+  CHECK(g_cfg.acqSpan1Ms == 180 && g_cfg.acqSpan2Ms == 100);
+  send(":irprofile balanced\n"); simRun(20);
+  CHECK(g_cfg.acqSpan1Ms == 140 && g_cfg.acqSpan2Ms == 70);
+  send(":irprofile bogus\n"); simRun(20);                       // unknown name: nothing changes, usage is printed
+  CHECK(g_cfg.acqSpan1Ms == 140 && outHas("Usage: :irprofile"));
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2122,7 +2136,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile),
 };
 
 int main(int argc, char** argv) {

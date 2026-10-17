@@ -571,7 +571,8 @@ static int benchMain(int argc, char** argv) {
   for (int i = 2; i < argc; i++) if (!strcmp(argv[i], "verified=1")) verifiedFlag = 1;
   if (benchApplyArgs(argc, argv, &suite)) return 1;
   for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = (uint8_t)verifiedFlag;
-  auto want = [&](const char* s) { return suite == "all" || suite == s; };
+  // "all" = every suite except the slow burst-profile sweep (imm) and the debugging helpers (dbg, dbg2)
+  auto want = [&](const char* s) { return suite == s || (suite == "all" && strcmp(s, "imm") && strncmp(s, "dbg", 3)); };
   benchRun(1500);
   benchStartup();
   auto cpu0 = std::chrono::steady_clock::now();
@@ -726,6 +727,22 @@ static int benchMain(int argc, char** argv) {
              ad.v.empty() ? -1.0 : ad.pct(0.5), ad.v.empty() ? -1.0 : ad.pct(0.95), ld.v.empty() ? -1.0 : ld.pct(0.5), ld.v.empty() ? -1.0 : ld.pct(0.95), ld.v.size(), m1.losses / 1.0, m2.losses / 1.0);
     }
     g_simPeriodUs = savedPeriod; g_simActiveUs = savedActive;
+  }
+  if (want("imm")) {
+    benchReseed(17);
+    printf("BURST ACCEPTANCE PROFILE (no ball present; 96 phases per cell): expected acceptance probability of a burst whose duration is uniform in 20..250 ms\n");
+    for (int shape = 0; shape < 3; shape++) {
+      double area = 0, prev = 0; int prevD = 0; std::string row;
+      for (int d = 20; d <= 250; d += 10) {
+        int got = 0;
+        for (int k = 0; k < 96; k++) got += benchBurstAcquiresShape(shape, (uint32_t)d, (uint32_t)((uint64_t)span * k / 96), 3 + (k % 7)) ? 1 : 0;
+        double f = got / 96.0;
+        if (d > 20) area += (d - prevD) * (prev + f) / 2.0;
+        prev = f; prevD = d;
+        char b[16]; snprintf(b, sizeof(b), " %d:%d", d, got); row += b;
+      }
+      printf("  %-12s E[accept | U(20,250)] = %.3f   (durations:accepted/96)%s\n", BURST_SHAPE[shape], area / 230.0, row.c_str());
+    }
   }
   if (want("dbg2")) {
     benchReseed(99); benchPrepare(); benchEnableAuto(); bwBall(120, 10, 0.5); 

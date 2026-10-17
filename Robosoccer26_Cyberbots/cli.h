@@ -23,7 +23,7 @@ static void printHelp() {
   say("INFO", "i : IR snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :cov | :irgate <off|auto|min max> | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -195,6 +195,22 @@ static void cliExecLine(char* line, uint32_t now) {
     c = gate;
     if (c.irPeriodMaxUs) say("INFO", "pulse-period gate ON: %u..%u us (:save to keep). Check with 'i' that the real ball still detects.", (unsigned)c.irPeriodMinUs, (unsigned)c.irPeriodMaxUs);
     else say("INFO", "pulse-period gate OFF");
+  }
+  else if (!strcmp(cmd, "irprofile")) {
+    // Presets for the speed / false-acceptance trade-off of engine 2 (all simulated figures: docs/LATENCY_OPTIMIZATION.md).
+    static const struct { const char* name; uint16_t span1, span2; const char* note; } PROF[] = {
+      {"fast", 96, 30, "meets the latency targets; accepts shorter ball-like bursts than the legacy engine"},
+      {"balanced", 140, 70, "default: burst rejection as good as the legacy engine (simulated), acquisition 30-45 % faster"},
+      {"safe", 180, 100, "longer evidence: fewer accepted bursts, slower acquisition"}};
+    int pick = -1;
+    if (t[1]) for (int i = 0; i < 3; i++) if (!strcmp(t[1], PROF[i].name)) pick = i;
+    if (pick >= 0) {
+      c.acqSpan1Ms = PROF[pick].span1; c.acqSpan2Ms = PROF[pick].span2;
+      say("INFO", "profile %s: acqspan1=%u acqspan2=%u ms (%s). ':save' to keep.", PROF[pick].name, (unsigned)c.acqSpan1Ms, (unsigned)c.acqSpan2Ms, PROF[pick].note);
+    } else {
+      say("INFO", "acqspan1=%u acqspan2=%u ms. Usage: :irprofile <fast|balanced|safe>", (unsigned)c.acqSpan1Ms, (unsigned)c.acqSpan2Ms);
+      for (int i = 0; i < 3; i++) say("INFO", "  %-8s %3u / %3u ms  %s", PROF[i].name, (unsigned)PROF[i].span1, (unsigned)PROF[i].span2, PROF[i].note);
+    }
   }
   else if (!strcmp(cmd, "cov")) cmdCov();
   else if (!strcmp(cmd, "zero")) { imuZeroYaw(); g_refYaw = 0; say("INFO", "heading reference zeroed"); }

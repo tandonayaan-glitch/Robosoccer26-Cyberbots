@@ -135,6 +135,11 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
   if (c.irPeriodMaxUs) say(tag, "[IR] pulse-period gate ON: accepting mean pulse periods %u..%u us (windows outside are rejected as 'offband')", (unsigned)c.irPeriodMinUs, (unsigned)c.irPeriodMaxUs);
   else say(tag, "[IR] pulse-period gate OFF: any 2+ pulse pattern below the interference rate is accepted; an unrelated 38-40 kHz source with a similar rhythm could be mistaken for the ball (measure the ball with :verify, then :irgate auto)");
   say(tag, "[IR] TSOP1738 vs 40 kHz ball compatibility: NOT TESTED (must be checked with the real ball: :learn / :verify)");
+  if (c.engine == 2)
+    say(tag, "[IR] detector: engine 2 (leaky evidence): acquire after %u ms (1 receiver) / %u ms (2+ neighbours) of consistent evidence, grace period %u..%u ms (flickering %u ms), focus %s, fast re-acquisition %u ms. All timings are SIMULATED; the real ball's hit rate and dropouts are NOT TESTED.",
+        (unsigned)c.acqSpan1Ms, (unsigned)c.acqSpan2Ms, (unsigned)c.lostHoldMs, (unsigned)c.lostHoldMaxMs, (unsigned)c.flickerHoldMs, c.focusOn ? "on" : "off", (unsigned)c.reacqMs);
+  else
+    say(tag, "[IR] detector: engine 0 (legacy fallback): 8-window history, lost after %u ms. Slower than engine 2 in simulation; kept as the fallback.", (unsigned)c.lostHoldMs);
 
   // --- IMU
   if (!g_imu.present) say(tag, "[IMU] MPU6050: %s (no device answered at 0x68/0x69)", g_imu.hadFault ? "FAIL" : "WARNING - not found");

@@ -411,17 +411,25 @@ static uint32_t irEffectiveHoldMs(const Config& c) {
 }
 
 // ---- engine 2: leaky evidence, focused revisits, visit-statistics loss -----------------------------------------------
-// Evidence per receiver is a leaky counter S (+1 per DETECT window, -IR2_MISS_DECAY per miss, cleared after epIdleMs
-// without a hit), so an intermittent signal still accumulates while a ball-like burst is bounded by TIME: a ball is
-// acquired only when the evidence has lasted acqSpan1Ms (one receiver) / acqSpan2Ms (two or more neighbouring
-// receivers) AND the rest of the ring has been looked at since the onset (a broadband onset hits the receivers in scan
-// order, so it looks like a local source until the ring has been revisited) AND the receivers agree on a direction.
-// While a candidate or a weak track exists the scheduler spends every second window on the receivers that matter
-// ("focus"), so a weak signal is sampled several times faster than the ring revisit interval.
-// Loss: the grace period is the time in which the supporting receivers are visited often enough that a run of misses
-// at their measured hit probability would be rarer than 10^-lossEps; it is fixed at the last good evidence, so an
-// outage cannot lengthen its own grace period, and is bounded by [lostHoldMs, lostHoldMaxMs].
+// ACQUISITION. Evidence per receiver is a leaky counter S (+1 per DETECT window, -IR2_MISS_DECAY per miss, cleared after
+// epIdleMs without a hit), so an intermittent signal still accumulates, while a ball-like burst is bounded by TIME: the
+// ball is acquired only when the evidence has lasted acqSpan1Ms (one receiver) / acqSpan2Ms (two or more neighbouring
+// receivers), AND every other receiver has been looked at since the onset (a broadband onset hits the receivers in scan
+// order, so until the ring has been revisited it looks like a local source), AND neither the fresh receivers nor the
+// still-open episodes of the last ring cycle contradict each other (a burst that has just ended leaves an arc of "fresh"
+// receivers that must not pass as a ball). For a short time after a loss, evidence near the lost bearing is accepted
+// after two hits (reacqMs).
+// SCHEDULING. While a candidate that has just missed, or a track whose miss statistics are poor, exists, every second
+// window goes to the receivers that matter ("focus"): a weak signal is sampled several times faster than the ring
+// revisit interval, the other receivers at most half as fast (never starved).
+// LOSS. The grace period is the time in which the supporting receivers are visited often enough that a run of misses at
+// their measured hit probability would be rarer than 10^-lossEps (Beta-predictive, so a young track is judged cautiously),
+// but at least lostHoldMs (flickerHoldMs if the signal was already flickering) and at most lostHoldMaxMs. It is fixed at the last
+// good evidence, so an outage cannot lengthen its own grace period, and time in which the loop itself was stalled is
+// not counted as absence.
 static const float IR2_MISS_DECAY = 0.1f;
+static const float IR2_FOCUS_FLICK = 0.05f;              // measured miss fraction from which a track is watched more closely
+static const uint8_t IR2_FOCUS_BUDGET = 6;               // ... or a miss budget above this (young / uncertain track)
 static const float IR2_DISCOUNT = 0.97f;                 // per-visit forgetting of the hit/miss counts (about 33 visits of memory)
 static uint16_t g_focusMask = 0;
 
@@ -442,7 +450,9 @@ static void irVisit2(const Config& c, uint8_t ch, bool detect, uint32_t tUs) {
     if (s.S > 0.0f) {
       s.ha *= IR2_DISCOUNT; s.hb = s.hb * IR2_DISCOUNT + 1.0f;
       s.S -= IR2_MISS_DECAY;
-      if (s.S < 0.05f || (uint32_t)(tUs - s.lastHitUs) > (uint32_t)c.epIdleMs * 1000u) { s.S = 0.0f; s.ha = 0.0f; s.hb = 0.0f; }
+      const uint32_t idleUs = (uint32_t)c.epIdleMs * 1000u;
+      const uint32_t sinceHitUs = (uint32_t)(tUs - s.lastHitUs);
+      if (s.S < 0.05f || sinceHitUs > idleUs) { s.S = 0.0f; s.ha = 0.0f; s.hb = 0.0f; }
     }
   }
 }
@@ -478,8 +488,10 @@ static void irFocus2(const Config& c, uint32_t nowUs) {
   if (!c.focusOn) return;
   uint8_t want, picked = 0;
   if (g_ball.valid) {
-    // strong track: the ring revisit already gives enough visits inside the minimum grace period
-    if ((uint32_t)g_ball.trackM * (uint32_t)g_scan.enabledCount * (uint32_t)(c.irWindowUs + c.irSettleUs) <= (uint32_t)c.lostHoldMs * 1000u) return;
+    // Only a track that is young (its miss budget is still large) or has been MISSING visits needs extra windows; a steady one is
+    // covered by the ring revisit. (Deciding this from the grace period in milliseconds would tie it to the loop's real speed:
+    // a slightly slower ring would switch focus on for good.)
+    if (g_ball.trackFlick < IR2_FOCUS_FLICK && g_ball.trackM <= IR2_FOCUS_BUDGET) return;
     want = 3;
   } else want = 2;
   for (uint8_t round = 0; round < want; round++) {

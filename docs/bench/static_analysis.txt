@@ -1,0 +1,23 @@
+=== cppcheck (warning,style,performance,portability) ===
+Robosoccer26_Cyberbots/config.h:356:12: style: Variable 'dh' can be declared as reference to const [constVariableReference]
+Robosoccer26_Cyberbots/irscan.h:308:35: style: Parameter 'c' can be declared as reference to const [constParameterReference]
+Robosoccer26_Cyberbots/cli.h:84:25: style: Parameter 'a' can be declared as pointer to const [constParameterPointer]
+Robosoccer26_Cyberbots/cli.h:84:43: style: Parameter 'v' can be declared as pointer to const [constParameterPointer]
+Robosoccer26_Cyberbots/cli.h:143:13: style: Variable 'c' is assigned a value that is never used. [unreadVariable]
+(end cppcheck)
+=== clang-tidy (clang-analyzer + bugprone) ===
+/home/user/Robosoccer26-Cyberbots/Robosoccer26_Cyberbots/util.h:101:46: warning: Assigned value is garbage or undefined [clang-analyzer-core.uninitialized.Assign]
+(end clang-tidy)
+=== valgrind memcheck (uninitialised reads, invalid accesses) ===
+PASS t_export (8 checks, 0 failed)
+PASS t_cli_robust (11 checks, 0 failed)
+PASS t_flight_recorder (105 checks, 0 failed)
+PASS t_diag_no_motion (11 checks, 0 failed)
+PASS t_fs_write_failure (9 checks, 0 failed)
+PASS t_ir_period_gate (17 checks, 0 failed)
+PASS t_gpio_tamper (9 checks, 0 failed)
+PASS t_e2_focus_scheduling (8 checks, 0 failed)
+PASS t_e2_stall_is_not_absence (6 checks, 0 failed)
+PASS t_e2_reacquisition (7 checks, 0 failed)
+PASS t_e2_stop_after_loss (3378 checks, 0 failed)
+PASS t_e2_view_transitions (4 checks, 0 failed)
