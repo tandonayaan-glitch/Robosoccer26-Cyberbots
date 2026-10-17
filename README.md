@@ -11,7 +11,7 @@ guessing.
 > |---|---|
 > | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 20–21 % RAM |
 > | Real binary in a third-party emulator | boots to the health report with autonomy disabled; no motor line rises (boot-level only) |
-> | **Host simulation** (simulated ball/IMU/filesystem) | 67 test cases × 2 API shapes = 134 runs, 4,814 checks, all pass, ASan/UBSan clean |
+> | **Host simulation** (simulated ball/IMU/filesystem) | 69 test cases × 2 API shapes = 138 runs, 4,832 checks, all pass, ASan/UBSan clean |
 > | Static analysis (cppcheck, clang-tidy, Valgrind) | no defects found |
 > | Requires electrical inspection | **not done** (receiver pinout/supply, pull-downs, reset-state voltages, IMU board) |
 > | Requires testing with the real ball | **not done** (38 kHz receiver vs 40 kHz ball, range, coverage, side gap, interference) |

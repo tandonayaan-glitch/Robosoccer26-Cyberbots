@@ -15,6 +15,7 @@ Evidence classes: **[REAL-BUILD]** checked by compiling with the real Arduino-ES
 | Item | Result |
 |---|---|
 | Board target | FQBN `esp32:esp32:esp32` (ESP32 Dev Module) for the ESP-32S 38-pin board. The exact module (WROOM vs WROVER/PSRAM, flash size) of your "ESP-32S V1.1" is **[?]**; check the can label. |
+| Board definition | Real `boards.txt` (3.0.7): `esp32.name=ESP32 Dev Module`, `build.mcu=esp32`, `build.variant=esp32`, 240 MHz, flash 4 MB, `dio`, default partitions `default`; the generic variant defines no `LED_BUILTIN` (some 38-pin boards still have an LED on GPIO2 = mux S3; it would just flicker with the scan) **[REAL-HEADER]**. |
 | Partition table | Core file `default.csv`: `spiffs, data, spiffs, 0x290000, 0x160000` (≈1.4 MB) **[REAL-HEADER]** – the `spiffs` label LittleFS needs exists in *Default 4MB with spiffs*. |
 | GPIO34 input-only | `SOC_GPIO_VALID_OUTPUT_GPIO_MASK` excludes GPIO34–39 **[REAL-HEADER]**; a `static_assert` in `pins.h` fails the real build if SIG is not input-only. |
 | All 18 output-type pins valid and distinct | `static_assert` against the real SoC masks, plus "no pin in 6..11, 0, 12", plus a popcount check for duplicate assignment **[REAL-BUILD, both cores]**. Negative tests (a motor pin set to GPIO35; a duplicated pin) were run and **did** fail the real build. |

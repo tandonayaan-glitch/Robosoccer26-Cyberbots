@@ -6,7 +6,7 @@ Every claim in this repository carries one of these evidence classes. Nothing is
 |---|---|---|
 | **A. REAL-BUILD** | Compiled by the real Arduino-ESP32 core + Xtensa GCC | **Done for 2.0.17 and 3.0.7** (§1) |
 | **B. EMU** | The real compiled binary executed in a third-party ESP32 emulator | Boot-level only (§2) |
-| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 67 cases × 2 API shapes (§3) |
+| **C. HOST** | Firmware logic against a simulated ball/IMU/filesystem on the PC (mock Arduino API) | **Done** – 69 cases × 2 API shapes (§3) |
 | **D. STATIC** | cppcheck, clang-tidy, Valgrind, sanitizers, compiler warnings | Done (§4) |
 | **E. ELECTRICAL** | Needs inspection/measurement of the real circuit | **Not done** |
 | **F. BALL** | Needs the real competition ball | **Not done** |
@@ -41,15 +41,15 @@ What the real build proved: LEDC (2.x channel API and 3.x pin API), `Wire`, `Lit
 
 Command: `./test/run_tests.sh` (cleans `/tmp/mockfs*`, then for **mock core v3 and v2** builds `g++ -std=c++20 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 -fsanitize=address,undefined` and runs every case in its own process).
 
-**Final result: 67 test cases × 2 core API shapes = 134 runs, 134 passed, 0 failed, 4,814 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
+**Final result: 69 test cases × 2 core API shapes = 138 runs, 138 passed, 0 failed, 4,832 checks, 0 compiler warnings, 0 sanitizer findings, 0 skipped.**
 
-Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · current = **67**. The suite grew as audits added regression tests.
+Reconciliation of the counts quoted during development (counted from `git show <commit>:test/test_main.cpp`): commit `47ebae6` = 53 cases · `b1987f6` = 55 · `d5d47b6` = 57 (114 runs, the figure in the previous report; a mid-session "55 per core" was a miscount of PASS lines) · `bd8862f` = 66 · current = **69**. The suite grew as audits added regression tests.
 
 | Area (requirement) | Test cases |
 |---|---|
 | Pure maths, rollover | `t_angles`, `t_timer_rollover` |
 | Motors: mixing, directions, pin map, ramps, safe start | `t_mecanum`, `t_pinmap`, `t_ramp`, `t_boot_safe`, `t_drive_test`, `t_motor_test`, `t_cli_manual` |
-| Config defaults/validation/CRC, `:set` | `t_config`, `t_cfg_set`, `t_gpio_tamper` |
+| Config defaults/validation/CRC, `:set`, boot with corrupt config, failed save | `t_config`, `t_cfg_set`, `t_gpio_tamper`, `t_cfg_boot_corrupt`, `t_cfg_save_fail` |
 | IR scan, classification, timing, mapping | `t_classify`, `t_ir_detect`, `t_ir_wrap`, `t_ir_ambiguous`, `t_ir_polarity`, `t_ir_overrun`, `t_ir_coverage`, `t_ir_probe`, `t_ir_spare_channels`, `t_ch_inspect`, `t_latency` |
 | Noise / interference / faults | `t_ir_noise`, `t_ir_slow_interferer`, `t_ir_period_gate`, `t_ir_stuck_and_recover`, `t_ir_system_loss`, `t_ir_trusted_low`, `t_ir_scan_stall`, `t_boot_no_channels` |
 | IMU | `t_imu_integrate`, `t_imu_bias`, `t_imu_missing`, `t_imu_dropout`, `t_imu_invalid`, `t_imu_frozen_in_approach`, `t_heading_hold` |

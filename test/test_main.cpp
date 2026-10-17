@@ -1300,6 +1300,36 @@ static void t_ir_slow_interferer() {
   CHECK(!g_ball.anyDetect && !faultActive(F_IR_CHANNEL));
 }
 
+static void t_cfg_boot_corrupt() {
+  freshFs("cfgcorrupt");
+  CHECK(fsInit());
+  { Config v; cfgDefaults(v); v.maxAuto = 222; v.reverse[0] = 1; cfgSeal(v); v.crc ^= 0xDEADBEEF;            // CRC no longer matches
+    FILE* f = fopen((g_fsDir + "/config.bin").c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
+  setup();
+  CHECK(g_cfg.maxAuto == 170 && g_cfg.reverse[0] == 0);                  // safe defaults, corrupt values NOT used
+  CHECK(faultActive(F_CFG_REPLACED));
+  CHECK(outHas("CRC mismatch"));
+  CHECK(g_cond == COND_NORMAL && !g_autoEnabled && allWheelsStopped());   // a warning, not a degradation or a motion
+  calibrateAll();
+  simRun(500);
+  startAuto(); ballAt(0, 10); simRun(2500);
+  CHECK(g_navState == NAV_APPROACH);                                      // fully usable with defaults
+}
+
+static void t_cfg_save_fail() {
+  bootCal();
+  simRun(500);
+  startAuto(); ballAt(0, 10); simRun(2000);
+  g_fsFailWrites = true;
+  Serial.out.clear();
+  send(":save\n"); simRun(200);
+  CHECK(outHas("save FAILED"));
+  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());               // control unaffected by the failed operation
+  g_fsFailWrites = false;
+  send(":save\n"); simRun(200);
+  CHECK(outHas("configuration saved"));
+}
+
 static void t_cfg_set() {
   bootCal();
   simRun(200);
@@ -1655,7 +1685,7 @@ static const TestCase TESTS[] = {
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
   T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_boot_corrupt), T(t_cfg_save_fail), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),
@@ -1666,7 +1696,7 @@ int main(int argc, char** argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {
     if (strcmp(t.name, argv[1]) != 0) continue;
-    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_boot_no_channels") != 0 &&
+    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_boot_no_channels") != 0 && strcmp(t.name, "t_cfg_boot_corrupt") != 0 &&
         strcmp(t.name, "t_log_rotation") != 0 && strcmp(t.name, "t_flight_recorder") != 0 && strcmp(t.name, "t_export") != 0)
       freshFs(t.name);
     t.fn();
