@@ -11,7 +11,7 @@ sandbox), and the primary-source documents for the receiver and ball could not b
 | Compile with the **real Arduino-ESP32 core + Xtensa GCC** | **NOT DONE** (toolchain unreachable). Flash/RAM size and real-core warnings are unknown. |
 | API conformity against the real cores | Function signatures used (LEDC 2.x/3.x, `Wire`, `LittleFS`/`File`, `HardwareSerial::setTxBufferSize/availableForWrite`, `esp_task_wdt_*`, `esp_reset_reason_t`) were checked against headers fetched from `espressif/arduino-esp32` tags **2.0.17** and **3.0.7** and ESP-IDF 5.1.4/4.4. The `esp_task_wdt_init` 2.x form was written from knowledge of IDF 4.4 (its header could not be fetched). |
 | Host build, mock core **v3 API** and **v2 API** | Builds clean with `g++ 13 -std=c++17 -Wall -Wextra -Wshadow -Wformat=2` (only the matching LEDC API exists in each mock, so using the wrong generation fails to compile). |
-| Test suite (`test/run_tests.sh`) | **55 test cases × 2 core variants = 110 runs, 0 failures**, ≈2,180 checks per variant, each case in a fresh process, with AddressSanitizer + UBSan (no findings). |
+| Test suite (`test/run_tests.sh`) | **57 test cases × 2 core variants = 114 runs, 0 failures**, ≈2,250 checks per variant, each case in a fresh process, with AddressSanitizer + UBSan (no findings). |
 | Valgrind memcheck on export, CLI fuzz, flight recorder, diagnostics, FS-failure | No uninitialised reads / invalid accesses. |
 | `cppcheck` (warning, style, performance, portability) | No defects in the firmware; remaining notes are intentional byte-views for the config CRC (`memset` of float structs is all-zeros = 0.0f) and mock-only "always true" lock calls. |
 | `clang-tidy` (analyzer + bugprone) | One `clang-analyzer-core.uninitialized.Assign` note in `outPutLine`; Valgrind shows no uninitialised read, treated as a false positive from modelling `strlen` after `snprintf`. |
@@ -45,7 +45,9 @@ sandbox), and the primary-source documents for the receiver and ball could not b
 6. **Export header buffer** too small for the longest column row (compiler `-Wformat-truncation`). Enlarged.
 7. **Frozen-frame detector vs unrealistic mock**: the mock IMU produced identical frames, tripping the "frozen sensor" guard. The guard is correct for real hardware (real MPU6050 output always has LSB noise); the mock was made realistic instead of weakening the guard.
 8. Test-only mistakes corrected (manual-hold timing, rollover timing, naive substring checks).
-9. Review additions made because the brief required them: full-drivetrain test (`:dtest`), fault reports carry certainty and mode, snapshot rows carry drop/write-failure counters, IMU re-init attempts are logged, writer-task stack enlarged.
+9. **Scan never started if every channel was disabled at boot** (found in review, then `t_boot_no_channels`): the scheduler is now armed unconditionally, so enabling a channel later starts scanning and the `IR_NO_CHANNELS` fault clears with verification.
+10. **`:fsformat` could trip the 3 s watchdog or raise a false `LOOP_STALL`** (found in review, `t_fs_commands`): motors are stopped first, the task is removed from the watchdog for the erase, and the loop timer is reset afterwards.
+11. Review additions made because the brief required them: full-drivetrain test (`:dtest`), fault reports carry certainty and mode, snapshot rows carry drop/write-failure counters, IMU re-init attempts are logged, writer-task stack enlarged.
 
 ## 3. NOT verified – needs the physical robot (all NOT TESTED)
 

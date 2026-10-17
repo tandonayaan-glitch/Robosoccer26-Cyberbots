@@ -1004,6 +1004,57 @@ static void t_drive_test() {
   CHECK(outHas("drivetrain test finished"));
 }
 
+static void t_boot_no_channels() {
+  CHECK(fsInit());
+  Config c; cfgDefaults(c);
+  for (int i = 0; i < 16; i++) c.ch[i].enabled = 0;
+  CHECK(cfgSave(c));
+  setup();
+  CHECK(faultActive(F_IR_NO_CHANNELS) && g_cond == COND_SAFE_STOP);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  g_cfg.ch[0].enabled = 1;                                   // enabling a channel later must start the scan
+  simRun(1000);
+  CHECK(g_scan.cycleCount > 10);
+  CHECK(g_scan.enabledCount == 1);
+  for (int i = 1; i < 6; i++) g_cfg.ch[i].enabled = 1;
+  calibrateAll();
+  simRun(g_cfg.recoverVerifyMs + 2000);
+  CHECK(!faultActive(F_IR_NO_CHANNELS) && !faultActive(F_IR_TRUSTED_LOW) && g_cond != COND_SAFE_STOP);
+  CHECK(!g_autoEnabled);
+}
+
+static void t_fs_commands() {
+  freshFs("fscmd");
+  bootCal();
+  simRun(500);
+  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "w"); fputs("x", f); fclose(f); }
+  anyWheelEverMoved = false;
+  send(":fsformat\n"); simRunTracking(200);
+  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f != nullptr); if (f) fclose(f); }   // refused without CONFIRM
+  CHECK(outHas("ERASES"));
+  send(":fsformat confirm\n"); simRunTracking(200);          // wrong case: still refused
+  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f != nullptr); if (f) fclose(f); }
+  startAuto(); ballAt(0, 10); simRun(2000);
+  CHECK(!allWheelsStopped());
+  int wd = g_wdtDeleted;
+  send(":fsformat CONFIRM\n"); simRun(300);
+  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f == nullptr); if (f) fclose(f); }
+  CHECK(g_wdtDeleted == (int)wd + 1);
+  CHECK(outHas("format OK"));
+  CHECK(!g_autoEnabled && allWheelsStopped());               // motors were stopped for the operation
+  CHECK(!faultActive(F_LOOP_STALL));
+  CHECK(g_logPersist);
+  // :logdel keeps the file being written
+  g_cfg.flushMs = 500; g_cfg.fileMaxBytes = 4096; g_cfg.snapshotMs = 50;
+  for (int i = 0; i < 40; i++) { send("f"); simRun(500); }   // keep moving so snapshots are written at the fast rate
+  send(":logdel\n"); simRun(100);
+  CHECK(outHas("deletes old log files"));
+  uint8_t before = 0; { LogFile lf[LOG_LIST_MAX]; before = logList(lf); }
+  CHECK(before >= 2);
+  send(":logdel CONFIRM\n"); simRun(100);
+  { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); CHECK(n >= 1 && n < before + 1); }
+}
+
 static void t_cfg_set() {
   bootCal();
   simRun(200);
@@ -1348,7 +1399,7 @@ static const TestCase TESTS[] = {
   T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
   T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
   T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_cfg_set),
+  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_set),
   T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
   T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
   T(t_cal_startup_defaults), T(t_health_report_text),
@@ -1359,7 +1410,7 @@ int main(int argc, char** argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {
     if (strcmp(t.name, argv[1]) != 0) continue;
-    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 &&
+    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_boot_no_channels") != 0 &&
         strcmp(t.name, "t_log_rotation") != 0 && strcmp(t.name, "t_flight_recorder") != 0 && strcmp(t.name, "t_export") != 0)
       freshFs(t.name);
     t.fn();

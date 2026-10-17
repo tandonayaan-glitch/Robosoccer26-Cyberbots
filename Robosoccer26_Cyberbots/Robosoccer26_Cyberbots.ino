@@ -26,7 +26,7 @@
 
 static const uint32_t WDT_TIMEOUT_MS = 3000;        // hung loop => reset (outputs return to inputs: external pull-downs!)
 static const uint32_t LOOP_STALL_FATAL_MS = 1000;   // a single loop gap this long => SAFE_STOP (latched)
-static uint32_t g_lastLoopUs = 0, g_lastHealthMs = 0, g_lastCtlMs = 0;
+static uint32_t g_lastHealthMs = 0, g_lastCtlMs = 0;
 #ifdef HOST_TEST
 static bool g_hostWriterInline = true;
 #endif

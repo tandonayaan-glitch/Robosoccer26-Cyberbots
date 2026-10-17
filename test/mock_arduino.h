@@ -232,6 +232,8 @@ static inline esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t*) {
 static inline esp_err_t esp_task_wdt_init(uint32_t, bool) { return ESP_OK; }
 #endif
 static inline esp_err_t esp_task_wdt_add(TaskHandle_t) { return ESP_OK; }
+static int g_wdtDeleted = 0;
+static inline esp_err_t esp_task_wdt_delete(TaskHandle_t) { g_wdtDeleted++; return ESP_OK; }
 static inline esp_err_t esp_task_wdt_reset() { g_wdtResets++; return ESP_OK; }
 
 // ---- LittleFS backed by a host directory (so "reboots" = re-running the process keep data) ----------
@@ -299,7 +301,7 @@ class LittleFSClass {
   bool format() {
     DIR* dd = opendir(g_fsDir.c_str());
     if (!dd) return false;
-    while (dirent* e = readdir(dd)) if (e->d_name[0] != '.') remove(fsPath(e->d_name).c_str());
+    while (dirent* e = readdir(dd)) if (e->d_name[0] != '.') ::remove(fsPath(e->d_name).c_str());
     closedir(dd);
     return true;
   }

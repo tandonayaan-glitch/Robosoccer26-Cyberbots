@@ -336,7 +336,7 @@ static void irBegin(const Config& c) {
   g_scan.lastCycleMs = millis();
   g_scan.cycleMinUs = 0xFFFFFFFFu;
   attachInterrupt(digitalPinToInterrupt(PIN_MUX_SIG), irIsr, CHANGE);
-  g_scan.running = g_scan.enabledCount > 0;
+  g_scan.running = true;   // armed even with zero enabled channels, so enabling one later starts scanning
 }
 
 // Call every loop iteration. Never blocks longer than the settle delay.

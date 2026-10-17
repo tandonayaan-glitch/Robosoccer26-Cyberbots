@@ -6,6 +6,8 @@
 #pragma once
 #include "report.h"
 
+static uint32_t g_lastLoopUs = 0;      // loop() timestamp; cli.h may reset it after an intentional long operation
+
 static bool g_streamIr = false;
 static uint32_t g_streamLastMs = 0;
 static bool g_testMode = false;
@@ -180,7 +182,17 @@ static void cliExecLine(char* line, uint32_t now) {
     else { float v; if (parseF(t[1], &v) && v >= 0 && v < 20) { g_exportSel = (int8_t)v; say("LOG", "export source: file #%d (see 'g' for the list, 0 = newest)", (int)v); } else say("WARN", "usage: :xsel <ring|file#>"); }
   }
   else if (!strcmp(cmd, "fsformat")) {
-    if (t[1] && !strcmp(t[1], "CONFIRM")) { say("LOG", "formatting LittleFS (explicit operator request)..."); bool ok = fsFormatExplicit(); if (ok) logInit(c); say("LOG", "format %s", ok ? "OK, logging re-enabled" : "FAILED"); }
+    if (t[1] && !strcmp(t[1], "CONFIRM")) {
+      navStop("filesystem format");
+      say("LOG", "formatting LittleFS (explicit operator request; motors stopped; may take several seconds)...");
+      outFlushBlocking(500);
+      esp_task_wdt_delete(NULL);                     // a long erase must not trip the watchdog
+      bool ok = fsFormatExplicit();
+      esp_task_wdt_add(NULL);
+      g_lastLoopUs = micros();                       // the stall was intentional: not a LOOP_STALL fault
+      if (ok) logInit(c);
+      say("LOG", "format %s", ok ? "OK, logging re-enabled" : "FAILED");
+    }
     else say("WARN", "this ERASES the log partition. Send ':fsformat CONFIRM' to proceed");
   }
   else if (!strcmp(cmd, "logdel")) {
