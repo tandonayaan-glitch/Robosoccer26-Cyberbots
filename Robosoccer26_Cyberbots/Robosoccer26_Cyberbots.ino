@@ -127,6 +127,7 @@ void setup() {
   say("BOOT", "autonomous mode: DISABLED. Bench-test first ('t'), then send 'a'. '?' lists commands.");
   g_bootPhase = false;
   outFlushBlocking(1500);
+  irRestartSchedule(); g_loopMaxEverUs = 0;            // statistics start after the boot-time blocking work
 
 #ifndef HOST_TEST
   xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, &g_logTaskHandle, 0);   // flash writes live off the control core

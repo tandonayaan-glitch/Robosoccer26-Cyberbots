@@ -1676,6 +1676,159 @@ static void t_health_report_text() {
 }
 
 // ================================================================================================
+
+// ================================================================================================
+// IR response evaluation (not a pass/fail test): sweeps the filter parameters over explicit scenarios.
+//   ./rs26 --eval-ir <irFullHits> <acqCycles> <lostHoldMs> [verified 0|1]
+// All scenarios use the simulated 1.2 kHz ball (833 us period) and the real firmware code.
+static void runMsCb(uint32_t ms, const std::function<void(uint32_t)>& each) {
+  for (uint32_t t = 0; t < ms; t++) {
+    uint64_t end = g_mockUs + 1000ULL;
+    while (g_mockUs < end) { loop(); mockAdvance(50); }
+    each(t);
+  }
+}
+static void evalClearHistory() {
+  clearBall();
+  runMsCb(900, [](uint32_t) {});
+  for (int guard = 0; guard < 20 && g_ball.valid; guard++) runMsCb(100, [](uint32_t) {});
+}
+// ms (with 0.05 ms resolution) from the moment two receivers start seeing the ball until g_ball.valid
+static double evalAcq(int channelsOn, uint32_t phaseMs, double* cmdMs = nullptr, double* moveMs = nullptr) {
+  evalClearHistory();
+  runMsCb(phaseMs, [](uint32_t) {});
+  if (channelsOn == 1) ballAt(90, 10); else ballAt(75, 20);
+  uint64_t t0 = g_mockUs; double tv = -1, tc = -1, tm = -1;
+  while (g_mockUs - t0 < 1500000ULL) {
+    loop(); mockAdvance(50);
+    if (tv < 0 && g_ball.valid) tv = (double)(g_mockUs - t0) / 1000.0;
+    if (tc < 0 && g_autoEnabled && g_navState == NAV_APPROACH && (g_wheelTgt[0] != 0 || g_wheelTgt[1] != 0)) tc = (double)(g_mockUs - t0) / 1000.0;
+    if (tm < 0 && (g_wheelOut[0] != 0 || g_wheelOut[1] != 0 || g_wheelOut[2] != 0 || g_wheelOut[3] != 0)) tm = (double)(g_mockUs - t0) / 1000.0;
+    if (tv >= 0 && (!g_autoEnabled || tm >= 0)) break;
+  }
+  if (cmdMs) *cmdMs = tc;
+  if (moveMs) *moveMs = tm;
+  return tv;
+}
+static bool evalBurstAcquires(uint32_t durMs, uint32_t phaseMs, int ch) {
+  evalClearHistory();
+  runMsCb(phaseMs, [](uint32_t) {});
+  bool got = false;
+  g_simMode[ch] = SIM_BALL;
+  runMsCb(durMs, [&](uint32_t) { if (g_ball.valid) got = true; });
+  g_simMode[ch] = SIM_IDLE;
+  runMsCb(700, [&](uint32_t) { if (g_ball.valid) got = true; });
+  return got;
+}
+static bool evalGapLoses(uint32_t gapMs) {
+  evalClearHistory();
+  ballAt(75, 20);
+  runMsCb(700, [](uint32_t) {});
+  bool lost = false;
+  clearBall();
+  runMsCb(gapMs, [&](uint32_t) { if (!g_ball.valid) lost = true; });
+  ballAt(75, 20);
+  runMsCb(400, [&](uint32_t) { if (!g_ball.valid) lost = true; });
+  return lost;
+}
+static double evalLossLatency() {
+  evalClearHistory();
+  ballAt(75, 20);
+  runMsCb(900, [](uint32_t) {});
+  clearBall();
+  uint64_t t0 = g_mockUs;
+  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
+  return (double)(g_mockUs - t0) / 1000.0;
+}
+static int evalMissLosses(double startPerSec, uint32_t seconds) {
+  evalClearHistory();
+  srand(11);
+  ballAt(75, 20);
+  runMsCb(800, [](uint32_t) {});
+  int losses = 0; bool wasValid = g_ball.valid; uint32_t offUntil = 0;
+  runMsCb(seconds * 1000, [&](uint32_t t) {
+    if (t >= offUntil && (rand() % 100000) < (int)(startPerSec * 100.0)) { clearBall(); offUntil = t + 5 + (uint32_t)(rand() % 11); }
+    else if (offUntil && t >= offUntil) { ballAt(75, 20); offUntil = 0; }
+    if (wasValid && !g_ball.valid) losses++;
+    wasValid = g_ball.valid;
+  });
+  return losses;
+}
+static int evalFalseAcquisitions(double burstsPerSec, uint32_t seconds) {
+  evalClearHistory();
+  srand(5);
+  int acq = 0; bool wasValid = false; uint32_t until = 0; int ch = 0;
+  runMsCb(seconds * 1000, [&](uint32_t t) {
+    if (!until && (rand() % 100000) < (int)(burstsPerSec * 100.0)) { ch = rand() % 12; g_simMode[ch] = SIM_BALL; until = t + 10 + (uint32_t)(rand() % 111); }
+    else if (until && t >= until) { g_simMode[ch] = SIM_IDLE; until = 0; }
+    if (!wasValid && g_ball.valid) acq++;
+    wasValid = g_ball.valid;
+  });
+  clearBall();
+  return acq;
+}
+static void evalSweep(double degPerSec, double* meanErr, double* maxErr, int* losses) {
+  evalClearHistory();
+  double sum = 0, mx = 0; int n = 0; int lost = 0; bool wasValid = false;
+  uint32_t total = (uint32_t)(360.0 / degPerSec * 1000.0);
+  runMsCb(total, [&](uint32_t t) {
+    double th = fmod(degPerSec * (double)t / 1000.0, 360.0);
+    if (t % 10 == 0) ballAt((float)th, 20);
+    if (wasValid && !g_ball.valid) lost++;
+    wasValid = g_ball.valid;
+    if (g_ball.valid && t % 20 == 0) { double e = fabsf(angDiffDeg(g_ball.bearingDeg, (float)th)); sum += e; if (e > mx) mx = e; n++; }
+  });
+  *meanErr = n ? sum / n : -1; *maxErr = mx; *losses = lost;
+}
+static double evalBoundaryJitter() {
+  evalClearHistory();
+  srand(3);
+  uint32_t off0 = 0, off1 = 0; double sum = 0, sum2 = 0; int n = 0;
+  ballAt(15, 20);                                    // between receivers C0 (0 deg) and C1 (30 deg)
+  runMsCb(10000, [&](uint32_t t) {
+    if (!off0 && (rand() % 1000) < 15) { g_simMode[0] = SIM_IDLE; off0 = t + 3 + (uint32_t)(rand() % 4); }
+    else if (off0 && t >= off0) { g_simMode[0] = SIM_BALL; off0 = 0; }
+    if (!off1 && (rand() % 1000) < 15) { g_simMode[1] = SIM_IDLE; off1 = t + 3 + (uint32_t)(rand() % 4); }
+    else if (off1 && t >= off1) { g_simMode[1] = SIM_BALL; off1 = 0; }
+    if (t > 1500 && t % 20 == 0 && g_ball.valid) { double b = g_ball.bearingDeg; sum += b; sum2 += b * b; n++; }
+  });
+  if (n < 10) return -1;
+  double m = sum / n; return sqrt(fmax(0.0, sum2 / n - m * m));
+}
+static int evalMain(int argc, char** argv) {
+  uint8_t full = (uint8_t)atoi(argv[2]), acqc = (uint8_t)atoi(argv[3]); uint16_t hold = (uint16_t)atoi(argv[4]);
+  bool verified = argc > 5 ? atoi(argv[5]) != 0 : false;
+  setup(); calibrateAll();
+  g_cfg.irFullHits = full; g_cfg.acqCycles = acqc; g_cfg.lostHoldMs = hold;
+  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = verified ? 1 : 0;
+  runMsCb(1500, [](uint32_t) {});
+  auto stats = [&](int chans, double* mean, double* mx) {
+    double s = 0, m = 0; int n = 0;
+    for (uint32_t ph = 0; ph < 36; ph += 3) { double v = evalAcq(chans, ph); if (v < 0) { *mean = -1; *mx = -1; return; } s += v; if (v > m) m = v; n++; }
+    *mean = s / n; *mx = m;
+  };
+  double a1m, a1x, a2m, a2x; stats(1, &a1m, &a1x); stats(2, &a2m, &a2x);
+  int minBurst = -1; double burst100 = 0;
+  for (uint32_t d : {20u, 40u, 60u, 80u, 100u, 120u, 150u, 200u}) {
+    int hit = 0, tot = 0;
+    for (uint32_t ph = 0; ph < 36; ph += 6) { hit += evalBurstAcquires(d, ph, 5) ? 1 : 0; tot++; }
+    double frac = (double)hit / tot;
+    if (minBurst < 0 && frac >= 0.5) minBurst = (int)d;
+    if (d == 100) burst100 = frac;
+  }
+  int maxGap = 0; for (uint32_t g : {50u, 100u, 150u, 200u, 250u, 300u, 400u, 500u}) { if (!evalGapLoses(g)) maxGap = (int)g; else break; }
+  double loss = evalLossLatency();
+  int miss5 = evalMissLosses(5, 60), miss20 = evalMissLosses(20, 60);
+  int falseAcq = evalFalseAcquisitions(2.0, 120);
+  double m60, x60, m180, x180; int l60, l180; evalSweep(60, &m60, &x60, &l60); evalSweep(180, &m180, &x180, &l180);
+  double jit = evalBoundaryJitter();
+  printf("full=%u acq=%u hold=%4u ver=%d | acq1ch mean/max=%6.1f/%6.1f ms | acq2ch %6.1f/%6.1f | burstAcceptMin=%4d ms (frac@100=%.2f) | gapToleratedUpTo=%3d ms | loss=%5.1f ms | missLosses(5Hz,20Hz)=%d,%d | falseAcq/120s@2Hz=%d | sweep60 err mean/max=%.1f/%.1f loss=%d | sweep180 %.1f/%.1f loss=%d | jitterStd=%.2f deg\n",
+         full, acqc, hold, verified, a1m, a1x, a2m, a2x, minBurst, burst100, maxGap, loss, miss5, miss20, falseAcq, m60, x60, l60, m180, x180, l180, jit);
+  return 0;
+}
+
+#include "bench.h"
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -1693,6 +1846,8 @@ static const TestCase TESTS[] = {
 
 int main(int argc, char** argv) {
   if (argc >= 2 && strcmp(argv[1], "--list") == 0) { for (auto& t : TESTS) printf("%s\n", t.name); return 0; }
+  if (argc >= 2 && strcmp(argv[1], "--bench") == 0) { freshFs("bench"); return benchMain(argc, argv); }
+  if (argc >= 5 && strcmp(argv[1], "--eval-ir") == 0) { freshFs("eval"); return evalMain(argc, argv); }
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {
     if (strcmp(t.name, argv[1]) != 0) continue;

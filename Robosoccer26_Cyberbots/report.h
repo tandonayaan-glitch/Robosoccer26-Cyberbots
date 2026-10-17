@@ -74,6 +74,9 @@ static void printNavStatus(const Config& c, uint32_t now) {
       g_ball.conf, (unsigned)g_ball.actMask, g_ball.rInst, UL(g_ball.lastDetectMs ? elapsedMs(now, g_ball.lastDetectMs) : 0));
   if (isnan(g_hdgErr)) say("NAV", "heading: hold %s (imu %s)", c.hdgEnable ? "inactive" : "disabled", imuHeadingUsable(c, now) ? "usable" : "unavailable");
   else say("NAV", "heading: ref %.1f yaw %.1f error %.1f deg", g_refYaw, g_imu.yaw, g_hdgErr);
+  say("NAV", "ball latency (firmware-measured, excludes the ball switching on/off): acquisition n=%lu last=%lu mean=%lu max=%lu ms | loss n=%lu last=%lu mean=%lu max=%lu ms",
+      UL(g_latAcq.n), UL(g_latAcq.lastUs / 1000), UL(g_latAcq.n ? (uint32_t)(g_latAcq.sumUs / g_latAcq.n / 1000) : 0), UL(g_latAcq.maxUs / 1000),
+      UL(g_latLoss.n), UL(g_latLoss.lastUs / 1000), UL(g_latLoss.n ? (uint32_t)(g_latLoss.sumUs / g_latLoss.n / 1000) : 0), UL(g_latLoss.maxUs / 1000));
   say("NAV", "request vx=%.2f vy=%.2f w=%.2f | commanded PWM FL=%d FR=%d BL=%d BR=%d (commanded, NOT measured wheel speed)",
       g_reqVx, g_reqVy, g_reqW, g_wheelOut[0], g_wheelOut[1], g_wheelOut[2], g_wheelOut[3]);
 }

@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 4
+#define CFG_VERSION 5
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -46,6 +46,8 @@ struct Config {
   uint8_t irNoisyPerMs;          // more than this many pulses per ms => interference, not a ball
   uint8_t irSettleUs;            // mux settle time before a window opens
   uint8_t irHistMinOn;           // detections in the last 8 windows to switch a channel "active"
+  uint8_t irFullHits;            // hits (of the last 8 windows) at which a channel counts with full weight
+  uint8_t acqCycles;             // consecutive scan cycles above acqConf needed to acquire the ball
   uint16_t irPeriodMinUs;        // pulse-period gate (0/0 = OFF): accept only mean pulse periods in [min,max] us
   uint16_t irPeriodMaxUs;        // set from a measured ball with ":irgate auto"; rejects unrelated modulated sources
   uint32_t irStuckMs;            // output held active this long => suspect
@@ -119,6 +121,8 @@ static const ParamDef PARAMS[] = {
   PD("irnoisy", PT_U8, irNoisyPerMs, 2, 50),
   PD("irsettle", PT_U8, irSettleUs, 2, 100),
   PD("irhistmin", PT_U8, irHistMinOn, 1, 8),
+  PD("irfullhits", PT_U8, irFullHits, 2, 8),
+  PD("acqcycles", PT_U8, acqCycles, 1, 6),
   PD("irperlo", PT_U16, irPeriodMinUs, 0, 20000),
   PD("irperhi", PT_U16, irPeriodMaxUs, 0, 20000),
   PD("irstuck", PT_U32, irStuckMs, 500, 30000),
@@ -212,6 +216,8 @@ static void cfgDefaults(Config& c) {
   c.irNoisyPerMs = 3;     // ball ~1.2 pulses/ms; motor-PWM/interference is several per ms
   c.irSettleUs = 10;
   c.irHistMinOn = 2;
+  c.irFullHits = 8;
+  c.acqCycles = 2;
   c.irPeriodMinUs = 0;     // gate OFF until the real ball has been measured
   c.irPeriodMaxUs = 0;
   c.irStuckMs = 2000;

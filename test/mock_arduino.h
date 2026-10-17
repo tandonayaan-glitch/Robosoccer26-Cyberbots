@@ -58,6 +58,7 @@ enum SimMode { SIM_IDLE = 0, SIM_BALL = 1, SIM_STUCK_ACTIVE = 2, SIM_NOISE = 3 }
 static int g_simMode[16];                 // per mux channel
 static int g_simPeriodUs = 833;           // 1.2 kHz ball modulation
 static int g_simActiveUs = 350;           // output LOW for this long each period (TSOP active-low)
+static uint64_t g_simPhase[16];           // per-channel pulse phase offset (us), randomised by the benchmarks
 static int g_simChPeriod[16];             // per-channel source period override (us), 0 = use g_simPeriodUs
 static int g_simNoiseUs = 120;            // interference toggle period
 static bool g_simActiveHigh[16];          // model a channel whose output idles LOW and pulses HIGH
@@ -77,7 +78,7 @@ static uint8_t mockSigLevel(uint64_t us) {
   bool active = false;
   switch (g_simMode[ch]) {
     case SIM_BALL: { int per = g_simChPeriod[ch] ? g_simChPeriod[ch] : g_simPeriodUs; int act = g_simChPeriod[ch] ? (per * 42) / 100 : g_simActiveUs;
-                     active = (int)((us + (uint64_t)ch * 97u) % (uint64_t)per) < act; break; }
+                     active = (int)((us + (uint64_t)ch * 97u + g_simPhase[ch]) % (uint64_t)per) < act; break; }
     case SIM_STUCK_ACTIVE: active = true; break;
     case SIM_NOISE: active = (int)((us / (uint64_t)g_simNoiseUs) & 1u); break;
     default: active = false;
@@ -248,6 +249,7 @@ static bool g_fsFailWrites = false;
 static int g_fsShortWrite = 0;               // >0: next writes return half the bytes
 static size_t g_fsTotal = 1500000;
 static uint32_t g_fsWriteCalls = 0;
+static uint32_t g_fsWriteStallUs = 0;        // virtual time consumed inside each write (models a flash erase/GC stall)
 static std::string fsPath(const char* p) { return g_fsDir + (p[0] == '/' ? "" : "/") + p; }
 
 struct FileImpl {
@@ -268,6 +270,7 @@ class File {
   size_t write(const uint8_t* b, size_t n) {
     if (!d || !d->fp) return 0;
     g_fsWriteCalls++;
+    if (g_fsWriteStallUs) mockAdvance(g_fsWriteStallUs);
     if (g_fsFailWrites) return 0;
     if (g_fsShortWrite > 0) { g_fsShortWrite--; n = n / 2; }
     return fwrite(b, 1, n, d->fp);

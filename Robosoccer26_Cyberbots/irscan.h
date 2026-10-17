@@ -32,6 +32,7 @@ struct IrChan {
   uint16_t hist;          // 1 bit per window, newest = bit 0
   uint32_t windows, detCount, overruns, offband;
   uint32_t lastWindowMs, lastDetectMs;
+  uint32_t lastDetectUs;       // micros() at the close of the last DETECT window (latency instrumentation)
   uint32_t stuckSinceMs;
   uint8_t noisyScore, cleanStreak, stuckSuspect, stuckFail, noisy;
 };
@@ -101,11 +102,28 @@ struct BallEst {
   uint8_t nActive;
   uint16_t actMask;
   uint32_t lastGoodMs, validSinceMs, lastDetectMs, lostAtMs, cycleStamp;
+  bool evOpen;                       // an evidence burst is in progress
+  uint32_t firstEvidenceUs, lastEvidenceUs, acquiredUs, lostUs;   // micros() timestamps
   float fx, fy;
   uint8_t acqCount;
   bool lostEvent;         // set for one poll when the ball is lost (consumed by navigation)
 };
 static BallEst g_ball;
+
+// Firmware-internal latency statistics (microseconds). acq = first DETECT window of the evidence burst ->
+// ball confirmed. loss = last DETECT window -> ball declared lost. Same code runs on the robot, so the
+// same numbers can be read there (excluding the time the ball itself needed to switch on/off).
+struct LatStat { uint32_t n, minUs, maxUs, lastUs; uint64_t sumUs; };
+static LatStat g_latAcq, g_latLoss;
+static void latAdd(LatStat& s, uint32_t us) {
+  if (!s.n || us < s.minUs) s.minUs = us;
+  if (us > s.maxUs) s.maxUs = us;
+  s.lastUs = us; s.sumUs += us; s.n++;
+}
+static void irNoteEvidence(uint32_t tUs) {
+  if (!g_ball.evOpen) { g_ball.evOpen = true; g_ball.firstEvidenceUs = tUs; }
+  g_ball.lastEvidenceUs = tUs;
+}
 
 // operator probes (":learn" coverage mapping, ":verify" controlled receiver test)
 struct Probe {
@@ -282,6 +300,7 @@ static void irCloseWindow(Config& c, uint32_t nowMs) {
   if (actual > g_scan.lastWinPlannedUs + g_scan.lastWinPlannedUs / 2 + 500) ws = WS_INVALID;   // loop was late
   else ws = irClassifyWindow(c, edges, acc, actual, startActive, endActive, s.periodUs);
   irChannelUpdate(c, ch, ws, nowMs);
+  if (ws == WS_DETECT) { s.lastDetectUs = t; if (irTrusted(c, ch)) irNoteEvidence(t); }
   if (g_probe.mode && ws != WS_INVALID) {
     g_probe.windows[ch]++;
     if (ws == WS_DETECT) g_probe.hits[ch]++;
@@ -304,7 +323,7 @@ static void irEstimate(const Config& c, uint32_t nowMs) {
   for (uint8_t ch = 0; ch < MUX_CHANNELS; ch++) {
     if (!irTrusted(c, ch) || !g_ir[ch].active) continue;
     if (g_ir[ch].hist & 0x3) recentHit = true;
-    float w = (float)popcount16(g_ir[ch].hist & 0xFF) / 8.0f;
+    float w = clampf((float)popcount16(g_ir[ch].hist & 0xFF) / (float)c.irFullHits, 0.0f, 1.0f);
     float b = c.ch[ch].bearingDeg * DEG2RAD;
     sx += w * sinf(b); sy += w * cosf(b); W += w; n++;
     mask |= (uint16_t)(1u << ch);
@@ -336,11 +355,19 @@ static void irEstimate(const Config& c, uint32_t nowMs) {
     if (g_ball.conf >= c.acqConf * 0.6f) g_ball.lastGoodMs = nowMs;
   }
   if (g_ball.conf >= c.acqConf) { if (g_ball.acqCount < 255) g_ball.acqCount++; } else g_ball.acqCount = 0;
-  if (!g_ball.valid && g_ball.acqCount >= 2) { g_ball.valid = true; g_ball.validSinceMs = nowMs; }
+  if (!g_ball.valid && g_ball.acqCount >= c.acqCycles) {
+    g_ball.valid = true; g_ball.validSinceMs = nowMs;
+    g_ball.acquiredUs = micros();
+    if (g_ball.evOpen) latAdd(g_latAcq, g_ball.acquiredUs - g_ball.firstEvidenceUs);
+  }
 }
 
 static void irBallTimeout(const Config& c, uint32_t nowMs) {
+  if (g_ball.evOpen && !g_ball.valid && (uint32_t)(micros() - g_ball.lastEvidenceUs) > 300000u) g_ball.evOpen = false;
   if (g_ball.valid && elapsedMs(nowMs, g_ball.lastGoodMs) > c.lostHoldMs) {
+    g_ball.lostUs = micros();
+    latAdd(g_latLoss, g_ball.lostUs - g_ball.lastEvidenceUs);
+    g_ball.evOpen = false;
     g_ball.valid = false;
     g_ball.lostAtMs = nowMs;
     g_ball.lostEvent = true;
@@ -371,6 +398,16 @@ static void irBegin(const Config& c) {
   g_scan.cycleMinUs = 0xFFFFFFFFu;
   attachInterrupt(digitalPinToInterrupt(PIN_MUX_SIG), irIsr, CHANGE);
   g_scan.running = true;   // armed even with zero enabled channels, so enabling one later starts scanning
+}
+
+// Restart the scan schedule (drops any half-finished window) and clear the cycle statistics. Called when
+// boot-time blocking work (report printing, calibration) is over so it cannot pollute steady-state numbers.
+static void irRestartSchedule() {
+  g_isrGate = false;
+  g_scan.open = false;
+  g_scan.cycleStartUs = micros();
+  g_scan.cycleMinUs = 0xFFFFFFFFu; g_scan.cycleMaxUs = 0; g_scan.cycleAvgUs = 0; g_scan.cycleCount = 0;
+  g_scan.lastCycleMs = millis();
 }
 
 // Call every loop iteration. Never blocks longer than the settle delay.
