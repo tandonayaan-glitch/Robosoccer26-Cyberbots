@@ -201,10 +201,9 @@ static void logInit(const Config& c) {
   (void)c;
   g_session = esp_random() % 100000u;               // used only if the filesystem is unusable
   if (g_fsRwOk && fsLock(100)) {
-    uint32_t prev = 0;
     g_session = 1;                                  // first session on this filesystem
     File f = LittleFS.open("/session.cnt", "r");
-    if (f) { char b[16] = {0}; size_t n = f.readBytes(b, sizeof(b) - 1); b[n] = 0; prev = (uint32_t)strtoul(b, nullptr, 10); f.close(); g_session = prev + 1; }
+    if (f) { char b[16] = {0}; size_t n = f.readBytes(b, sizeof(b) - 1); b[n] = 0; g_session = (uint32_t)strtoul(b, nullptr, 10) + 1; f.close(); }
     File w = LittleFS.open("/session.cnt", "w");
     if (w) { char b[16]; snprintf(b, sizeof(b), "%lu", UL(g_session)); w.write((const uint8_t*)b, strlen(b)); w.close(); }
     fsUnlock();
