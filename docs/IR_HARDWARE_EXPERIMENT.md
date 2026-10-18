@@ -29,7 +29,7 @@ with ≥ 3 pulses, and `:irgate auto` sets the gate to 0.65–1.35 × that mean.
 
 Limits found by reading the code (the mean-interval claims are checked by `t_irchar_gate_functions`; their relevance to the real ball is untested):
 
-1. **It learns whatever was in front of the receiver.** With an interferer present during `:learn` it calibrates to the interferer. Compare the printed period with the real ball's 833 µs.
+1. **It learns whatever was in front of the receiver.** With an interferer present during `:learn` it calibrates to the interferer. `:irgate auto` now warns when the learned period is more than 25 % from 833 µs, and when the longest window period exceeds 1.5× the mean (missed bursts in the sample); it still sets the gate.
 2. **A missed burst breaks it.** A window with starts at 0, 833 and 2499 µs has the mean interval 1249 µs, 50 % above 833, so the ±35 % gate classifies it `offband`. If the receiver misses bursts at long range (hypothesis above), the gate throws away genuine ball windows at the edge of the range, exactly where evidence is scarce.
 3. A 2-pulse window is judged on one interval; a 1500 µs interferer rhythm is rejected, a source whose spacing happens to fall in 542–1125 µs is not.
 4. It ignores the pulse width (about one burst long) and the gaps.

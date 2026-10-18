@@ -193,6 +193,10 @@ static void cliExecLine(char* line, uint32_t now) {
     if (t[1] && !strcmp(t[1], "off")) { gate.irPeriodMinUs = gate.irPeriodMaxUs = 0; }
     else if (t[1] && !strcmp(t[1], "auto")) {
       if (g_lastPeriod.n < 8) { say("WARN", "irgate auto needs a measurement: run :verify <ch> or :learn <deg> with the ball first (last probe had %lu usable windows, need 8)", UL(g_lastPeriod.n)); return; }
+      if (g_lastPeriod.mean < 625 || g_lastPeriod.mean > 1041)
+        say("WARN", "irgate auto: learned period %lu us is more than 25%% from the ball documentation's 833 us - was only the ball in front of the receiver? (the ball's period is software-timed, so some spread is normal)", UL(g_lastPeriod.mean));
+      if (g_lastPeriod.maxUs * 2 > g_lastPeriod.mean * 3)
+        say("WARN", "irgate auto: the longest window period (%lu us) is over 1.5x the mean (%lu us): missed bursts are in the sample, and the +-35%% gate will reject windows that miss a burst. Check with ':irchar <ch> 5 <period>' (shadow gate lines) before relying on it.", UL(g_lastPeriod.maxUs), UL(g_lastPeriod.mean));
       uint32_t lo2 = (uint32_t)(g_lastPeriod.mean * 0.65f), hi2 = (uint32_t)(g_lastPeriod.mean * 1.35f);
       gate.irPeriodMinUs = (uint16_t)(lo2 < 100 ? 100 : lo2); gate.irPeriodMaxUs = (uint16_t)(hi2 > 20000 ? 20000 : hi2);
     }

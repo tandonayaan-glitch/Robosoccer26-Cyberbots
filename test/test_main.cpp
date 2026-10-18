@@ -2241,9 +2241,23 @@ static void t_irchar_interferer() {
   // bad arguments and the autonomy interlock
   irCharRun(":irchar 99\n", 50); CHECK(outHas("usage: :irchar"));
   irCharRun(":irchar 2 100\n", 50); CHECK(outHas("usage: :irchar"));
-  send("a"); simRun(50);
+  g_autoEnabled = true;                                       // interlock: no capture while autonomy is on
   irCharRun(":irchar 2 1\n", 50);
-  if (g_autoEnabled) CHECK(outHas("autonomy must be off")); 
+  CHECK(outHas("autonomy must be off") && g_probe.mode == 0);
+  g_autoEnabled = false;
+}
+static void t_irgate_auto_warnings() {
+  bootCal();
+  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
+  g_simMode[4] = SIM_BALL; g_simChPeriod[4] = 1200;           // 3 pulses per window, 44 % from 833 us
+  irCharRun(":irchar 4 2\n", 2600);
+  Serial.out.clear(); send(":irgate auto\n"); simRun(50);
+  CHECK(outHas("more than 25% from the ball documentation"));
+  CHECK(outHas("pulse-period gate ON"));                      // a warning, not a refusal
+  g_simChPeriod[4] = 0; g_simPeriodUs = 833; g_simActiveUs = 190;
+  irCharRun(":irchar 4 2\n", 2600);
+  Serial.out.clear(); send(":irgate auto\n"); simRun(50);
+  CHECK(!outHas("more than 25%") && !outHas("missed bursts are in the sample"));
 }
 
 static void t_e2_phantom_exposure() {
@@ -2280,7 +2294,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {
