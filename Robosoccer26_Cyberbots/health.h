@@ -52,7 +52,7 @@ static FaultState g_fault[F_COUNT];
 static Cond g_cond = COND_NORMAL;
 
 struct Stats {
-  uint32_t ballLossEvents, reacquisitions, reacquireTotalMs, searchTotalMs;
+  uint32_t ballLossEvents, reacquisitions, reacquireTotalMs, searchTotalMs, shots;
   uint32_t imuTimeouts, imuRecoveries, degradedTransitions, safetyStops;
   uint32_t logDropped, storageFailures, scanOverruns;
   uint16_t channelTestFailMask;   // channels that failed an operator-run controlled test

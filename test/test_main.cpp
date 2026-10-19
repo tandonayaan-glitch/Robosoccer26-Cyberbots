@@ -2284,6 +2284,125 @@ static void t_aux_inputs() {
   CHECK(g_noIrq == 0);                                        // interrupts re-enabled after every snapshot
 }
 
+// ---- obstacle avoidance and the shot ---------------------------------------------------------------------------
+static int maxWheelDuty() { int m = 0; for (int i = 0; i < 4; i++) m = std::max(m, (int)g_pwmDuty[WHEEL_PINS[i].en]); return m; }
+static void t_avoid_functions() {
+  // level rule, rising raw = closer (slow 1500, stop 2500) and falling raw = closer (slow 2500, stop 1500)
+  CHECK(avoidLevel(1000, 1500, 2500, 0) == 0 && avoidLevel(1600, 1500, 2500, 0) == 1 && avoidLevel(2600, 1500, 2500, 0) == 2);
+  CHECK(avoidLevel(3000, 2500, 1500, 0) == 0 && avoidLevel(2400, 2500, 1500, 0) == 1 && avoidLevel(1400, 2500, 1500, 0) == 2);
+  CHECK(avoidLevel(2450, 1500, 2500, 2) == 2 && avoidLevel(2300, 1500, 2500, 2) == 1);     // hysteresis of 10 % of the span (100) on the way out
+  CHECK(avoidLevel(1450, 1500, 2500, 1) == 1 && avoidLevel(1350, 1500, 2500, 1) == 0);
+  CHECK(avoidLevel(5000, 1500, 1520, 0) == 0);                                              // not calibrated (span < 50): never reports an obstacle
+  Config c; cfgDefaults(c);
+  c.avoidMask = 3; c.avoid0Deg = 0; c.avoid1Deg = 180;
+  uint8_t clear[2] = {0, 0}, near0[2] = {1, 0}, stop0[2] = {2, 0}, stop1[2] = {0, 2};
+  float vx = 0, vy = 1;
+  avoidApply(c, clear, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
+  vx = 0; vy = 1; avoidApply(c, near0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.40, 1e-4);          // slow: 40 %
+  vx = 0; vy = 1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);          // stop zone, ball unknown: no forward motion
+  vx = 0; vy = 1; avoidApply(c, stop0, 20.0f, &vx, &vy); CHECK_NEAR(vy, 0.25, 1e-4);       // ball within 45 deg of the sensor: cautious creep (25 %)
+  vx = 0; vy = 1; avoidApply(c, stop0, 90.0f, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);        // ball off to the side: not exempt
+  vx = 0.6f; vy = 0.8f; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vx, 0.6, 1e-4); CHECK_NEAR(vy, 0.0, 1e-4);   // the sideways part survives: slide along it
+  vx = 0; vy = -1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, -1.0, 1e-4);        // backing away from a front obstacle is free
+  vx = 0; vy = -1; avoidApply(c, stop1, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);         // rear sensor limits reversing
+  c.avoidMask = 0; vx = 0; vy = 1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);   // sensor not in use: ignored
+  CHECK(cfgValidate(c, nullptr, 0) == 0);
+  c.avoidMask = 1; c.avoid0Slow = 100; c.avoid0Stop = 120;                                  // threshold span below 50: avoidance is switched off by validation
+  char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.avoidMask == 0);
+}
+static int avoidRun(int bearing, uint16_t raw) {
+  e2Boot();
+  g_cfg.avoidMask = 1; g_cfg.avoid0Slow = 1500; g_cfg.avoid0Stop = 2500;
+  g_mockAnalog[35] = raw;
+  send(":aux on\n"); simRun(200);
+  ballAt((float)bearing, 12.0f);
+  startAuto(); simRun(1200);
+  int m = 0; uint64_t end = g_mockUs + 800000ULL;
+  while (g_mockUs < end) { loop(); mockAdvance(50); m = std::max(m, maxWheelDuty()); }
+  return m;
+}
+static void t_avoid_nav_ball_in_zone() {
+  int clear = avoidRun(0, 100);
+  CHECK(clear > 60);
+  CHECK(g_aux.level[0] == 0);
+}
+static void t_avoid_nav_blocked_ball_ahead() {            // obstacle in the stop zone, ball straight ahead: moves, but cautiously
+  int m = avoidRun(0, 3000);
+  CHECK(g_aux.level[0] == 2);
+  CHECK(m > 0 && m < 110);                                // creeps (25 % of full), does not stand still and does not drive at full speed
+}
+static void t_avoid_nav_blocked_ball_side() {              // obstacle ahead, ball at 90 deg: strafing is unaffected
+  int m = avoidRun(90, 3000);
+  CHECK(g_aux.level[0] == 2);
+  CHECK(m > 60);
+}
+static void t_avoid_cli() {
+  bootCal();
+  send(":avoid on 0\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.avoidMask == 0);
+  send(":avoid cal 0 slow\n"); simRun(20); CHECK(outHas("switch the inputs on first"));
+  g_mockAnalog[35] = 1500; send(":aux on\n"); simRun(200);
+  send(":avoid cal 0 slow\n"); simRun(20); CHECK(g_cfg.avoid0Slow == 1500);
+  g_mockAnalog[35] = 2500; simRun(300);
+  send(":avoid cal 0 stop\n"); simRun(20); CHECK(g_cfg.avoid0Stop == 2500);
+  send(":avoid on 0\n"); simRun(20); CHECK(g_cfg.avoidMask == 1);
+  Serial.out.clear(); send(":avoid\n"); simRun(20); CHECK(outHas("obstacle avoidance ON") && outHas("sensor 0 (GPIO35) IN USE"));
+  send(":aux off\n"); simRun(60); CHECK(!g_aux.on);          // manual off wins: avoidance then does nothing
+  float vx = 0, vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
+  send(":avoid on 1\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.avoidMask == 1);
+  send(":avoid bogus\n"); simRun(20); CHECK(outHas("usage: :avoid"));
+}
+static void t_shoot_sequence() {
+  e2Boot();
+  g_cfg.shootEnable = 1; g_cfg.shootBackMs = 250; g_cfg.shootDriveMs = 400; g_cfg.shootHoldMs = 300;
+  ballAt(0, 12.0f);
+  startAuto(); simRun(1500);
+  CHECK(g_navState == NAV_APPROACH);                         // no goal in view: keeps approaching, no shot
+  CHECK(g_stats.shots == 0);
+  send(":goal 2000\n"); simRun(100);
+  CHECK(outHas("SIMULATED"));
+  bool sawBack = false, sawDrive = false; int backDir = 0, driveDir = 0, maxDrive = 0;
+  uint64_t end = g_mockUs + 1500000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) {
+    loop(); mockAdvance(50);
+    if (g_navState == NAV_SHOOT) {
+      if (g_shootPhase == 0 && g_pwmDuty[WHEEL_PINS[0].en] > 0) { sawBack = true; backDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); }
+      if (g_shootPhase == 1) { sawDrive = true; driveDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); maxDrive = std::max(maxDrive, maxWheelDuty()); }
+    }
+  }
+  CHECK(sawBack && sawDrive);
+  CHECK(backDir == -driveDir && driveDir != 0);                // reverse, then the opposite direction
+  CHECK(maxDrive >= (int)(g_cfg.maxAuto * 0.9f));              // the drive phase reaches (nearly) full speed
+  CHECK(g_stats.shots == 1);
+  CHECK(g_navState != NAV_SHOOT);
+  // cooldown: a second sighting right away does not start another shot
+  send(":goal 2000\n"); simRun(1500);
+  CHECK(g_stats.shots == 1);
+}
+static void t_shoot_off_by_default() {
+  e2Boot();
+  CHECK(g_cfg.shootEnable == 0);
+  ballAt(0, 12.0f);
+  startAuto(); simRun(800);
+  send(":goal 3000\n"); simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // a goal sighting alone never starts a shot
+  send("s"); simRun(100);
+  CHECK(!g_autoEnabled);
+}
+static void t_shoot_blocked_behind() {
+  e2Boot();
+  g_cfg.shootEnable = 1; g_cfg.avoidMask = 2; g_cfg.avoid1Slow = 1500; g_cfg.avoid1Stop = 2500;   // rear sensor (GPIO36) in use
+  g_mockAnalog[36] = 3000;                                    // something right behind the robot
+  send(":aux on\n"); simRun(200);
+  ballAt(0, 12.0f);
+  startAuto(); simRun(1500);
+  send(":goal 3000\n");
+  bool backed = false, entered = false;
+  uint64_t end = g_mockUs + 1000000ULL;
+  while (g_mockUs < end) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (g_navState == NAV_SHOOT && g_shootPhase == 0 && wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR) < 0 && maxWheelDuty() > 0) backed = true; }
+  CHECK(entered);
+  CHECK(!backed);                                             // the reverse phase did not move the robot into the obstacle
+}
+
 static void t_e2_phantom_exposure() {
   // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
   // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
@@ -2318,7 +2437,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_shoot_sequence), T(t_shoot_off_by_default), T(t_shoot_blocked_behind), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

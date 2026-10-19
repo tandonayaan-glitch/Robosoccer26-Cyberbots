@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 9
+#define CFG_VERSION 10
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -96,6 +96,23 @@ struct Config {
   float imuStillDps;
   uint8_t imuAddrPref;           // 0 = auto (0x68 then 0x69), else 0x68 / 0x69
 
+  // ---- obstacle avoidance: the two auxiliary IR distance sensors (GPIO35 = sensor 0, GPIO36 = sensor 1), see docs/AUX_IR_INPUTS.md ----
+  uint8_t avoidMask;             // bit0: sensor 0 in use, bit1: sensor 1 in use as a distance sensor (bit1 takes GPIO36 away from the receiver diagnostic); 0 = OFF
+  float avoid0Deg, avoid1Deg;    // direction each sensor faces (0 = robot front, clockwise positive)
+  uint16_t avoid0Slow, avoid0Stop, avoid1Slow, avoid1Stop;   // raw ADC thresholds from ':avoid cal'; stop beyond slow in either direction (rising raw = closer if stop > slow)
+  uint8_t avoidSlowPct;          // near an obstacle: speed toward it limited to this % of full speed
+  uint8_t avoidCautionPct;       // obstacle in the stop zone but the BALL is in that direction: creep toward it at this %
+  uint8_t avoidSectorDeg;        // the ball counts as "in that direction" within +- this angle of the sensor's direction
+
+  // ---- shot: reverse a little, then drive forward at full speed (needs a goal sighting: ':goal' for now, no goal sensor exists yet) ----
+  uint8_t shootEnable;           // 0 = never shoot (default)
+  uint16_t shootBackMs;          // reverse phase length
+  float shootBackSpeed;          // reverse speed, 0..1 of full
+  uint16_t shootDriveMs;         // full-speed forward phase length
+  uint8_t shootAlignDeg;         // ball must be within +- this angle of straight ahead
+  uint16_t shootHoldMs;          // ... for this long, with the goal in view, before the shot starts
+  uint16_t shootCooldownMs;      // minimum time between shots
+
   // ---- logging ----
   uint16_t snapshotMs;
   uint16_t detailMs;             // 0 = detailed per-channel rows off
@@ -179,6 +196,23 @@ static const ParamDef PARAMS[] = {
   PD("imucal", PT_U16, imuCalSamples, 100, 2000),
   PD("imustill", PT_F32, imuStillDps, 0.5, 20),
   PD("imuaddr", PT_U8, imuAddrPref, 0, 0x69),
+  PD("avoidmask", PT_U8, avoidMask, 0, 3),
+  PD("avoid0deg", PT_F32, avoid0Deg, 0, 359.9),
+  PD("avoid1deg", PT_F32, avoid1Deg, 0, 359.9),
+  PD("avoid0slow", PT_U16, avoid0Slow, 0, 4095),
+  PD("avoid0stop", PT_U16, avoid0Stop, 0, 4095),
+  PD("avoid1slow", PT_U16, avoid1Slow, 0, 4095),
+  PD("avoid1stop", PT_U16, avoid1Stop, 0, 4095),
+  PD("avoidslowpct", PT_U8, avoidSlowPct, 5, 100),
+  PD("avoidcaution", PT_U8, avoidCautionPct, 5, 100),
+  PD("avoidsector", PT_U8, avoidSectorDeg, 10, 90),
+  PD("shootenable", PT_U8, shootEnable, 0, 1),
+  PD("shootbackms", PT_U16, shootBackMs, 50, 1500),
+  PD("shootbackspeed", PT_F32, shootBackSpeed, 0.1, 1.0),
+  PD("shootdrivems", PT_U16, shootDriveMs, 100, 1500),
+  PD("shootalign", PT_U8, shootAlignDeg, 3, 45),
+  PD("shoothold", PT_U16, shootHoldMs, 50, 3000),
+  PD("shootcooldown", PT_U16, shootCooldownMs, 500, 20000),
   PD("snapms", PT_U16, snapshotMs, 50, 5000),
   PD("detailms", PT_U16, detailMs, 0, 5000),
   PD("filemax", PT_U32, fileMaxBytes, 4096, 262144),
@@ -287,6 +321,11 @@ static void cfgDefaults(Config& c) {
   c.imuCalSamples = 400;
   c.imuStillDps = 3.0f;
   c.imuAddrPref = 0;
+  c.avoidMask = 0;                // avoidance is OFF until a sensor is wired, calibrated (':avoid cal') and switched on
+  c.avoid0Deg = 0.0f; c.avoid1Deg = 180.0f;
+  c.avoid0Slow = c.avoid0Stop = c.avoid1Slow = c.avoid1Stop = 0;
+  c.avoidSlowPct = 40; c.avoidCautionPct = 25; c.avoidSectorDeg = 45;
+  c.shootEnable = 0; c.shootBackMs = 250; c.shootBackSpeed = 0.5f; c.shootDriveMs = 400; c.shootAlignDeg = 12; c.shootHoldMs = 300; c.shootCooldownMs = 3000;
   c.snapshotMs = 250;
   c.detailMs = 0;
   c.fileMaxBytes = 65536;
@@ -347,6 +386,9 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   if (c.slowSpeed > c.attackSpeed) { c.slowSpeed = d.slowSpeed; c.attackSpeed = d.attackSpeed; bad++; repNote(rep, repN, "slow/attack"); }
   bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
   if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
+  if ((c.avoidMask & 1) && (c.avoid0Slow > c.avoid0Stop ? c.avoid0Slow - c.avoid0Stop : c.avoid0Stop - c.avoid0Slow) < 50) { c.avoidMask &= (uint8_t)~1u; bad++; repNote(rep, repN, "avoid0 thresholds"); }
+  if ((c.avoidMask & 2) && (c.avoid1Slow > c.avoid1Stop ? c.avoid1Slow - c.avoid1Stop : c.avoid1Stop - c.avoid1Slow) < 50) { c.avoidMask &= (uint8_t)~2u; bad++; repNote(rep, repN, "avoid1 thresholds"); }
+  if (c.avoidCautionPct > c.avoidSlowPct) { c.avoidCautionPct = d.avoidCautionPct; c.avoidSlowPct = d.avoidSlowPct; bad++; repNote(rep, repN, "avoidcaution/slowpct"); }
   if (c.engine == 1) { c.engine = d.engine; bad++; repNote(rep, repN, "engine(1 removed)"); }
   if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }
   if (c.flickerHoldMs < c.lostHoldMs || c.flickerHoldMs > c.lostHoldMaxMs) { c.flickerHoldMs = c.lostHoldMs; bad++; repNote(rep, repN, "flickerhold"); }

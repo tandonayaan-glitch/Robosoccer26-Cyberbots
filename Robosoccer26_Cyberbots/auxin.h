@@ -1,7 +1,7 @@
-// auxin.h - two extra IR inputs, diagnostics only (nothing in navigation uses them yet).
-//   GPIO35: analog IR distance sensor (raw 12-bit ADC value, higher/lower depends on the sensor: characterise before use)
-//   GPIO36: digital IR receiver (TSOP style, active LOW): pulses per 20 ms window and their mean spacing
-// Everything is OFF after every reset (RAM-only switch ':aux on'), so the ball detector and the saved configuration are unchanged.
+// auxin.h - two extra IR inputs and the obstacle avoidance built on them.
+//   GPIO35: analog IR distance sensor 0 (raw 12-bit ADC value; whether larger means closer depends on the sensor: ':avoid cal' decides)
+//   GPIO36: either a digital IR receiver (TSOP style, active LOW; pulses per 20 ms window) or, with avoidMask bit1, distance sensor 1
+// The inputs are read only after ':aux on' or when avoidMask is non-zero. Avoidance is OFF by default (avoidMask = 0); the ball detector is unaffected.
 #pragma once
 #ifdef HOST_TEST
   #define AUX_RX_LEVEL() digitalRead(PIN_AUX_RX)
@@ -30,45 +30,91 @@ static void IRAM_ATTR auxIsr() {
 
 static const uint32_t AUX_WINDOW_MS = 20;
 struct AuxState {
-  bool on;
+  bool on, manualOff;
   uint32_t lastMs, windows, activeWindows, pulseSum, perSum, perN, floodWindows;
   uint16_t lastEdges; uint32_t lastPeriodUs;
-  uint32_t dSamples, dRaw, dMin, dMax; float dAvg;
+  uint32_t dSamples, dRaw[2], dMin[2], dMax[2]; float dAvg[2];
+  uint8_t level[2];                                    // 0 clear, 1 near (slow down), 2 stop zone
 };
 static AuxState g_aux;
 
 static void auxReset() {
-  bool on = g_aux.on; uint32_t t = g_aux.lastMs;
+  bool on = g_aux.on, mo = g_aux.manualOff; uint32_t t = g_aux.lastMs;
   memset(&g_aux, 0, sizeof(g_aux));
-  g_aux.on = on; g_aux.lastMs = t; g_aux.dMin = 0xFFFFFFFFu;
+  g_aux.on = on; g_aux.manualOff = mo; g_aux.lastMs = t; g_aux.dMin[0] = g_aux.dMin[1] = 0xFFFFFFFFu;
 }
 
 // Pure window rule (unit tested): >= 3 pulses in a window counts as the receiver seeing a modulated source.
 static bool auxWindowActive(uint16_t edges) { return edges >= 3; }
 
+// Pure level rule (unit tested): 0 clear, 1 near, 2 stop. "Closer" is the direction from slow towards stop. Leaving a level needs
+// 10 % of the slow-to-stop span of margin, so a reading on a threshold does not chatter.
+static uint8_t avoidLevel(float raw, uint16_t slow, uint16_t stop, uint8_t prev) {
+  float span = (float)stop - (float)slow;
+  if (span > -50.0f && span < 50.0f) return 0;           // not calibrated
+  float dir = span > 0 ? 1.0f : -1.0f, m = 0.1f * (span < 0 ? -span : span);
+  float x = (raw - (float)slow) * dir, xs = (raw - (float)stop) * dir;
+  uint8_t lv = xs >= 0 ? 2 : (x >= 0 ? 1 : 0);
+  if (lv < prev) {                                       // falling: apply the margin
+    if (prev == 2 && xs > -m) lv = 2;
+    else if (prev >= 1 && lv == 0 && x > -m) lv = 1;
+  }
+  return lv;
+}
+
+// Pure speed rule (unit tested). (vx, vy) is the commanded translation (vx right, vy forward, 0..1 of full speed). For each sensor in use
+// the part of the motion that points towards that sensor is limited; the sideways part is left alone, so the robot slides along an
+// obstacle instead of stopping dead. Near: at most avoidSlowPct. Stop zone: none - unless the ball is within avoidSectorDeg of
+// that direction, then a cautious creep of avoidCautionPct, so the robot can still reach a ball that sits next to an obstacle.
+static void avoidApply(const Config& c, const uint8_t level[2], float ballDeg, float* vx, float* vy) {
+  const float dirs[2] = {c.avoid0Deg, c.avoid1Deg};
+  for (uint8_t i = 0; i < 2; i++) {
+    if (!((c.avoidMask >> i) & 1u) || level[i] == 0) continue;
+    float s = sinf(dirs[i] * DEG2RAD), co = cosf(dirs[i] * DEG2RAD);
+    float along = *vx * s + *vy * co;
+    if (along <= 0.0f) continue;
+    bool ballThere = isfinite(ballDeg) && absf(angDiffDeg(ballDeg, dirs[i])) <= (float)c.avoidSectorDeg;   // NaN = no ball (e.g. during a shot)
+    float cap = level[i] == 1 ? (float)c.avoidSlowPct / 100.0f : (ballThere ? (float)c.avoidCautionPct / 100.0f : 0.0f);
+    if (along > cap) { *vx -= (along - cap) * s; *vy -= (along - cap) * co; }
+  }
+}
+
+static void auxAttachRx(bool want) {
+  static bool attached = false;
+  if (want && !attached) { g_auxLevelActive = (digitalRead(PIN_AUX_RX) == 0); g_auxEdges = 0; attachInterrupt(digitalPinToInterrupt(PIN_AUX_RX), auxIsr, CHANGE); attached = true; }
+  else if (!want && attached) { detachInterrupt(digitalPinToInterrupt(PIN_AUX_RX)); attached = false; }
+}
+
 static void auxEnable(bool on, uint32_t nowMs) {
   if (on == g_aux.on) return;
   if (on) {
     pinMode(PIN_AUX_DIST, INPUT); pinMode(PIN_AUX_RX, INPUT);
-    g_auxLevelActive = (digitalRead(PIN_AUX_RX) == 0);
-    g_auxEdges = 0;
-    auxReset(); g_aux.on = true; g_aux.lastMs = nowMs;
-    attachInterrupt(digitalPinToInterrupt(PIN_AUX_RX), auxIsr, CHANGE);
+    auxReset(); g_aux.on = true; g_aux.manualOff = false; g_aux.lastMs = nowMs;
+    auxAttachRx((g_cfg.avoidMask & 2) == 0);                // GPIO36 carries an analog distance sensor when bit1 is set: no edge interrupts there
   } else {
-    detachInterrupt(digitalPinToInterrupt(PIN_AUX_RX));
+    auxAttachRx(false);
     g_aux.on = false;
   }
 }
 
 // Every loop; does nothing while off, one 20 ms bookkeeping step while on.
 static void auxService(uint32_t nowMs) {
+  if (!g_aux.on && g_cfg.avoidMask && !g_aux.manualOff) auxEnable(true, nowMs);
+  if (g_aux.on) auxAttachRx((g_cfg.avoidMask & 2) == 0);   // follows a changed avoidMask
   if (!g_aux.on || elapsedMs(nowMs, g_aux.lastMs) < AUX_WINDOW_MS) return;
   g_aux.lastMs = nowMs;
-  uint32_t raw = (uint32_t)analogRead(PIN_AUX_DIST);
-  g_aux.dRaw = raw; g_aux.dSamples++;
-  if (raw < g_aux.dMin) g_aux.dMin = raw;
-  if (raw > g_aux.dMax) g_aux.dMax = raw;
-  g_aux.dAvg = g_aux.dSamples == 1 ? (float)raw : g_aux.dAvg * 0.8f + (float)raw * 0.2f;
+  const bool dist1 = (g_cfg.avoidMask & 2) != 0;
+  for (uint8_t i = 0; i < (dist1 ? 2 : 1); i++) {
+    uint32_t raw = (uint32_t)analogRead(i == 0 ? PIN_AUX_DIST : PIN_AUX_RX);
+    g_aux.dRaw[i] = raw;
+    if (raw < g_aux.dMin[i]) g_aux.dMin[i] = raw;
+    if (raw > g_aux.dMax[i]) g_aux.dMax[i] = raw;
+    g_aux.dAvg[i] = g_aux.dSamples == 0 ? (float)raw : g_aux.dAvg[i] * 0.6f + (float)raw * 0.4f;   // about 2-3 samples = 40-60 ms
+    uint16_t slow = i == 0 ? g_cfg.avoid0Slow : g_cfg.avoid1Slow, stop = i == 0 ? g_cfg.avoid0Stop : g_cfg.avoid1Stop;
+    g_aux.level[i] = ((g_cfg.avoidMask >> i) & 1u) ? avoidLevel(g_aux.dAvg[i], slow, stop, g_aux.level[i]) : 0;
+  }
+  g_aux.dSamples++;
+  if (dist1) { g_auxEdges = 0; return; }
   g_auxLevelActive = (AUX_RX_LEVEL() == 0);     // resynchronise (an edge could have been missed while the pin was disabled)
   noInterrupts();
   uint16_t n = g_auxEdges; uint32_t f = g_auxFirst, l = g_auxLast;
@@ -79,15 +125,12 @@ static void auxService(uint32_t nowMs) {
   if (auxWindowActive(n)) { g_aux.activeWindows++; g_aux.lastPeriodUs = (l - f) / (uint32_t)(n - 1); g_aux.perSum += g_aux.lastPeriodUs; g_aux.perN++; }
 }
 
-static void cmdAux(const char* arg, uint32_t nowMs) {
-  if (arg && !strcmp(arg, "on")) { auxEnable(true, nowMs); say("INFO", "aux inputs ON (GPIO%u analog distance, GPIO%u IR receiver); off again after a reset", (unsigned)PIN_AUX_DIST, (unsigned)PIN_AUX_RX); return; }
-  if (arg && !strcmp(arg, "off")) { auxEnable(false, nowMs); say("INFO", "aux inputs OFF"); return; }
-  if (arg && !strcmp(arg, "reset")) { auxReset(); say("INFO", "aux statistics cleared"); return; }
-  if (arg) { say("WARN", "usage: :aux [on|off|reset]"); return; }
-  if (!g_aux.on) { say("INFO", "aux inputs are OFF (':aux on'). GPIO%u: analog IR distance sensor, GPIO%u: IR receiver (active LOW)", (unsigned)PIN_AUX_DIST, (unsigned)PIN_AUX_RX); return; }
-  say("INFO", "aux distance GPIO%u: raw now %lu, smoothed %.0f, min %lu, max %lu over %lu samples (12-bit ADC; no unit conversion: characterise your sensor)",
-      (unsigned)PIN_AUX_DIST, UL(g_aux.dRaw), (double)g_aux.dAvg, UL(g_aux.dSamples ? g_aux.dMin : 0), UL(g_aux.dMax), UL(g_aux.dSamples));
-  say("INFO", "aux receiver GPIO%u: %lu windows of %lu ms, active in %lu (%.1f%%), last window %u pulses, mean pulses/window %.1f, mean pulse spacing in active windows %lu us, flooded windows %lu",
-      (unsigned)PIN_AUX_RX, UL(g_aux.windows), UL(AUX_WINDOW_MS), UL(g_aux.activeWindows), g_aux.windows ? 100.0 * g_aux.activeWindows / g_aux.windows : 0.0,
-      (unsigned)g_aux.lastEdges, g_aux.windows ? (double)g_aux.pulseSum / g_aux.windows : 0.0, UL(g_aux.perN ? g_aux.perSum / g_aux.perN : 0), UL(g_aux.floodWindows));
+// Called from the approach: limits the commanded translation near obstacles. No-op unless avoidance is on. Stale sensor data
+// (loop stalled, aux switched off by a reset race) is treated as "near", never as "clear".
+static void avoidForNav(const Config& c, uint32_t nowMs, float ballDeg, float* vx, float* vy) {
+  if (!c.avoidMask || g_aux.manualOff) return;
+  uint8_t lv[2] = {g_aux.level[0], g_aux.level[1]};
+  if (!g_aux.on || elapsedMs(nowMs, g_aux.lastMs) > 100) { lv[0] = (c.avoidMask & 1) ? 1 : 0; lv[1] = (c.avoidMask & 2) ? 1 : 0; }
+  avoidApply(c, lv, ballDeg, vx, vy);
 }
+

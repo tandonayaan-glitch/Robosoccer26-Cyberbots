@@ -22,9 +22,9 @@ static const char* LOG_COLUMNS =
   "vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,scan_us,loop_us,note";
 
 enum NavState : uint8_t {
-  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP
+  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT
 };
-static const char* NAV_NAME[] = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP"};
+static const char* NAV_NAME[] = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP", "SHOOT"};
 static NavState g_navState = NAV_IDLE;
 static float g_hdgErr = NAN;               // degrees; NaN when heading hold is not active
 static uint32_t g_loopMaxUs = 0;           // longest loop() iteration since the last snapshot

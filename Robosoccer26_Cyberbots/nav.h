@@ -5,6 +5,7 @@
 #pragma once
 #include <strings.h>
 #include "logger.h"
+#include "auxin.h"
 
 static bool g_autoEnabled = false;          // RAM only: every reset starts with autonomy OFF
 static uint32_t g_navSince = 0;
@@ -17,6 +18,15 @@ static float g_refYaw = 0;
 static bool g_centered = false;
 static float g_lastBearing = 0;
 static uint32_t g_lastNavTick = 0;
+
+// Goal sighting. No goal sensor exists yet: ':goal [ms]' (or a future detector calling goalMarkSeen) marks the goal as in view for a while.
+static uint32_t g_goalSeenUntilMs = 0;
+static bool g_goalSeenSet = false;
+static void goalMarkSeen(uint32_t nowMs, uint32_t forMs) { g_goalSeenUntilMs = nowMs + forMs; g_goalSeenSet = true; }
+static bool goalVisible(uint32_t nowMs) { return g_goalSeenSet && !deadlineReached(nowMs, g_goalSeenUntilMs); }
+static uint32_t g_shootAlignSinceMs = 0, g_shootStartMs = 0, g_lastShotMs = 0;
+static uint8_t g_shootPhase = 0;                 // 0 reverse, 1 drive
+static bool g_shotDone = false;
 
 struct MotorTest {
   uint8_t state;       // 0 idle, 1 armed (needs :confirm), 2 forward/step, 3 pause, 4 reverse, 5 settle
@@ -149,7 +159,22 @@ static void navApproach(const Config& c, uint32_t now) {
     w = clampf(c.turnKp * th, -c.hdgMaxRot, c.hdgMaxRot);   // fallback: robot-relative turn toward the ball
     if (absf(th) > c.fallbackAlignDeg) { vx *= 0.5f; vy *= 0.5f; }
   }
+  avoidForNav(c, now, th, &vx, &vy);                        // obstacle avoidance (off unless configured): limits the part of the motion towards an obstacle
   motorsDrive(c, vx, vy, w, c.maxAuto);
+}
+
+// Start a shot when the goal is in view and the ball has been centred for a moment. Returns true when the state changed.
+static bool navShootCheck(const Config& c, uint32_t now) {
+  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL) { g_shootAlignSinceMs = 0; return false; }
+  bool aligned = g_ball.valid && !g_ball.ambiguous && absf(g_ball.bearingDeg) <= (float)c.shootAlignDeg;
+  if (!aligned) { g_shootAlignSinceMs = 0; return false; }
+  if (!g_shootAlignSinceMs) g_shootAlignSinceMs = now ? now : 1u;
+  if (!goalVisible(now) || elapsedMs(now, g_shootAlignSinceMs) < c.shootHoldMs) return false;
+  if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
+  g_shootPhase = 0; g_shootStartMs = now; g_shootAlignSinceMs = 0;
+  if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
+  navSetState(NAV_SHOOT, "goal in view, ball centred: reverse, then full speed forward");
+  return true;
 }
 
 static void navEnterSearch(const char* why, bool brake = false) {
@@ -189,8 +214,27 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_APPROACH:
       if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch("ball lost", true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
-      else navApproach(c, now);
+      else if (!navShootCheck(c, now)) navApproach(c, now);
       break;
+
+    case NAV_SHOOT: {
+      if (!g_autoEnabled) break;
+      float w = 0, vx = 0, vy;
+      navHeading(c, now, &w);                                      // keep the heading it had when the shot began
+      float sc = navSensorScale(c);
+      uint32_t el = elapsedMs(now, g_shootStartMs);
+      if (g_shootPhase == 0) {
+        vy = -c.shootBackSpeed * sc;
+        if (el >= c.shootBackMs) { g_shootPhase = 1; g_shootStartMs = now; el = 0; vy = sc; }
+      } else vy = sc;
+      avoidForNav(c, now, NAN, &vx, &vy);                          // obstacle limits still apply (the ball is not exempt here)
+      motorsDrive(c, vx, vy, w, c.maxAuto);
+      if (g_shootPhase == 1 && el >= c.shootDriveMs) {
+        g_lastShotMs = now; g_shotDone = true; g_stats.shots++;
+        navSetState(NAV_SEEK, "shot finished");
+      }
+      break;
+    }
 
     case NAV_SEARCH:
       g_hdgErr = NAN;
