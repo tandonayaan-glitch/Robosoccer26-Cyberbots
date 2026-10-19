@@ -52,6 +52,12 @@ static const uint8_t IR_PLANNED_CHANNELS = 12;  // C0..C11 are the planned recei
 static const uint8_t PIN_I2C_SDA = P_SDA;
 static const uint8_t PIN_I2C_SCL = P_SCL;
 
+// ---- auxiliary IR inputs (input-only GPIOs, no internal pull; both off until ':aux on') -------------
+#define P_AUX_DIST 35                              // analog IR distance sensor (ADC1_CH7): output must stay below 3.3 V
+#define P_AUX_RX 36                                // digital IR receiver (TSOP style, active LOW, needs 3.3 V supply); ADC1_CH0 / SENSOR_VP
+static const uint8_t PIN_AUX_DIST = P_AUX_DIST;
+static const uint8_t PIN_AUX_RX = P_AUX_RX;
+
 // Serial
 static const uint32_t SERIAL_BAUD = 115200;
 
@@ -66,7 +72,12 @@ static_assert(__builtin_popcountll(OUTPUT_PIN_MASK) == 18, "a GPIO is assigned t
 static_assert((PIN_BIT(P_MUX_SIG) & OUTPUT_PIN_MASK) == 0, "mux SIG must not double as an output pin");
 static_assert((OUTPUT_PIN_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
 static_assert((OUTPUT_PIN_MASK & PIN_BIT(12)) == 0 && (OUTPUT_PIN_MASK & PIN_BIT(0)) == 0, "GPIO12 (flash voltage) and GPIO0 (boot mode) are unused on purpose");
+static_assert(P_AUX_DIST != P_AUX_RX && P_AUX_DIST != P_MUX_SIG && P_AUX_RX != P_MUX_SIG, "auxiliary input pins must be distinct from each other and from mux SIG");
+static_assert(((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & OUTPUT_PIN_MASK) == 0, "auxiliary inputs must not collide with an output pin");
+static_assert(P_AUX_RX >= 32 && P_AUX_RX <= 39, "the aux receiver ISR reads GPIO_IN1: pin must be GPIO32..39");
 #ifdef SOC_GPIO_VALID_OUTPUT_GPIO_MASK   // only visible on the real toolchain
+static_assert(((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & SOC_GPIO_VALID_GPIO_MASK) == (PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) &&
+              ((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "aux pins must be valid INPUT-ONLY GPIOs");
 static_assert((OUTPUT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");
 static_assert((PIN_BIT(P_MUX_SIG) & SOC_GPIO_VALID_GPIO_MASK) != 0 && (PIN_BIT(P_MUX_SIG) & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
               "mux SIG (GPIO34) must be a valid INPUT-ONLY pin");

@@ -35,6 +35,7 @@ guessing.
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
 | `docs/LATENCY_OPTIMIZATION.md` | IR detector latency/reliability: method, root causes, engine 2, simulated before/after tables, targets met and unmet, physical limits |
 | `docs/IR_HARDWARE_EXPERIMENT.md` | What the IR golf ball's source code says about its waveform, what `:irgate auto` actually measures, the `:irchar` capture and the step-by-step ball/receiver/interference experiment (no hardware results yet) |
+| `docs/AUX_IR_INPUTS.md` | Optional extra IR inputs on GPIO35 (analog distance sensor) and GPIO36 (IR receiver), `:aux` diagnostics (off by default), wiring and placement suggestions |
 | `docs/bench/` | Raw benchmark outputs (simulation), static-analysis and real-build logs |
 | `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
 | `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |

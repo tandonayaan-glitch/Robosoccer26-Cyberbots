@@ -66,6 +66,11 @@ static bool g_simActiveHigh[16];          // model a channel whose output idles 
 static uint8_t g_pinLevel[64];
 static uint8_t g_pinMode[64];
 static void (*g_isrFn)() = nullptr;
+static void (*g_isrFn36)() = nullptr;     // second interrupt: the auxiliary IR receiver on GPIO36
+static int g_sim36PeriodUs = 0, g_sim36ActiveUs = 0;   // 0 period = idle (output high)
+static uint8_t g_last36 = 1;
+static uint16_t g_mockAnalog[64];
+static uint32_t g_noIrq = 0;
 static uint8_t g_lastSigLevel = 1;
 static uint32_t g_isrCalls = 0;
 
@@ -86,6 +91,10 @@ static uint8_t mockSigLevel(uint64_t us) {
   return (uint8_t)(active ? (activeHigh ? 1 : 0) : (activeHigh ? 0 : 1));
 }
 
+static uint8_t mock36Level(uint64_t us) {
+  if (g_sim36PeriodUs <= 0) return 1;
+  return (int)(us % (uint64_t)g_sim36PeriodUs) < g_sim36ActiveUs ? 0 : 1;
+}
 // Serial TX model: 115200 8N1 ~ 11520 B/s, 2048 B buffer
 static double g_serialRoom = 2048;
 static bool g_serialUnlimited = false;
@@ -96,6 +105,8 @@ static void mockAdvance(uint32_t us) {
     left -= step;
     g_mockUs += step;
     g_serialRoom = std::min(2048.0, g_serialRoom + step * 0.01152);
+    uint8_t l36 = mock36Level(g_mockUs);
+    if (l36 != g_last36) { g_last36 = l36; if (g_isrFn36) g_isrFn36(); }
     uint8_t lvl = mockSigLevel(g_mockUs);
     if (lvl != g_lastSigLevel) {
       g_lastSigLevel = lvl;
@@ -114,11 +125,16 @@ static inline void pinMode(uint8_t p, uint8_t m) { g_pinMode[p] = m; }
 static inline void digitalWrite(uint8_t p, uint8_t v) { g_pinLevel[p] = v ? 1 : 0; }
 static inline int digitalRead(uint8_t p) {
   if (p == 34) return mockSigLevel(g_mockUs);
+  if (p == 36) return mock36Level(g_mockUs);
   if (p == 16 || p == 17) return 1;
   return g_pinLevel[p];
 }
 static inline uint8_t digitalPinToInterrupt(uint8_t p) { return p; }
-static inline void attachInterrupt(uint8_t, void (*fn)(), int) { g_isrFn = fn; }
+static inline void attachInterrupt(uint8_t p, void (*fn)(), int) { if (p == 36) g_isrFn36 = fn; else g_isrFn = fn; }
+static inline void detachInterrupt(uint8_t p) { if (p == 36) g_isrFn36 = nullptr; else g_isrFn = nullptr; }
+static inline int analogRead(uint8_t p) { return g_mockAnalog[p]; }
+static inline void noInterrupts() { g_noIrq++; }
+static inline void interrupts() { g_noIrq--; }
 
 // ---- LEDC -----------------------------------------------------------------------------------
 static uint32_t g_pwmDuty[64];

@@ -2260,6 +2260,30 @@ static void t_irgate_auto_warnings() {
   CHECK(!outHas("more than 25%") && !outHas("missed bursts are in the sample"));
 }
 
+static void t_aux_inputs() {
+  bootCal();
+  CHECK(!g_aux.on && g_isrFn36 == nullptr);                   // off after every boot: no interrupt, no ADC reads
+  send(":aux\n"); simRun(20);
+  CHECK(outHas("aux inputs are OFF"));
+  CHECK(auxWindowActive(3) && !auxWindowActive(2) && !auxWindowActive(0));
+  g_sim36PeriodUs = 833; g_sim36ActiveUs = 190; g_mockAnalog[35] = 1234;
+  send(":aux on\n"); simRun(600);
+  CHECK(g_aux.on && g_isrFn36 != nullptr);
+  Serial.out.clear(); send(":aux\n"); simRun(20);
+  CHECK(outHas("raw now 1234"));
+  CHECK(g_aux.windows >= 20 && g_aux.activeWindows >= g_aux.windows - 2);
+  CHECK_NEAR((double)g_aux.perSum / (double)g_aux.perN, 833.0, 15.0);
+  CHECK_NEAR((double)g_aux.pulseSum / (double)g_aux.windows, 24.0, 2.0);   // about 24 pulses per 20 ms window
+  g_sim36PeriodUs = 0;                                        // source removed
+  send(":aux reset\n"); simRun(200);
+  CHECK(g_aux.windows >= 5 && g_aux.activeWindows == 0);
+  send(":aux off\n"); simRun(20);
+  CHECK(!g_aux.on && g_isrFn36 == nullptr);
+  send(":aux bogus\n"); simRun(20);
+  CHECK(outHas("usage: :aux"));
+  CHECK(g_noIrq == 0);                                        // interrupts re-enabled after every snapshot
+}
+
 static void t_e2_phantom_exposure() {
   // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
   // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
@@ -2294,7 +2318,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

@@ -5,6 +5,7 @@
 // after 4 s so a stray ':' can never swallow a later 's'. Diagnostic commands never move motors.
 #pragma once
 #include "report.h"
+#include "auxin.h"
 
 static uint32_t g_lastLoopUs = 0;      // loop() timestamp; cli.h may reset it after an intentional long operation
 
@@ -23,7 +24,7 @@ static void printHelp() {
   say("INFO", "i : IR snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :irchar <n> [s] [period_us] | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :irchar <n> [s] [period_us] | :aux [on|off|reset] | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -227,6 +228,7 @@ static void cliExecLine(char* line, uint32_t now) {
     }
   }
   else if (!strcmp(cmd, "cov")) cmdCov();
+  else if (!strcmp(cmd, "aux")) cmdAux(t[1], now);
   else if (!strcmp(cmd, "zero")) { imuZeroYaw(); g_refYaw = 0; say("INFO", "heading reference zeroed"); }
   else if (!strcmp(cmd, "gcal")) {
     if (!motorsAllZero()) say("WARN", "gyro calibration refused: motors are not stopped");
