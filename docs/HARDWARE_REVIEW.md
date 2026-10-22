@@ -12,7 +12,7 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 | 4 | yellow BO geared DC motor | stall current **[?]**; measure |
 | 4 | mecanum wheel | roller layout X or O: `:roller X|O`, tested with `:dtest` |
 | 1 | 3S 11.1 V 4500 mAh battery | 12.6 V when full: see the L298N regulator note below |
-| 2 | IR transmitter LED | front, one per pair; **exact part [?]** (wavelength, forward voltage, current) |
+| 2 | IR transmitter LED, **940 nm, 5 V supply** | front, one per pair; **part number [?]** (forward voltage, maximum continuous and pulsed current): R_LED = (5 V − V_f − 0.2 V) / I_f, e.g. about 180 Ω for 20 mA with an assumed V_f of 1.3 V; `docs/IR_SENSORS.md` §3 |
 | 2 | 5 mm IR phototransistor (2-pin receiver) | front, one per pair; **part number [?]**; it cannot connect to a GPIO without at least a resistor: collector to 3.3 V, emitter to the GPIO with a load resistor to GND (start with 10 kΩ, `docs/IR_SENSORS.md` §2.1); check the lead order in the datasheet |
 | 1 | MPU6050 (gyro + accelerometer) breakout | |
 | 1 | breadboard, jumper wires, power wiring | |
@@ -41,7 +41,7 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 |---|---|---|---|
 | IR receiver 0 (pair 0, front centre): phototransistor, emitter lead + load resistor node | **GPIO35** (collector to 3.3 V; load resistor from this node to GND) | input-only, ADC1_CH7, no internal pull; **needs a resistor (or more) between the 2-pin part and the pin: not a direct connection** (`docs/IR_SENSORS.md` §2) |
 | IR receiver 1 (pair 1, front, offset): phototransistor, emitter lead + load resistor node | **GPIO36** (same circuit) | input-only, ADC1_CH0, no internal pull |
-| IR emitter 0 / 1 driver input | transistor base (via about 1 kΩ) or MOSFET gate | **GPIO4 / GPIO13 – PROPOSED, not from your notes; used only if `iremit` = 1** | a GPIO cannot drive an IR LED directly: use a transistor driver (`docs/IR_SENSORS.md` §3); HIGH = LED on |
+| IR emitter 0 / 1 driver input | transistor base (via 1 kΩ) of a low-side NPN (LED + R_LED from the 5 V rail to the collector), or a MOSFET gate | **GPIO4 / GPIO13 – PROPOSED, not from your notes; used only if `iremit` = 1** | a GPIO cannot drive an IR LED directly: use a transistor driver (`docs/IR_SENSORS.md` §3); HIGH = LED on |
 | receivers and emitters | supply / return | 3.3 V or 5 V per the part and the driver design; GND common | every receiver pin voltage must stay within 0–3.3 V |
 | MPU6050 | SDA | **GPIO16** | explicit `Wire.begin(16, 17)`; address 0x68 or 0x69 auto-detected |
 | MPU6050 | SCL | **GPIO17** | |
@@ -80,7 +80,7 @@ when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12**
 | L298N motor supply | 11.1 V nominal. The bipolar L298N drops about 2 V, so a motor sees about 9 V at full duty [2nd]; about 2 A per channel continuous [2nd] |
 | BO motor current **[?]** | measure the stall current; add current limiting/fuses if it exceeds the driver rating. Firmware limits: manual PWM ≤ 150/255, autonomous ≤ 170/255 (placeholders), the shot's drive phase uses `shootpwm` (255 by default: lower it if the driver or battery cannot take it) |
 | IR receiver pins | input-only, **no internal pull-up/down**. A bare 2-pin receiver needs a resistor (phototransistor) or an amplifier (photodiode). An open (unconnected) analog pin floats; a reading stuck at the clear-side end stop for 2 s raises a fault (not checked while the emitters are pulsed); a floating pin in the middle of the range does not |
-| IR emitter LEDs | never from a GPIO directly (about 12 mA limit [2nd] against typically 20–100 mA); transistor driver, resistor from the LED datasheet; the firmware pulses an emitter for about 200 µs every 5 ms (a few percent duty) only when `iremit` = 1 |
+| IR emitter LEDs (940 nm, 5 V) | never from a GPIO directly (about 12 mA limit [2nd] against typically 20–50 mA); low-side NPN driver with the LED and R_LED on the 5 V rail, so the ESP32 pin only supplies the base current (about 2.6 mA through 1 kΩ) and never sees 5 V; resistor from the LED datasheet; the firmware pulses an emitter for about 200 µs every 5 ms (a few percent duty) only when `iremit` = 1 |
 | Motor noise | the L298N drivers and brushed motors inject noise into supplies: decouple the sensor supply (100 nF close to the sensor), keep the sensor wires away from motor wires |
 | MPU6050 breakout **[?]** | GY-521-type boards carry a 3.3 V regulator and 4.7 kΩ pull-ups to the regulated rail; confirm yours does not pull SDA/SCL up to 5 V |
 | I2C on GPIO16/17 | free on a plain ESP-32S (WROOM) module; PSRAM modules use them |

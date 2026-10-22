@@ -23,7 +23,7 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 | 4 | yellow BO geared DC motor |
 | 4 | mecanum wheel |
 | 1 | 3S 11.1 V 4500 mAh battery |
-| 2 | IR transmitter LED (**exact part not known**) |
+| 2 | IR transmitter LED, 940 nm, 5 V supply (**part number not known**; through a low-side NPN transistor and a resistor, about 180 Ω for 20 mA with an assumed 1.3 V forward voltage; `docs/IR_SENSORS.md` §3) |
 | 2 | 5 mm IR phototransistor (2-pin receiver; **part number not known**; it needs a load resistor, it cannot go straight to a GPIO: collector to 3.3 V, emitter to the pin and a resistor (start 10 kΩ) to GND; see `docs/IR_SENSORS.md` §2.1) |
 | 1 | MPU6050 |
 | 1 | breadboard, jumper wires, power wiring |

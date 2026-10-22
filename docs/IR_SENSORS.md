@@ -69,21 +69,33 @@ It needs a rail-to-rail 3.3 V op-amp and care with leakage and noise: do not bui
 
 If the part is a 3-pin receiver module, or has an open-collector / digital output, the interface is simpler (a pull-up to 3.3 V, read as digital: `:ir mode <n> digital`), but this is **not** the case that was described.
 
-## 3. The IR transmitter LEDs (candidate)
+## 3. The IR transmitter LEDs: 940 nm, 5 V supply (circuit candidate)
 
-A GPIO **cannot drive an IR LED directly**: an ESP32 pin should source only about 12 mA continuously (the absolute maximum is higher, but not for a load) [2nd], while typical IR LEDs are run at 20–100 mA.
-Use a transistor driver per emitter (or one for both):
+Known: **940 nm LEDs powered from 5 V** (reported by you). Not known: the LED part number, so its forward voltage and its maximum continuous and pulsed current (these decide the resistor).
+
+A GPIO **cannot drive an IR LED directly**: an ESP32 pin should source only about 12 mA continuously [2nd], while typical 5 mm IR LEDs are run at 20–50 mA. The 5 V rail is not a problem for the pin: the ESP32 only drives a **transistor base**, and the LED current comes from the 5 V rail through a **low-side NPN switch**. The ESP32 pin never sees 5 V.
 
 ```
- supply (3.3 V or 5 V) ── R_LED ── LED anode … LED cathode ── NPN collector (or N-MOSFET drain)
-                                                    NPN emitter (or source) ── GND
- ESP32 emitter pin ── 1 kΩ ── NPN base        (for a logic-level N-MOSFET: pin to the gate, 10 kΩ gate-to-GND)
+ +5 V ──┬── R_LED ── LED anode … LED cathode ── NPN collector
+        │                                        NPN emitter ── GND
+        └─ 10–100 µF + 100 nF to GND, close to the LEDs
+ ESP32 emitter pin ── 1 kΩ ── NPN base         (a small-signal NPN such as a 2N2222 / BC547 class part [2nd]; hFE of 50 or more is plenty)
+ (a logic-level N-MOSFET works too: pin to the gate, 10 kΩ gate-to-GND)
 ```
-`R_LED = (V_supply − V_f − V_ce(sat)) / I_f`. With **assumed** values V_supply = 5 V, V_f = 1.3 V (typical for a 940 nm LED; **read yours**), V_ce(sat) = 0.2 V and I_f = 20 mA this is about 175 Ω (use 180 Ω).
-Use the LED's datasheet for the real forward voltage, the continuous current and the pulsed current. The firmware pulses an emitter for about `irsettle` (200 µs) every 5 ms, which is a duty of a few percent.
-**HIGH on the emitter pin = LED on.** Common ground with the ESP32 is required.
+* **Base current:** (3.3 V − 0.7 V) / 1 kΩ ≈ 2.6 mA from the pin, well inside what a pin can give, and enough to switch 20–50 mA with margin.
+* **Resistor:** `R_LED = (5 V − V_f − V_ce(sat)) / I_f`. **Assumed** values (read your LED's datasheet): V_f = 1.3 V and V_ce(sat) = 0.2 V.
 
-If you choose not to let the firmware control the LEDs, hard-wire each LED with its resistor to the supply (always on). Detection still works, but ambient light is no longer cancelled (§4).
+| LED current I_f | R_LED (calculated) | nearest standard | resistor power |
+|---:|---:|---:|---:|
+| 20 mA | 175 Ω | 180 Ω | about 0.07 W |
+| 30 mA | 117 Ω | 120 Ω | about 0.11 W |
+| 50 mA | 70 Ω | 68 Ω | about 0.17 W |
+
+  Choose I_f **at or below the LED's continuous rating** (20 mA is a safe starting point for a generic 5 mm 940 nm LED [2nd]). A higher peak current is allowed only up to the datasheet's pulsed rating at the duty cycle used: the firmware turns an emitter on for about `irsettle` (200 µs) every 5 ms, a duty of about 4 %, but start at the continuous rating.
+* **Hard-wired option:** if you do not want the firmware to control the LEDs, wire each LED with the same R_LED straight from 5 V to GND (no transistor, no GPIO). Then the LED current is continuous and **must not exceed the continuous rating**, and ambient light is not cancelled (§4).
+* **Supply:** two LEDs at 20–50 mA are 40–100 mA from the 5 V rail: make sure that rail can supply it besides the ESP32 (how the ESP32 is powered is not in your notes). The switching spikes need local decoupling (above). Common ground with the ESP32 is required.
+* **HIGH on the emitter pin = LED on** (low-side NPN). The firmware leaves the pin LOW (LED off) except during a pulse.
+* **Phototransistor supply:** keep the receiver's collector on **3.3 V** (not 5 V), so its pin voltage can never exceed 3.3 V even in strong light.
 
 ## 4. How the firmware uses the pairs
 
@@ -135,7 +147,7 @@ There is **no kicker or other shooting actuator** in the project and none is ass
 ## 8. What I need from you before the circuit can be finalised
 
 1. **Receivers:** they are 5 mm phototransistors (answered). Still needed: the part number or marking (or a photo of the lens, any markings) and the datasheet link: it gives the dark current, the light current, the response time and the lead order, which decide R_L and `irsettle`. Is the epoxy clear or a black/dark daylight filter?
-2. **Emitters:** the exact part number (wavelength, forward voltage, maximum continuous and pulsed current), and how you want them powered (3.3 V, 5 V, or the motor battery through a regulator).
-3. **Emitter control:** may the firmware control the LEDs? If yes, which free GPIOs do you want (the proposal is GPIO4 and GPIO13), and what driver do you have (NPN, logic-level MOSFET)? If no, they stay hard-wired on.
+2. **Emitters:** they are 940 nm and run from 5 V (answered). Still needed: the exact part number or datasheet (forward voltage, maximum continuous and pulsed current, beam angle) and which 5 V rail powers them (the ESP32's 5 V/VIN pin, a buck converter, or another).
+3. **Emitter control:** may the firmware control the LEDs through a transistor (§3)? If yes, which free GPIOs do you want (the proposal is GPIO4 and GPIO13), and which transistor do you have (NPN part number, or a logic-level MOSFET)? If no, they stay hard-wired on with R_LED and no GPIO.
 4. **Mounting:** the distance between the two pairs, their aiming (straight ahead or angled), the side the offset pair is on, the height above the floor, and whether a shroud or tube separates the receivers from the emitters (the receiver must not see the LED directly).
 5. **Ball:** the ball you use (the RoboCupJunior IR ball emits its own IR, so a reflective pair sees the ball's emission as well as the reflection; pulsing the emitter cancels the emission) and its colour.
