@@ -48,13 +48,35 @@ Behaviour (approach only; manual keys and the search spin are not limited):
 * Mount the sensors **above the ball's height**: a ball on the floor in front of a low sensor reads as an obstacle.
 * An unconnected analog pin floats; only enable a sensor that is wired. Raw value saturation, sunlight and black or angled targets are untested.
 
-## Shot (off by default)
+## Goal heading, ball-held sensor and the shot (all off by default)
 
-`:set shootenable 1`. While approaching, with autonomy on, the ball within `shootalign` (12°) of straight ahead for `shoothold` (300 ms) **and the goal in view**, the robot
-reverses at `shootbackspeed` (0.5) for `shootbackms` (250 ms), then drives forward at full speed for `shootdrivems` (400 ms), holding its heading with
-the gyro, then returns to seeking. At least `shootcooldown` (3 s) between shots.
+**Goal heading.** Place the robot pointing straight at the goal and keep it still. `goalregms` (5000 ms) after power-on, once the MPU6050 is calibrated and
+delivering, the robot's gyro yaw is registered as "straight at the goal" (`[NAV] goal heading registered ...`). `:goal` shows it, `:goal set` registers the
+current heading again (do this if the gyro has drifted and the robot is pointing at the goal), `:goal clear` forgets it (no shot until `:goal set`). The gyro
+heading is relative and **drifts**; nothing here corrects it during a match.
 
-* **There is no goal detection yet.** `:goal [ms]` marks the goal as in view for a while (a simulated sighting, for the bench and for tests); a real detector (compass heading, beacon, camera) must call `goalMarkSeen`.
-* The ball being close enough to be struck is **not** known: the IR ring gives a direction, not a distance. A real "ball held" sensor is needed before this is more than a bench behaviour.
-* Obstacle limits apply during the shot with no ball exemption: a rear obstacle stops the reverse phase, a front obstacle in the stop zone cuts the drive phase.
-* Full speed is `maxauto` (scaled down when degraded). Test with the wheels lifted first.
+**Aim window from the goal size.** The ball centre must pass within (goal width − ball diameter) / 2 of the goal centre at the goal line:
+half-angle = atan(((goalwidth − balldia) / 2) / goaldist), clamped to 2..20°. The shot is fired at **half** of that angle, as margin for drift and ball
+deviation. Defaults: `goalwidth` 450 mm, `balldia` 43 mm, `goaldist` 1000 mm → window ±11.5°, fires within ±5.7°.
+
+Goal width from the rule sets I could find (current rulebook PDFs could not be fetched from this environment; check yours): the international
+[RoboCupJunior Soccer Rules 2024](https://junior.robocup.org/wp-content/uploads/2024/10/2024_Soccer_Rules.pdf) are reported to give the inner goal as 600 mm wide × 100 mm
+high × 74 mm deep; the Australian [RCJA 2024 rules](https://www.robocupjunior.org.au/wp-content/uploads/2024/02/Official-2024-RCJA-Soccer-Rules-KCTC.pdf) give 450 mm; Entry rules for 2026 allow 450–600 mm.
+The default 450 mm is the narrower, safer value. Set `goalwidth` and `goaldist` for your field: `:set goalwidth 600`, `:set goaldist 1200`.
+
+**Ball-held sensor.** One analog IR sensor at the front, looking at where the ball sits when the robot has it (GPIO35 by default, `:set holdsensor 1` for GPIO36).
+A 2-pin IR phototransistor/photodiode needs a resistor to 3.3 V so that the pin sees a voltage (and an IR LED to light the ball), or use a ready sensor
+module; whatever it is, the firmware only needs two raw readings:
+
+1. `:aux on`, ball absent: `:hold cal clear`; ball in the capture position: `:hold cal held`.
+2. `:hold on`, `:save`. `:hold` shows the raw value and "BALL HELD" / "no ball" (3 consecutive samples, 60 ms, to change state; 10 % hysteresis).
+3. This sensor is excluded from obstacle avoidance (it sees the ball itself). Obstacle avoidance can still use the other input.
+
+**The shot** (`:set shootenable 1`). Conditions: autonomy on, shot enabled, ball held for `shoothold` (200–300 ms), goal heading registered, gyro usable.
+Then: (1) **aim**: rotate in place (at most `aimspeed`) until the heading is inside half the aim window; (2) **reverse** at `shootbackspeed` for `shootbackms`
+holding the goal heading; (3) **drive forward at full speed** for `shootdrivems`, holding the goal heading; then back to seeking. The aim is abandoned (back to
+seeking, cooldown started) after `aimtimeout`, if the heading is lost, or if the ball is no longer held for 400 ms. At least `shootcooldown` between shots.
+Obstacle limits still apply (a rear obstacle stops the reverse phase, a front obstacle in the stop zone cuts the drive phase).
+
+Untested on the robot: whether the ball stays at the front while the robot turns and reverses, what the front sensor reads, the gyro drift over a match,
+the real rotation speed, and whether 400 ms of full speed is the right power. Test with the wheels lifted first, then with the robot restrained.

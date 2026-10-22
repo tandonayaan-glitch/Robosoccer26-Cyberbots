@@ -35,6 +35,7 @@ struct AuxState {
   uint16_t lastEdges; uint32_t lastPeriodUs;
   uint32_t dSamples, dRaw[2], dMin[2], dMax[2]; float dAvg[2];
   uint8_t level[2];                                    // 0 clear, 1 near (slow down), 2 stop zone
+  bool held; uint8_t heldCount;                        // ball held at the front sensor (debounced)
 };
 static AuxState g_aux;
 
@@ -66,10 +67,10 @@ static uint8_t avoidLevel(float raw, uint16_t slow, uint16_t stop, uint8_t prev)
 // the part of the motion that points towards that sensor is limited; the sideways part is left alone, so the robot slides along an
 // obstacle instead of stopping dead. Near: at most avoidSlowPct. Stop zone: none - unless the ball is within avoidSectorDeg of
 // that direction, then a cautious creep of avoidCautionPct, so the robot can still reach a ball that sits next to an obstacle.
-static void avoidApply(const Config& c, const uint8_t level[2], float ballDeg, float* vx, float* vy) {
+static void avoidApply(const Config& c, uint8_t mask, const uint8_t level[2], float ballDeg, float* vx, float* vy) {
   const float dirs[2] = {c.avoid0Deg, c.avoid1Deg};
   for (uint8_t i = 0; i < 2; i++) {
-    if (!((c.avoidMask >> i) & 1u) || level[i] == 0) continue;
+    if (!((mask >> i) & 1u) || level[i] == 0) continue;
     float s = sinf(dirs[i] * DEG2RAD), co = cosf(dirs[i] * DEG2RAD);
     float along = *vx * s + *vy * co;
     if (along <= 0.0f) continue;
@@ -78,6 +79,18 @@ static void avoidApply(const Config& c, const uint8_t level[2], float ballDeg, f
     if (along > cap) { *vx -= (along - cap) * s; *vy -= (along - cap) * co; }
   }
 }
+
+// Pure rule (unit tested): is the ball held? The midpoint between the "no ball" and "ball held" raw values decides, with 10 % of the span
+// as hysteresis. Either polarity works (the sign of held - clear).
+static bool holdState(float raw, uint16_t clearRaw, uint16_t heldRaw, bool prev) {
+  float span = (float)heldRaw - (float)clearRaw;
+  if (span > -50.0f && span < 50.0f) return false;
+  float dir = span > 0 ? 1.0f : -1.0f, mid = 0.5f * ((float)clearRaw + (float)heldRaw), m = 0.1f * (span < 0 ? -span : span);
+  float x = (raw - mid) * dir;
+  return prev ? (x > -m) : (x > m);
+}
+// Pin 36 carries an analog sensor (avoidance sensor 1 or the ball-held sensor): no edge interrupts there.
+static bool auxPin36Analog(const Config& c) { return (c.avoidMask & 2) || (c.holdEnable && c.holdSensor == 1); }
 
 static void auxAttachRx(bool want) {
   static bool attached = false;
@@ -90,7 +103,7 @@ static void auxEnable(bool on, uint32_t nowMs) {
   if (on) {
     pinMode(PIN_AUX_DIST, INPUT); pinMode(PIN_AUX_RX, INPUT);
     auxReset(); g_aux.on = true; g_aux.manualOff = false; g_aux.lastMs = nowMs;
-    auxAttachRx((g_cfg.avoidMask & 2) == 0);                // GPIO36 carries an analog distance sensor when bit1 is set: no edge interrupts there
+    auxAttachRx(!auxPin36Analog(g_cfg));                    // GPIO36 carries an analog sensor: no edge interrupts there
   } else {
     auxAttachRx(false);
     g_aux.on = false;
@@ -99,11 +112,11 @@ static void auxEnable(bool on, uint32_t nowMs) {
 
 // Every loop; does nothing while off, one 20 ms bookkeeping step while on.
 static void auxService(uint32_t nowMs) {
-  if (!g_aux.on && g_cfg.avoidMask && !g_aux.manualOff) auxEnable(true, nowMs);
-  if (g_aux.on) auxAttachRx((g_cfg.avoidMask & 2) == 0);   // follows a changed avoidMask
+  if (!g_aux.on && (g_cfg.avoidMask || g_cfg.holdEnable) && !g_aux.manualOff) auxEnable(true, nowMs);
+  if (g_aux.on) auxAttachRx(!auxPin36Analog(g_cfg));       // follows a changed configuration
   if (!g_aux.on || elapsedMs(nowMs, g_aux.lastMs) < AUX_WINDOW_MS) return;
   g_aux.lastMs = nowMs;
-  const bool dist1 = (g_cfg.avoidMask & 2) != 0;
+  const bool dist1 = auxPin36Analog(g_cfg);
   for (uint8_t i = 0; i < (dist1 ? 2 : 1); i++) {
     uint32_t raw = (uint32_t)analogRead(i == 0 ? PIN_AUX_DIST : PIN_AUX_RX);
     g_aux.dRaw[i] = raw;
@@ -113,6 +126,11 @@ static void auxService(uint32_t nowMs) {
     uint16_t slow = i == 0 ? g_cfg.avoid0Slow : g_cfg.avoid1Slow, stop = i == 0 ? g_cfg.avoid0Stop : g_cfg.avoid1Stop;
     g_aux.level[i] = ((g_cfg.avoidMask >> i) & 1u) ? avoidLevel(g_aux.dAvg[i], slow, stop, g_aux.level[i]) : 0;
   }
+  if (g_cfg.holdEnable) {                                // ball held at the front sensor, debounced over 3 samples (60 ms)
+    bool h = holdState(g_aux.dAvg[g_cfg.holdSensor & 1], g_cfg.holdClearRaw, g_cfg.holdHeldRaw, g_aux.held);
+    if (h == g_aux.held) g_aux.heldCount = 0;
+    else if (++g_aux.heldCount >= 3) { g_aux.held = h; g_aux.heldCount = 0; }
+  } else { g_aux.held = false; g_aux.heldCount = 0; }
   g_aux.dSamples++;
   if (dist1) { g_auxEdges = 0; return; }
   g_auxLevelActive = (AUX_RX_LEVEL() == 0);     // resynchronise (an edge could have been missed while the pin was disabled)
@@ -128,9 +146,11 @@ static void auxService(uint32_t nowMs) {
 // Called from the approach: limits the commanded translation near obstacles. No-op unless avoidance is on. Stale sensor data
 // (loop stalled, aux switched off by a reset race) is treated as "near", never as "clear".
 static void avoidForNav(const Config& c, uint32_t nowMs, float ballDeg, float* vx, float* vy) {
-  if (!c.avoidMask || g_aux.manualOff) return;
+  uint8_t mask = c.avoidMask;                             // the ball-held sensor must not count as an obstacle (it sees the ball itself)
+  if (c.holdEnable) mask &= (uint8_t)~(1u << (c.holdSensor & 1));
+  if (!mask || g_aux.manualOff) return;
   uint8_t lv[2] = {g_aux.level[0], g_aux.level[1]};
-  if (!g_aux.on || elapsedMs(nowMs, g_aux.lastMs) > 100) { lv[0] = (c.avoidMask & 1) ? 1 : 0; lv[1] = (c.avoidMask & 2) ? 1 : 0; }
-  avoidApply(c, lv, ballDeg, vx, vy);
+  if (!g_aux.on || elapsedMs(nowMs, g_aux.lastMs) > 100) { lv[0] = (mask & 1) ? 1 : 0; lv[1] = (mask & 2) ? 1 : 0; }
+  avoidApply(c, mask, lv, ballDeg, vx, vy);
 }
 

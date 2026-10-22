@@ -19,14 +19,34 @@ static bool g_centered = false;
 static float g_lastBearing = 0;
 static uint32_t g_lastNavTick = 0;
 
-// Goal sighting. No goal sensor exists yet: ':goal [ms]' (or a future detector calling goalMarkSeen) marks the goal as in view for a while.
-static uint32_t g_goalSeenUntilMs = 0;
-static bool g_goalSeenSet = false;
-static void goalMarkSeen(uint32_t nowMs, uint32_t forMs) { g_goalSeenUntilMs = nowMs + forMs; g_goalSeenSet = true; }
-static bool goalVisible(uint32_t nowMs) { return g_goalSeenSet && !deadlineReached(nowMs, g_goalSeenUntilMs); }
-static uint32_t g_shootAlignSinceMs = 0, g_shootStartMs = 0, g_lastShotMs = 0;
-static uint8_t g_shootPhase = 0;                 // 0 reverse, 1 drive
+// Goal heading. The robot is placed pointing at the goal; goalRegisterMs after power-on (gyro calibrated, robot still) its heading is registered
+// as "straight at the goal". The registered heading drifts with the gyro; ':goal set' registers it again.
+static float g_goalYaw = 0;
+static bool g_goalRefSet = false, g_goalWaitNoted = false, g_goalAutoOff = false;   // g_goalAutoOff: ':goal clear' stops the automatic registration
+static uint32_t g_shootAlignSinceMs = 0, g_shootStartMs = 0, g_lastShotMs = 0, g_heldLostSinceMs = 0;
+static uint8_t g_shootPhase = 0;                 // 0 aim, 1 reverse, 2 drive
 static bool g_shotDone = false;
+
+// Half-angle (deg) inside which a shot still scores: the ball (centre) must pass within (goal width - ball diameter) / 2 of the goal centre
+// at the goal line. Clamped to 2..20 deg. The shot is fired at half of it, as margin for gyro drift and ball deviation.
+static float shootAimTolDeg(const Config& c) {
+  float half = ((float)c.goalWidthMm - (float)c.ballDiaMm) * 0.5f;
+  float deg = atanf(half / (float)c.goalDistMm) * RAD2DEG;
+  return clampf(deg, 2.0f, 20.0f);
+}
+
+static bool navGoalRegister(const Config& c, uint32_t now) {
+  if (!imuHeadingUsable(c, now)) return false;
+  g_goalYaw = g_imu.yaw; g_goalRefSet = true; g_goalAutoOff = false;
+  return true;
+}
+
+// Every loop: registers the goal heading once, goalRegisterMs after power-on, as soon as the gyro is calibrated and delivering.
+static void goalService(const Config& c, uint32_t now) {
+  if (g_goalRefSet || g_goalAutoOff || now < c.goalRegisterMs) return;
+  if (navGoalRegister(c, now)) say("NAV", "goal heading registered at %.1f deg of gyro yaw (%lu ms after power-on); aim window +-%.1f deg at %u mm, goal %u mm wide", (double)g_goalYaw, UL(now), (double)shootAimTolDeg(c) * 0.5, (unsigned)c.goalDistMm, (unsigned)c.goalWidthMm);
+  else if (!g_goalWaitNoted) { g_goalWaitNoted = true; say("WARN", "goal heading NOT registered yet: gyro not calibrated/usable (keep the robot still); it keeps trying"); }
+}
 
 struct MotorTest {
   uint8_t state;       // 0 idle, 1 armed (needs :confirm), 2 forward/step, 3 pause, 4 reverse, 5 settle
@@ -163,17 +183,16 @@ static void navApproach(const Config& c, uint32_t now) {
   motorsDrive(c, vx, vy, w, c.maxAuto);
 }
 
-// Start a shot when the goal is in view and the ball has been centred for a moment. Returns true when the state changed.
+// Start a shot when the ball has been held at the front sensor for shootHoldMs and the goal heading is registered. Returns true when the state changed.
 static bool navShootCheck(const Config& c, uint32_t now) {
-  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL) { g_shootAlignSinceMs = 0; return false; }
-  bool aligned = g_ball.valid && !g_ball.ambiguous && absf(g_ball.bearingDeg) <= (float)c.shootAlignDeg;
-  if (!aligned) { g_shootAlignSinceMs = 0; return false; }
+  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || !c.holdEnable || !g_goalRefSet || !imuHeadingUsable(c, now) || !g_aux.on || !g_aux.held) {
+    g_shootAlignSinceMs = 0; return false;
+  }
   if (!g_shootAlignSinceMs) g_shootAlignSinceMs = now ? now : 1u;
-  if (!goalVisible(now) || elapsedMs(now, g_shootAlignSinceMs) < c.shootHoldMs) return false;
+  if (elapsedMs(now, g_shootAlignSinceMs) < c.shootHoldMs) return false;
   if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
-  g_shootPhase = 0; g_shootStartMs = now; g_shootAlignSinceMs = 0;
-  if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
-  navSetState(NAV_SHOOT, "goal in view, ball centred: reverse, then full speed forward");
+  g_shootPhase = 0; g_shootStartMs = now; g_shootAlignSinceMs = 0; g_heldLostSinceMs = 0;
+  navSetState(NAV_SHOOT, "ball held: aim at the goal heading, reverse, then full speed forward");
   return true;
 }
 
@@ -194,6 +213,7 @@ static void navTick(const Config& c, uint32_t now) {
     if (g_autoEnabled && g_navState == NAV_APPROACH) navMarkLoss("approach");
   }
   if (g_autoEnabled && (g_cond == COND_SAFE_STOP || drivetrainFault())) navStop("safe stop");
+  if (g_navState == NAV_SEEK || g_navState == NAV_APPROACH || g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE || g_navState == NAV_WAIT) navShootCheck(c, now);
 
   switch (g_navState) {
     case NAV_IDLE:
@@ -214,22 +234,39 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_APPROACH:
       if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch("ball lost", true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
-      else if (!navShootCheck(c, now)) navApproach(c, now);
+      else navApproach(c, now);
       break;
 
     case NAV_SHOOT: {
       if (!g_autoEnabled) break;
-      float w = 0, vx = 0, vy;
-      navHeading(c, now, &w);                                      // keep the heading it had when the shot began
+      float w = 0, vx = 0, vy = 0;
       float sc = navSensorScale(c);
       uint32_t el = elapsedMs(now, g_shootStartMs);
-      if (g_shootPhase == 0) {
+      if (g_shootPhase == 0) {                                     // aim: rotate in place until the heading is inside the aim window
+        float err = imuHeadingUsable(c, now) ? angDiffDeg(g_goalYaw, g_imu.yaw) : NAN;
+        if (!g_aux.held) { if (!g_heldLostSinceMs) g_heldLostSinceMs = now ? now : 1u; } else g_heldLostSinceMs = 0;
+        if (isnan(err) || el > c.aimTimeoutMs || (g_heldLostSinceMs && elapsedMs(now, g_heldLostSinceMs) > 400)) {
+          g_lastShotMs = now; g_shotDone = true;
+          motorsDrive(c, 0, 0, 0, c.maxAuto);
+          navSetState(NAV_SEEK, isnan(err) ? "shot cancelled: heading lost" : (g_heldLostSinceMs ? "shot cancelled: ball no longer held" : "shot cancelled: aim timeout"));
+          break;
+        }
+        if (absf(err) <= 0.5f * shootAimTolDeg(c)) { g_shootPhase = 1; g_shootStartMs = now; el = 0; }
+        else w = (err > 0 ? 1.0f : -1.0f) * clampf(0.02f * absf(err), 0.12f, c.aimSpeed) * sc;
+      }
+      if (g_shootPhase == 1) {                                     // reverse a little (the heading was just aligned: hold it)
+        float err = angDiffDeg(g_goalYaw, g_imu.yaw);
+        w = absf(err) < c.hdgDeadbandDeg ? 0.0f : clampf(c.hdgKp * err, -c.hdgMaxRot, c.hdgMaxRot);
         vy = -c.shootBackSpeed * sc;
-        if (el >= c.shootBackMs) { g_shootPhase = 1; g_shootStartMs = now; el = 0; vy = sc; }
-      } else vy = sc;
+        if (el >= c.shootBackMs) { g_shootPhase = 2; g_shootStartMs = now; el = 0; vy = sc; }
+      } else if (g_shootPhase == 2) {                              // full speed straight ahead along the goal heading
+        float err = angDiffDeg(g_goalYaw, g_imu.yaw);
+        w = absf(err) < c.hdgDeadbandDeg ? 0.0f : clampf(c.hdgKp * err, -c.hdgMaxRot, c.hdgMaxRot);
+        vy = sc;
+      }
       avoidForNav(c, now, NAN, &vx, &vy);                          // obstacle limits still apply (the ball is not exempt here)
       motorsDrive(c, vx, vy, w, c.maxAuto);
-      if (g_shootPhase == 1 && el >= c.shootDriveMs) {
+      if (g_shootPhase == 2 && el >= c.shootDriveMs) {
         g_lastShotMs = now; g_shotDone = true; g_stats.shots++;
         navSetState(NAV_SEEK, "shot finished");
       }

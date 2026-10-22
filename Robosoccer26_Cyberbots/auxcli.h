@@ -52,3 +52,29 @@ static void cmdAvoid(Config& c, const char* a1, const char* a2, const char* a3, 
   }
   say("WARN", "usage: :avoid | :avoid cal <0|1> <slow|stop> | :avoid on <0|1> | :avoid off <0|1>");
 }
+
+// ':hold' status | cal clear|held | on | off : the front IR sensor that tells whether the ball is held (needed for the shot)
+static void cmdHold(Config& c, const char* a1, const char* a2, uint32_t nowMs) {
+  (void)nowMs;
+  uint8_t i = c.holdSensor & 1;
+  if (!a1) {
+    say("INFO", "ball-held sensor %s: GPIO%u, clear raw %u, held raw %u, raw now %.0f, state %s", c.holdEnable ? "ON" : "OFF", (unsigned)(i == 0 ? PIN_AUX_DIST : PIN_AUX_RX),
+        (unsigned)c.holdClearRaw, (unsigned)c.holdHeldRaw, (double)g_aux.dAvg[i], g_aux.held ? "BALL HELD" : "no ball");
+    return;
+  }
+  if (!strcmp(a1, "cal") && a2 && (!strcmp(a2, "clear") || !strcmp(a2, "held"))) {
+    if (!g_aux.on || g_aux.dSamples == 0) { say("WARN", "hold cal: ':aux on' first (and make sure the sensor is wired); GPIO36 as the sensor needs ':set holdsensor 1' first"); return; }
+    uint16_t v = (uint16_t)(g_aux.dAvg[i] + 0.5f);
+    if (!strcmp(a2, "clear")) c.holdClearRaw = v; else c.holdHeldRaw = v;
+    say("INFO", "hold %s raw = %u (sensor %u). Set both (ball absent, then ball in the capture position), then ':hold on' and ':save'", a2, (unsigned)v, (unsigned)i);
+    return;
+  }
+  if (!strcmp(a1, "on")) {
+    if ((c.holdHeldRaw > c.holdClearRaw ? c.holdHeldRaw - c.holdClearRaw : c.holdClearRaw - c.holdHeldRaw) < 50) { say("WARN", "hold on: not calibrated (clear and held raw must differ by >= 50): ':hold cal clear' then ':hold cal held'"); return; }
+    c.holdEnable = 1; auxEnable(true, nowMs);
+    say("INFO", "ball-held sensor ON (sensor %u). It no longer counts as an obstacle sensor. ':save' keeps it.", (unsigned)i);
+    return;
+  }
+  if (!strcmp(a1, "off")) { c.holdEnable = 0; say("INFO", "ball-held sensor OFF (no shot without it)"); return; }
+  say("WARN", "usage: :hold | :hold cal <clear|held> | :hold on | :hold off");
+}

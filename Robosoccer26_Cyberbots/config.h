@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 10
+#define CFG_VERSION 11
 
 // Per-IR-channel calibration record (CD74HC4067 channel == array index).
 struct ChCfg {
@@ -104,7 +104,18 @@ struct Config {
   uint8_t avoidCautionPct;       // obstacle in the stop zone but the BALL is in that direction: creep toward it at this %
   uint8_t avoidSectorDeg;        // the ball counts as "in that direction" within +- this angle of the sensor's direction
 
-  // ---- shot: reverse a little, then drive forward at full speed (needs a goal sighting: ':goal' for now, no goal sensor exists yet) ----
+  // ---- ball held (one IR sensor at the front, analog) and the goal heading registered by the gyro after power-on ----
+  uint8_t holdEnable;            // 1 = the sensor below tells whether the ball is held at the front (needed for the shot)
+  uint8_t holdSensor;            // 0 = GPIO35, 1 = GPIO36
+  uint16_t holdClearRaw, holdHeldRaw;   // raw ADC values with no ball and with the ball held (':hold cal'); must differ by >= 50
+  uint16_t goalRegisterMs;       // the robot's heading at this time after power-on is registered as "straight at the goal"
+  uint16_t goalWidthMm;          // inner width of the goal (RoboCupJunior: 450 mm in some rule sets, 600 mm in others: check yours)
+  uint16_t goalDistMm;           // expected distance from the shooting spot to the goal line (operator estimate)
+  uint8_t ballDiaMm;             // ball diameter (golf ball ~43 mm)
+  float aimSpeed;                // rotation speed while aiming, 0..1 of full
+  uint16_t aimTimeoutMs;         // give up aiming after this long
+
+  // ---- shot: aim at the registered goal heading, reverse a little, then drive forward at full speed ----
   uint8_t shootEnable;           // 0 = never shoot (default)
   uint16_t shootBackMs;          // reverse phase length
   float shootBackSpeed;          // reverse speed, 0..1 of full
@@ -206,6 +217,16 @@ static const ParamDef PARAMS[] = {
   PD("avoidslowpct", PT_U8, avoidSlowPct, 5, 100),
   PD("avoidcaution", PT_U8, avoidCautionPct, 5, 100),
   PD("avoidsector", PT_U8, avoidSectorDeg, 10, 90),
+  PD("holdenable", PT_U8, holdEnable, 0, 1),
+  PD("holdsensor", PT_U8, holdSensor, 0, 1),
+  PD("holdclear", PT_U16, holdClearRaw, 0, 4095),
+  PD("holdheld", PT_U16, holdHeldRaw, 0, 4095),
+  PD("goalregms", PT_U16, goalRegisterMs, 1000, 30000),
+  PD("goalwidth", PT_U16, goalWidthMm, 200, 1000),
+  PD("goaldist", PT_U16, goalDistMm, 200, 3000),
+  PD("balldia", PT_U8, ballDiaMm, 20, 80),
+  PD("aimspeed", PT_F32, aimSpeed, 0.1, 0.6),
+  PD("aimtimeout", PT_U16, aimTimeoutMs, 500, 10000),
   PD("shootenable", PT_U8, shootEnable, 0, 1),
   PD("shootbackms", PT_U16, shootBackMs, 50, 1500),
   PD("shootbackspeed", PT_F32, shootBackSpeed, 0.1, 1.0),
@@ -325,6 +346,8 @@ static void cfgDefaults(Config& c) {
   c.avoid0Deg = 0.0f; c.avoid1Deg = 180.0f;
   c.avoid0Slow = c.avoid0Stop = c.avoid1Slow = c.avoid1Stop = 0;
   c.avoidSlowPct = 40; c.avoidCautionPct = 25; c.avoidSectorDeg = 45;
+  c.holdEnable = 0; c.holdSensor = 0; c.holdClearRaw = 0; c.holdHeldRaw = 0;
+  c.goalRegisterMs = 5000; c.goalWidthMm = 450; c.goalDistMm = 1000; c.ballDiaMm = 43; c.aimSpeed = 0.3f; c.aimTimeoutMs = 3000;
   c.shootEnable = 0; c.shootBackMs = 250; c.shootBackSpeed = 0.5f; c.shootDriveMs = 400; c.shootAlignDeg = 12; c.shootHoldMs = 300; c.shootCooldownMs = 3000;
   c.snapshotMs = 250;
   c.detailMs = 0;
@@ -388,6 +411,8 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
   if ((c.avoidMask & 1) && (c.avoid0Slow > c.avoid0Stop ? c.avoid0Slow - c.avoid0Stop : c.avoid0Stop - c.avoid0Slow) < 50) { c.avoidMask &= (uint8_t)~1u; bad++; repNote(rep, repN, "avoid0 thresholds"); }
   if ((c.avoidMask & 2) && (c.avoid1Slow > c.avoid1Stop ? c.avoid1Slow - c.avoid1Stop : c.avoid1Stop - c.avoid1Slow) < 50) { c.avoidMask &= (uint8_t)~2u; bad++; repNote(rep, repN, "avoid1 thresholds"); }
+  if (c.holdEnable && (c.holdHeldRaw > c.holdClearRaw ? c.holdHeldRaw - c.holdClearRaw : c.holdClearRaw - c.holdHeldRaw) < 50) { c.holdEnable = 0; bad++; repNote(rep, repN, "hold thresholds"); }
+  if (c.ballDiaMm * 2 >= c.goalWidthMm) { c.ballDiaMm = d.ballDiaMm; c.goalWidthMm = d.goalWidthMm; bad++; repNote(rep, repN, "balldia/goalwidth"); }
   if (c.avoidCautionPct > c.avoidSlowPct) { c.avoidCautionPct = d.avoidCautionPct; c.avoidSlowPct = d.avoidSlowPct; bad++; repNote(rep, repN, "avoidcaution/slowpct"); }
   if (c.engine == 1) { c.engine = d.engine; bad++; repNote(rep, repN, "engine(1 removed)"); }
   if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }

@@ -2297,15 +2297,15 @@ static void t_avoid_functions() {
   c.avoidMask = 3; c.avoid0Deg = 0; c.avoid1Deg = 180;
   uint8_t clear[2] = {0, 0}, near0[2] = {1, 0}, stop0[2] = {2, 0}, stop1[2] = {0, 2};
   float vx = 0, vy = 1;
-  avoidApply(c, clear, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
-  vx = 0; vy = 1; avoidApply(c, near0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.40, 1e-4);          // slow: 40 %
-  vx = 0; vy = 1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);          // stop zone, ball unknown: no forward motion
-  vx = 0; vy = 1; avoidApply(c, stop0, 20.0f, &vx, &vy); CHECK_NEAR(vy, 0.25, 1e-4);       // ball within 45 deg of the sensor: cautious creep (25 %)
-  vx = 0; vy = 1; avoidApply(c, stop0, 90.0f, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);        // ball off to the side: not exempt
-  vx = 0.6f; vy = 0.8f; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vx, 0.6, 1e-4); CHECK_NEAR(vy, 0.0, 1e-4);   // the sideways part survives: slide along it
-  vx = 0; vy = -1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, -1.0, 1e-4);        // backing away from a front obstacle is free
-  vx = 0; vy = -1; avoidApply(c, stop1, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);         // rear sensor limits reversing
-  c.avoidMask = 0; vx = 0; vy = 1; avoidApply(c, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);   // sensor not in use: ignored
+  avoidApply(c, c.avoidMask, clear, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
+  vx = 0; vy = 1; avoidApply(c, c.avoidMask, near0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.40, 1e-4);          // slow: 40 %
+  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);          // stop zone, ball unknown: no forward motion
+  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, 20.0f, &vx, &vy); CHECK_NEAR(vy, 0.25, 1e-4);       // ball within 45 deg of the sensor: cautious creep (25 %)
+  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, 90.0f, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);        // ball off to the side: not exempt
+  vx = 0.6f; vy = 0.8f; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vx, 0.6, 1e-4); CHECK_NEAR(vy, 0.0, 1e-4);   // the sideways part survives: slide along it
+  vx = 0; vy = -1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, -1.0, 1e-4);        // backing away from a front obstacle is free
+  vx = 0; vy = -1; avoidApply(c, c.avoidMask, stop1, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);         // rear sensor limits reversing
+  c.avoidMask = 0; vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);   // sensor not in use: ignored
   CHECK(cfgValidate(c, nullptr, 0) == 0);
   c.avoidMask = 1; c.avoid0Slow = 100; c.avoid0Stop = 120;                                  // threshold span below 50: avoidance is switched off by validation
   char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.avoidMask == 0);
@@ -2351,58 +2351,143 @@ static void t_avoid_cli() {
   send(":avoid on 1\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.avoidMask == 1);
   send(":avoid bogus\n"); simRun(20); CHECK(outHas("usage: :avoid"));
 }
-static void t_shoot_sequence() {
+static void holdSetup(bool armed = true) {
   e2Boot();
-  g_cfg.shootEnable = 1; g_cfg.shootBackMs = 250; g_cfg.shootDriveMs = 400; g_cfg.shootHoldMs = 300;
+  g_cfg.holdEnable = armed ? 1 : 0; g_cfg.holdSensor = 0; g_cfg.holdClearRaw = 500; g_cfg.holdHeldRaw = 3000;
+  g_cfg.shootEnable = 1; g_cfg.shootBackMs = 250; g_cfg.shootDriveMs = 400; g_cfg.shootHoldMs = 200;
+  g_mockAnalog[35] = 500;
+  send(":aux on\n"); simRun(200);
+}
+// Emulates the robot turning toward the goal heading when the aim phase commands it (the mock has no physics).
+static void emulateAimRotation() {
+  if (g_navState == NAV_SHOOT && g_shootPhase == 0) { float err = angDiffDeg(g_goalYaw, g_imu.yaw); g_mpu.gz = absf(err) < 0.5f ? 0.0f : (err < 0 ? 30.0f : -30.0f); }
+  else g_mpu.gz = 0.0f;
+}
+static void t_goal_register_and_aim_window() {
+  bootCal();
+  simRun(200);
+  CHECK(g_goalRefSet);                                        // boot takes longer than goalregms: registered as soon as the gyro was usable
+  Serial.out.clear(); send(":goal\n"); simRun(20);
+  CHECK(outHas("goal heading") && outHas("aim window"));
+  send(":goal clear\n"); simRun(20); CHECK(!g_goalRefSet);
+  send(":goal set\n"); simRun(20); CHECK(g_goalRefSet);
+  send(":goal bogus\n"); simRun(20); CHECK(outHas("usage: :goal"));
+  Config c; cfgDefaults(c);                                   // 450 mm goal, 43 mm ball, 1000 mm away
+  CHECK_NEAR(shootAimTolDeg(c), 11.5, 0.2);
+  c.goalWidthMm = 600; CHECK_NEAR(shootAimTolDeg(c), 15.5, 0.2);
+  c.goalDistMm = 3000; CHECK_NEAR(shootAimTolDeg(c), 5.3, 0.2);
+  c.goalDistMm = 200; CHECK_NEAR(shootAimTolDeg(c), 20.0, 1e-4);   // clamped
+  c.goalDistMm = 30000; CHECK(shootAimTolDeg(c) >= 2.0f);
+}
+static void t_hold_functions() {
+  CHECK(!holdState(600, 500, 3000, false) && holdState(2100, 500, 3000, false) && holdState(3000, 500, 3000, false));
+  CHECK(holdState(1700, 500, 3000, true) && !holdState(1500, 500, 3000, true));            // hysteresis around the midpoint 1750 (+-250)
+  CHECK(!holdState(1900, 500, 3000, false) && holdState(2100, 500, 3000, false));
+  CHECK(!holdState(2000, 3000, 500, false) && holdState(1000, 3000, 500, false));          // falling raw = ball held (other polarity)
+  CHECK(!holdState(4000, 1000, 1020, false));                                               // not calibrated
+  Config c; cfgDefaults(c); c.holdEnable = 1; c.holdClearRaw = 100; c.holdHeldRaw = 120;
+  char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.holdEnable == 0);
+}
+static void t_hold_cli() {
+  bootCal();
+  send(":hold on\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.holdEnable == 0);
+  send(":hold cal clear\n"); simRun(20); CHECK(outHas("':aux on' first"));
+  g_mockAnalog[35] = 600; send(":aux on\n"); simRun(300);
+  send(":hold cal clear\n"); simRun(20); CHECK(g_cfg.holdClearRaw == 600);
+  g_mockAnalog[35] = 3100; simRun(400);
+  send(":hold cal held\n"); simRun(20); CHECK(g_cfg.holdHeldRaw == 3100);
+  send(":hold on\n"); simRun(20); CHECK(g_cfg.holdEnable == 1);
+  simRun(200);
+  Serial.out.clear(); send(":hold\n"); simRun(20); CHECK(outHas("BALL HELD"));
+  CHECK(g_aux.held);
+  g_mockAnalog[35] = 600; simRun(400); CHECK(!g_aux.held);
+  send(":hold off\n"); simRun(20); CHECK(g_cfg.holdEnable == 0);
+  send(":hold bogus\n"); simRun(20); CHECK(outHas("usage: :hold"));
+}
+static void t_shoot_sequence() {
+  holdSetup();
   ballAt(0, 12.0f);
   startAuto(); simRun(1500);
-  CHECK(g_navState == NAV_APPROACH);                         // no goal in view: keeps approaching, no shot
-  CHECK(g_stats.shots == 0);
-  send(":goal 2000\n"); simRun(100);
-  CHECK(outHas("SIMULATED"));
-  bool sawBack = false, sawDrive = false; int backDir = 0, driveDir = 0, maxDrive = 0;
-  uint64_t end = g_mockUs + 1500000ULL;
+  CHECK(g_goalRefSet && g_stats.shots == 0);                  // ball not held: no shot
+  // knock the robot 40 degrees off the goal heading (clockwise), then hold the ball
+  g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);
+  CHECK(absf(angDiffDeg(g_goalYaw, g_imu.yaw)) > 25.0f);
+  g_mockAnalog[35] = 3000;
+  bool aimed = false, sawBack = false, sawDrive = false; int rotA = 0, backDir = 0, driveDir = 0, maxDrive = 0;
+  uint64_t end = g_mockUs + 6000000ULL;
   while (g_mockUs < end && g_stats.shots == 0) {
+    emulateAimRotation();
     loop(); mockAdvance(50);
     if (g_navState == NAV_SHOOT) {
-      if (g_shootPhase == 0 && g_pwmDuty[WHEEL_PINS[0].en] > 0) { sawBack = true; backDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); }
-      if (g_shootPhase == 1) { sawDrive = true; driveDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); maxDrive = std::max(maxDrive, maxWheelDuty()); }
+      if (g_shootPhase == 0 && g_pwmDuty[WHEEL_PINS[0].en] > 0) { aimed = true; rotA = wheelDir(W_FL) * wheelDir(W_FR); }
+      if (g_shootPhase == 1 && maxWheelDuty() > 0) { sawBack = true; backDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); }
+      if (g_shootPhase == 2) { sawDrive = true; driveDir = wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR); maxDrive = std::max(maxDrive, maxWheelDuty()); }
     }
   }
+  g_mpu.gz = 0.0f;
+  CHECK(aimed && rotA < 0);                                   // aimed by rotating in place (FL and FR turn opposite ways)
   CHECK(sawBack && sawDrive);
-  CHECK(backDir == -driveDir && driveDir != 0);                // reverse, then the opposite direction
-  CHECK(maxDrive >= (int)(g_cfg.maxAuto * 0.9f));              // the drive phase reaches (nearly) full speed
-  CHECK(g_stats.shots == 1);
-  CHECK(g_navState != NAV_SHOOT);
-  // cooldown: a second sighting right away does not start another shot
-  send(":goal 2000\n"); simRun(1500);
+  CHECK(backDir == -driveDir && driveDir != 0);               // reverse, then the opposite direction
+  CHECK(maxDrive >= (int)(g_cfg.maxAuto * 0.9f));             // the drive phase reaches (nearly) full speed
+  CHECK(g_stats.shots == 1 && g_navState != NAV_SHOOT);
+  CHECK(absf(angDiffDeg(g_goalYaw, g_imu.yaw)) <= 0.5f * shootAimTolDeg(g_cfg) + 1.0f);   // fired inside the aim window
+  // cooldown: still holding the ball, no second shot right away
+  simRun(1500);
   CHECK(g_stats.shots == 1);
 }
-static void t_shoot_off_by_default() {
-  e2Boot();
-  CHECK(g_cfg.shootEnable == 0);
+static void t_shoot_preconditions() {
+  holdSetup();
+  g_mockAnalog[35] = 3000; simRun(300);
   ballAt(0, 12.0f);
-  startAuto(); simRun(800);
-  send(":goal 3000\n"); simRun(1500);
-  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // a goal sighting alone never starts a shot
+  startAuto();
+  g_cfg.shootEnable = 0; simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // shot switched off: holding the ball alone never shoots
+  g_cfg.shootEnable = 1; send(":goal clear\n"); simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // no registered goal heading: no shot
   send("s"); simRun(100);
   CHECK(!g_autoEnabled);
 }
-static void t_shoot_blocked_behind() {
-  e2Boot();
-  g_cfg.shootEnable = 1; g_cfg.avoidMask = 2; g_cfg.avoid1Slow = 1500; g_cfg.avoid1Stop = 2500;   // rear sensor (GPIO36) in use
-  g_mockAnalog[36] = 3000;                                    // something right behind the robot
-  send(":aux on\n"); simRun(200);
+static void t_shoot_aim_timeout_and_ball_lost() {
+  holdSetup();
   ballAt(0, 12.0f);
-  startAuto(); simRun(1500);
-  send(":goal 3000\n");
+  startAuto(); simRun(1200);
+  g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);
+  g_mockAnalog[35] = 3000;                                    // held, but the emulated robot never turns: the aim must time out
+  uint64_t end = g_mockUs + 6000000ULL; bool entered = false;
+  while (g_mockUs < end && g_stats.shots == 0) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (entered && g_navState != NAV_SHOOT) break; }
+  CHECK(entered && g_navState != NAV_SHOOT && g_stats.shots == 0);
+  // ball taken away during the aim: cancelled well before the timeout
+  g_cfg.shootCooldownMs = 500; simRun(700);
+  g_mockAnalog[35] = 500; simRun(400);
+  g_mockAnalog[35] = 3000; simRun(400);                       // held again, aim starts
+  g_mockAnalog[35] = 500;
+  uint64_t t0 = g_mockUs; bool inShot = false;
+  while (g_mockUs < t0 + 2000000ULL) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) inShot = true; if (inShot && g_navState != NAV_SHOOT) break; }
+  CHECK(g_navState != NAV_SHOOT);
+}
+static void t_shoot_blocked_behind() {
+  holdSetup();
+  g_cfg.avoidMask = 2; g_cfg.avoid1Slow = 1500; g_cfg.avoid1Stop = 2500;   // rear sensor (GPIO36) in use
+  g_mockAnalog[36] = 3000;                                    // something right behind the robot
+  simRun(300);
+  ballAt(0, 12.0f);
+  startAuto(); simRun(1200);
+  g_mockAnalog[35] = 3000;
   bool backed = false, entered = false;
-  uint64_t end = g_mockUs + 1000000ULL;
-  while (g_mockUs < end) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (g_navState == NAV_SHOOT && g_shootPhase == 0 && wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR) < 0 && maxWheelDuty() > 0) backed = true; }
+  uint64_t end = g_mockUs + 1500000ULL;
+  while (g_mockUs < end) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (g_navState == NAV_SHOOT && g_shootPhase == 1 && wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR) < 0 && maxWheelDuty() > 0) backed = true; }
   CHECK(entered);
   CHECK(!backed);                                             // the reverse phase did not move the robot into the obstacle
 }
-
+static void t_hold_sensor_is_not_an_obstacle() {
+  holdSetup();
+  g_cfg.avoidMask = 1; g_cfg.avoid0Slow = 1500; g_cfg.avoid0Stop = 2500;   // the same sensor, also configured for avoidance
+  g_mockAnalog[35] = 3000; simRun(300);
+  float vx = 0, vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy);
+  CHECK_NEAR(vy, 1.0, 1e-4);                                  // the ball-held sensor does not limit the motion
+  g_cfg.holdEnable = 0; vx = 0; vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy);
+  CHECK(vy < 0.5f);                                           // without the hold role it would
+}
 static void t_e2_phantom_exposure() {
   // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
   // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
@@ -2437,7 +2522,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_shoot_sequence), T(t_shoot_off_by_default), T(t_shoot_blocked_behind), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_goal_register_and_aim_window), T(t_hold_functions), T(t_hold_cli), T(t_shoot_sequence), T(t_shoot_preconditions), T(t_shoot_aim_timeout_and_ball_lost), T(t_shoot_blocked_behind), T(t_hold_sensor_is_not_an_obstacle), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {

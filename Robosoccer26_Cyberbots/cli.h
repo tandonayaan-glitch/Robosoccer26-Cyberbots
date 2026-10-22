@@ -23,7 +23,7 @@ static void printHelp() {
   say("INFO", "i : IR snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :irchar <n> [s] [period_us] | :aux [on|off|reset] | :avoid [cal <0|1> <slow|stop> | on|off <0|1>] | :goal [ms] | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ch <n> [<en|pol|trust|bear|tilt> <v>] | :chreset <n> | :learn <deg> | :verify <n> | :irchar <n> [s] [period_us] | :aux [on|off|reset] | :avoid [cal <0|1> <slow|stop> | on|off <0|1>] | :goal [set|clear] | :hold [cal clear|held | on | off] | :cov | :irgate <off|auto|min max> | :irprofile <fast|balanced|safe> | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -232,10 +232,16 @@ static void cliExecLine(char* line, uint32_t now) {
   else if (!strcmp(cmd, "aux")) cmdAux(t[1], now);
   else if (!strcmp(cmd, "avoid")) cmdAvoid(c, t[1], t[2], t[3], now);
   else if (!strcmp(cmd, "goal")) {
-    float ms = 500;
-    if (t[1] && (!parseF(t[1], &ms) || ms < 50 || ms > 5000)) say("WARN", "usage: :goal [ms 50..5000]");
-    else { goalMarkSeen(now, (uint32_t)ms); say("INFO", "goal marked as in view for %.0f ms (SIMULATED sighting: no goal sensor exists yet). A shot starts only if shootenable=1, autonomy is on and the ball is centred.", (double)ms); }
+    if (t[1] && !strcmp(t[1], "set")) {
+      if (navGoalRegister(c, now)) say("INFO", "goal heading registered NOW at %.1f deg of gyro yaw (the robot must be pointing at the goal, standing still)", (double)g_goalYaw);
+      else say("WARN", "goal heading not registered: the gyro is not calibrated/usable");
+    } else if (t[1] && !strcmp(t[1], "clear")) { g_goalRefSet = false; g_goalWaitNoted = false; g_goalAutoOff = true; say("INFO", "goal heading cleared; it stays unregistered until ':goal set' (no shot without it)"); }
+    else if (t[1]) say("WARN", "usage: :goal [set|clear]");
+    else if (!g_goalRefSet) say("INFO", "goal heading not registered (registers %u ms after power-on; ':goal set' does it now)", (unsigned)c.goalRegisterMs);
+    else say("INFO", "goal heading %.1f deg (gyro yaw), current yaw %.1f, error %.1f deg; aim window +-%.1f deg (goal %u mm wide, %u mm away, ball %u mm); fires at half of it",
+             (double)g_goalYaw, (double)g_imu.yaw, (double)angDiffDeg(g_goalYaw, g_imu.yaw), (double)shootAimTolDeg(c), (unsigned)c.goalWidthMm, (unsigned)c.goalDistMm, (unsigned)c.ballDiaMm);
   }
+  else if (!strcmp(cmd, "hold")) cmdHold(c, t[1], t[2], now);
   else if (!strcmp(cmd, "zero")) { imuZeroYaw(); g_refYaw = 0; say("INFO", "heading reference zeroed"); }
   else if (!strcmp(cmd, "gcal")) {
     if (!motorsAllZero()) say("WARN", "gyro calibration refused: motors are not stopped");

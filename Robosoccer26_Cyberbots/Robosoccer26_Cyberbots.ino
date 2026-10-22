@@ -154,6 +154,7 @@ void loop() {
   cliPoll(now);
   irService(g_cfg, now);
   auxService(now);
+  goalService(g_cfg, now);
   imuUpdate(g_cfg, now, motorsAllZero() && elapsedMs(now, g_motorsStoppedSinceMs) > 1000);
 
   if (elapsedMs(now, g_lastHealthMs) >= 50) {      // 20 Hz health monitor
