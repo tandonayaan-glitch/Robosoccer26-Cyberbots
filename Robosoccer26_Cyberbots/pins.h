@@ -1,6 +1,6 @@
 // pins.h - fixed hardware map for the ARDUINO MEGA 2560 (ATmega2560). Pin numbers are the Arduino "D" numbers (D22 = 22, A0 = analog 0).
 // They are compile-time constants: nothing in the runtime configuration (Serial commands, EEPROM settings) can change a pin.
-// (The ESP32-S version of this project is kept in git: tag esp32-final.)
+// (The ESP32-S version of this project is kept in git: commit 1963a3f.)
 #pragma once
 #include <stdint.h>
 

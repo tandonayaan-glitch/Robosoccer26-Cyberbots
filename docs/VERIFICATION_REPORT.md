@@ -34,7 +34,7 @@ Simulated shot timing (assumed rotation model of 180°/s at full rotation comman
 
 ## Behaviour that changed from the ESP32 version
 
-Removed because the Mega has 8 KB of RAM, 256 KB of flash and no filesystem: CSV files in flash, the flight recorder, log export (`x`, `:xsel`), `:fsformat`, `:logdel` (these answer with a message), brown-out/reset-reason reporting, the FreeRTOS log writer and the hardware watchdog. `:diag on` streams the same kind of CSV rows over Serial instead. Configuration moved from LittleFS to the EEPROM (CRC protected; `:save` / `:load`). The ESP32 firmware is intact at git tag `esp32-final`.
+Removed because the Mega has 8 KB of RAM, 256 KB of flash and no filesystem: CSV files in flash, the flight recorder, log export (`x`, `:xsel`), `:fsformat`, `:logdel` (these answer with a message), brown-out/reset-reason reporting, the FreeRTOS log writer and the hardware watchdog. `:diag on` streams the same kind of CSV rows over Serial instead. Configuration moved from LittleFS to the EEPROM (CRC protected; `:save` / `:load`). The ESP32 firmware is intact at git commit `1963a3f` (local tag `esp32-final`).
 
 ## Defects found during this work (and fixed)
 

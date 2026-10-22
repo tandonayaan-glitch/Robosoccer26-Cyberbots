@@ -1,7 +1,7 @@
 # Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware (Arduino Mega 2560)
 
 Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, two 5 mm IR phototransistor receivers (each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an MPU6050 for relative heading, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
-**No multiplexer. No kicker.** The earlier ESP32-S version is preserved in git as tag `esp32-final`.
+**No multiplexer. No kicker.** The earlier ESP32-S version is preserved in git as commit `1963a3f` (local tag `esp32-final`).
 
 > **Status – read this first.**
 >
