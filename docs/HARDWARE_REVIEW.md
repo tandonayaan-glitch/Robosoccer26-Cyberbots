@@ -13,7 +13,7 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 | 4 | mecanum wheel | roller layout X or O: `:roller X|O`, tested with `:dtest` |
 | 1 | 3S 11.1 V 4500 mAh battery | 12.6 V when full: see the L298N regulator note below |
 | 2 | IR transmitter LED | front, one per pair; **exact part [?]** (wavelength, forward voltage, current) |
-| 2 | 2-pin IR receiver (photodiode or phototransistor) | front, one per pair; **exact part [?]**: it cannot connect to a GPIO without at least a resistor: see `docs/IR_SENSORS.md` §2 |
+| 2 | 5 mm IR phototransistor (2-pin receiver) | front, one per pair; **part number [?]**; it cannot connect to a GPIO without at least a resistor: collector to 3.3 V, emitter to the GPIO with a load resistor to GND (start with 10 kΩ, `docs/IR_SENSORS.md` §2.1); check the lead order in the datasheet |
 | 1 | MPU6050 (gyro + accelerometer) breakout | |
 | 1 | breadboard, jumper wires, power wiring | |
 
@@ -39,8 +39,8 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 
 | Device | Pin on the device | ESP32 | Notes |
 |---|---|---|---|
-| IR receiver 0 (pair 0, front centre) | signal node of the receiver circuit | **GPIO35** | input-only, ADC1_CH7, no internal pull; **needs a resistor (or more) between the 2-pin part and the pin: not a direct connection** (`docs/IR_SENSORS.md` §2) |
-| IR receiver 1 (pair 1, front, offset) | signal node of the receiver circuit | **GPIO36** | input-only, ADC1_CH0, no internal pull |
+| IR receiver 0 (pair 0, front centre): phototransistor, emitter lead + load resistor node | **GPIO35** (collector to 3.3 V; load resistor from this node to GND) | input-only, ADC1_CH7, no internal pull; **needs a resistor (or more) between the 2-pin part and the pin: not a direct connection** (`docs/IR_SENSORS.md` §2) |
+| IR receiver 1 (pair 1, front, offset): phototransistor, emitter lead + load resistor node | **GPIO36** (same circuit) | input-only, ADC1_CH0, no internal pull |
 | IR emitter 0 / 1 driver input | transistor base (via about 1 kΩ) or MOSFET gate | **GPIO4 / GPIO13 – PROPOSED, not from your notes; used only if `iremit` = 1** | a GPIO cannot drive an IR LED directly: use a transistor driver (`docs/IR_SENSORS.md` §3); HIGH = LED on |
 | receivers and emitters | supply / return | 3.3 V or 5 V per the part and the driver design; GND common | every receiver pin voltage must stay within 0–3.3 V |
 | MPU6050 | SDA | **GPIO16** | explicit `Wire.begin(16, 17)`; address 0x68 or 0x69 auto-detected |

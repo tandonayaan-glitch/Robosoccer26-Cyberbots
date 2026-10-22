@@ -5,8 +5,8 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 
 ## Phase 0 – Robot unpowered (no battery, no USB)
 - [ ] Identify the exact ESP32 module (can marking: WROOM or WROVER/PSRAM, flash size). PSRAM modules use GPIO16/17: then the IMU pins must change (document it; do not silently change pins).
-- [ ] **Identify the two IR receivers and the two IR emitter LEDs**: exact part numbers or photos (receiver: photodiode or phototransistor?; emitter: wavelength, forward voltage, maximum current) and answer the questions in `docs/IR_SENSORS.md` §8. **Do not finalise the circuit before this.**
-- [ ] Build the receiver circuit (a 2-pin receiver cannot go straight to a GPIO: resistor or amplifier, `IR_SENSORS.md` §2) and, if the firmware is to pulse the LEDs, the transistor drivers (§3); confirm the emitter GPIOs (proposal: GPIO4 and GPIO13).
+- [ ] **Identify the two IR receivers (5 mm phototransistors) and the two IR emitter LEDs**: exact part numbers or photos (receiver: lead order, dark/light current, response time; emitter: wavelength, forward voltage, maximum current) and answer the questions in `docs/IR_SENSORS.md` §8. **Do not finalise the circuit before this.**
+- [ ] Build the receiver circuit (a phototransistor cannot go straight to a GPIO: collector to 3.3 V, emitter to the pin with a load resistor to GND, start 10 kΩ, `IR_SENSORS.md` §2.1) and, if the firmware is to pulse the LEDs, the transistor drivers (§3); confirm the emitter GPIOs (proposal: GPIO4 and GPIO13).
 - [ ] Check the MPU6050 breakout: regulator present? pull-ups to which rail? AD0 state?
 - [ ] Remove the ENA/ENB jumpers on both L298N boards; decide the logic-supply source (buck 5 V, not the L298N regulator if the pack is above 12 V).
 - [ ] Fit: 4.7–10 kΩ **pull-downs on all 12 L298N control inputs** (IN1–IN4, ENA, ENB, both boards); decoupling on the sensor supply; a **fuse** and a **motor-power switch** reachable at all times.
@@ -28,7 +28,7 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 - [ ] `h` after 10 minutes: record the stack high-water lines (loop and log-writer tasks); they must show headroom.
 
 ## Phase 3 – IR pairs with the real ball (motors off)
-- [ ] `IR_SENSORS.md` §7: read mode (`:ir mode`), emitter pulsing (`:ir emit on`, LEDs blinking on a phone camera), calibration of pair 0 and pair 1 (`:ir cal clear|near`), `:set iroffset`, `:save`; compare the signal in the hall's lighting with `iremit 0` and `iremit 1`.
+- [ ] `IR_SENSORS.md` §7: choose the load resistor R_L and `irsettle` (settle-time test, §2.1), read mode (`:ir mode`), emitter pulsing (`:ir emit on`, LEDs blinking on a phone camera), calibration of pair 0 and pair 1 (`:ir cal clear|near`), `:set iroffset`, `:save`; compare the signal in the hall's lighting with `iremit 0` and `iremit 1`.
 - [ ] The ball moved far → near on the centre line: `seen`, then `near` on sensor 0 (record the distances).
 - [ ] Ball left / centre / right at the shooting distance: the printed offset side matches (else swap `iroffset`).
 - [ ] Both fields of view overlap at the shooting position (sensor 1 sees the ball there); otherwise `:set irneedboth 0`.

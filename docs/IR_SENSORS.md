@@ -1,7 +1,7 @@
 # The two front IR pairs (emitter LED + 2-pin receiver): reflected-light ball detection
 
-**Status of the circuit: NOT FINAL.** The exact emitter and receiver models are not known to this repository. The circuits below are candidates that depend on the answers to the
-questions in §8. Do not build the final wiring from this page before those are answered.
+**Status of the circuit: NOT FINAL.** What is known: the receivers are **5 mm phototransistors** (reported by you). What is still unknown: the receivers' part number, the emitter LEDs' part number, how the LEDs are to be powered and controlled (§8).
+The circuits below are candidates for those parts; check them against the datasheets before building the final wiring.
 
 ## 1. What is built
 
@@ -21,8 +21,8 @@ tell me different free pins. The firmware **never touches them** unless you set 
 
 **No, not as bare parts. This was checked against what a 2-pin IR receiver is and what the ESP32 inputs are; the exact part is still needed to finish it.**
 
-* A two-pin IR receiver is a **photodiode or phototransistor**. It is a current source controlled by light, not a logic output. Wired alone between a GPIO and 3.3 V or GND it produces **no defined voltage**: the pin floats.
-* It therefore needs, at the least, **one resistor** so the light-dependent current becomes a voltage. Whether that alone is enough depends on the part:
+* A two-pin IR receiver is a photodiode or phototransistor; **yours are 5 mm phototransistors**. A phototransistor is a current source controlled by light, not a logic output. Wired alone between a GPIO and 3.3 V or GND it produces **no defined voltage**: the pin floats.
+* It therefore needs, at the least, **one resistor** so the light-dependent current becomes a voltage. **For a phototransistor that one resistor (circuit A) is the starting design**; no amplifier or comparator is needed for a reflective pair at a few centimetres, and none is assumed. What the other types would need:
 
 | Receiver type | What it gives | Minimum circuit | Amplification / comparator? |
 |---|---|---|---|
@@ -37,7 +37,7 @@ Also required, whatever the receiver:
 * an unfiltered receiver sees **ambient light and the ball's own emission**: sunlight, lamps, other robots' IR. That is why the firmware can pulse the emitter and subtract (§4), and why a daylight filter / shroud may still be needed;
 * the ESP32 ADC is not linear near its ends and has a limited input range (about 0.1–3.1 V at the default attenuation [2nd]); the firmware therefore calibrates with real readings instead of assuming a transfer curve.
 
-### 2.1 Circuit A – phototransistor (candidate; values are starting points, not verified)
+### 2.1 Circuit A – 5 mm phototransistor, the circuit to build first (values are starting points, not verified)
 
 ```
  3.3 V ──┬── collector ┐
@@ -51,7 +51,16 @@ Also required, whatever the receiver:
 The voltage rises with the light (the firmware also accepts the opposite polarity: e.g. the common-emitter variant with the load resistor to 3.3 V, where the voltage falls when lit; `:ir cal` finds the direction).
 Choose R_L so that, with the ball in the shooting position, the pin sits well inside 0.3–3.0 V and changes by **at least 500 counts** from the "nothing in front" reading.
 
-### 2.2 Circuit B – photodiode (candidate)
+Practical notes for a 5 mm phototransistor (general knowledge, **[2nd]**, not checked against your part):
+
+* **Which lead is which.** The collector and emitter are not marked by the two-lead package. Usually the shorter lead / the flat side of the case is the emitter, but **check the datasheet or the marking**; if the signal does not react to light, swap the two leads (a swap is not expected to damage it at 3.3 V).
+* **Speed versus signal.** The bigger R_L is, the larger the signal but the slower the response (the transistor's capacitance and R_L form a delay). With emitter pulsing the firmware waits `irsettle` (200 µs) after switching the LED. Test it: with the ball held still, raise `:set irsettle` through 200, 500, 1000, 2000 µs and watch `i` (the `lit`/`dark` readings): if the difference keeps growing, the receiver is too slow for that R_L: lower R_L (4.7 kΩ, 2.2 kΩ, 1 kΩ) or accept a longer settle time.
+* **Saturation.** In strong sunlight or very close to the ball a phototransistor with a large R_L saturates (the pin goes to its supply) and the reflection is lost. A smaller R_L, a shroud or a daylight filter helps.
+* **Direct light.** The phototransistor must not see its own LED directly (it would be saturated all the time): mount the LED and the receiver side by side with an opaque wall between them, both aimed forward, or the receiver in a short black tube.
+* **Cross-talk between the pairs** is handled by the firmware (one emitter on at a time), not by the hardware: aim the two pairs so that pair 0's LED does not shine into receiver 1 more than the ball's reflection does.
+* **Variation.** Phototransistors of the same type differ a lot in sensitivity; the two pairs will not read the same: that is why each is calibrated separately (`:ir cal`).
+
+### 2.2 Circuit B – photodiode (only if the parts turn out to be photodiodes; yours are phototransistors)
 
 A reverse-biased photodiode into an op-amp transimpedance stage (feedback resistor in the 100 kΩ–1 MΩ range with a small capacitor), the op-amp powered from 3.3 V, output to the pin.
 It needs a rail-to-rail 3.3 V op-amp and care with leakage and noise: do not build it before the photodiode's datasheet (dark current, sensitivity at the LED's wavelength) is known.
@@ -125,7 +134,7 @@ There is **no kicker or other shooting actuator** in the project and none is ass
 
 ## 8. What I need from you before the circuit can be finalised
 
-1. **Receivers:** the exact part number or marking, or a clear photo of both sides (lens colour, flat or domed, any markings) and the datasheet link. Photodiode or phototransistor? Any filter (black/dark epoxy)?
+1. **Receivers:** they are 5 mm phototransistors (answered). Still needed: the part number or marking (or a photo of the lens, any markings) and the datasheet link: it gives the dark current, the light current, the response time and the lead order, which decide R_L and `irsettle`. Is the epoxy clear or a black/dark daylight filter?
 2. **Emitters:** the exact part number (wavelength, forward voltage, maximum continuous and pulsed current), and how you want them powered (3.3 V, 5 V, or the motor battery through a regulator).
 3. **Emitter control:** may the firmware control the LEDs? If yes, which free GPIOs do you want (the proposal is GPIO4 and GPIO13), and what driver do you have (NPN, logic-level MOSFET)? If no, they stay hard-wired on.
 4. **Mounting:** the distance between the two pairs, their aiming (straight ahead or angled), the side the offset pair is on, the height above the floor, and whether a shroud or tube separates the receivers from the emitters (the receiver must not see the LED directly).
