@@ -36,13 +36,15 @@ static const char* irSensorWord(const Config& c, uint8_t i) {
 }
 
 static void printIrSnapshot(const Config& c) {
-  say("INFO", "IR sensors (2): sampled every %lu ms; seen at %u %% / near at %u %% of the clear->near span, %u-sample debounce",
+  say("INFO", "IR pairs (2, emitter LED + receiver, reflected light): sampled every %lu ms; seen at %u %% / near at %u %% of the clear->near span, %u-sample debounce",
       UL(IR_SAMPLE_MS), (unsigned)c.irSeenPct, (unsigned)c.irNearPct, (unsigned)c.irDebounce);
+  say("INFO", "emitters: %s", c.irEmit ? "PULSED by the firmware (GPIO4 / GPIO13, HIGH = on); signal = 2048 + (lit - dark): ambient light cancels" : "not controlled by the firmware (assumed hard-wired on; the signal includes ambient light)");
   for (uint8_t i = 0; i < IR_SENSORS; i++) {
     const IrSensor& s = g_irs[i];
-    say("INFO", " sensor %u GPIO%u %s: %s | raw %u (smoothed %.0f, min %u max %u) | clear %u near %u | strength %.2f | %s", (unsigned)i, (unsigned)PIN_IR[i],
+    say("INFO", " pair %u receiver GPIO%u %s: %s | signal %u (smoothed %.0f, min %u max %u)%s | clear %u near %u | strength %.2f | %s", (unsigned)i, (unsigned)PIN_IR[i],
         irModeOf(c, i) ? "digital" : "analog", irEnabled(c, i) ? "on" : "off", (unsigned)s.raw, (double)s.avg, (unsigned)(s.rawMin == 0xFFFF ? 0 : s.rawMin), (unsigned)s.rawMax,
-        (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i), (double)s.s, irSensorWord(c, i));
+        c.irEmit ? " [dark/lit shown below]" : "", (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i), (double)s.s, irSensorWord(c, i));
+    if (c.irEmit) say("INFO", "   pair %u last dark %u lit %u (emitter GPIO%u)", (unsigned)i, (unsigned)s.dark, (unsigned)s.lit, (unsigned)PIN_IR_EMIT[i]);
   }
   if (g_ball.valid)
     say("INFO", "ball: %s%s%s%s | sides seen 0x%X near 0x%X%s", g_ball.seenMask ? "SEEN" : "recently seen", g_ball.held ? ", in the shooting position" : "", g_ball.ready ? " and CENTRED (ready)" : "",
@@ -98,8 +100,9 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
   for (uint8_t i = 0; i < IR_SENSORS; i++) {
     const char* role = i == 0 ? "front centre: ball close enough to shoot" : "front offset: centred / off-centre";
     const char* word = !irEnabled(c, i) ? "OFF" : !irCalibrated(c, i) ? "NOT TESTED (not calibrated)" : g_irs[i].railFault ? "FAIL (reading at an ADC end stop)" : "calibrated (software: says nothing about the ball response)";
-    say(tag, "[IR] sensor %u GPIO%u (%s): %s, %s, raw %u, clear %u near %u", (unsigned)i, (unsigned)PIN_IR[i], role, irModeOf(c, i) ? "digital" : "analog", word, (unsigned)g_irs[i].raw, (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i));
+    say(tag, "[IR] sensor %u GPIO%u (%s): %s, %s, signal %u, clear %u near %u", (unsigned)i, (unsigned)PIN_IR[i], role, irModeOf(c, i) ? "digital" : "analog", word, (unsigned)g_irs[i].raw, (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i));
   }
+  say(tag, "[IR] emitters: %s", c.irEmit ? "pulsed by the firmware on GPIO4 / GPIO13 (PROPOSED pins: confirm them against your wiring)" : "not controlled by the firmware (hard-wired on assumed; no GPIO used)");
   say(tag, "[IR] sensor 1 mounting side: %s", c.irOffsetSide > 0 ? "right of sensor 0" : (c.irOffsetSide < 0 ? "left of sensor 0" : "NOT SET (no sideways guidance)"));
   say(tag, "[IR] physical operation with the real ball (range, field of view, lighting, other IR sources): NOT TESTED until you calibrate and test it (docs/IR_SENSORS.md)");
   say(tag, "[IR] limits: two front sensors cannot see a ball outside their field of view; the robot finds it by rotating. Signal strength is only a proxy for distance.");

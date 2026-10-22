@@ -1,4 +1,4 @@
-# Change log: from the multiplexer / 12-receiver ring to two front IR sensors
+# Change log: from the multiplexer / 12-receiver ring to two front IR pairs (LED + receiver)
 
 ## Obsolete hardware and features removed
 
@@ -16,19 +16,19 @@ Motor GPIOs and `motors.h` (mecanum mixing, ramps, reversal dwell, LEDC for both
 
 ## Added
 
-* `ir2.h`: two sensors on GPIO35 and GPIO36 (analog or digital per sensor, calibration, hysteresis, debounce, wiring-fault detection, ball state: seen / near / held / offset / ready).
-* `ircli.h`: `:ir` (status, `cal clear|near`, `mode`, `on|off`, `side`, `reset`).
+* `ir2.h`: two receivers on GPIO35 and GPIO36 (analog or digital per receiver, calibration, hysteresis, debounce, wiring-fault detection, ball state: seen / near / held / offset / ready) and optional emitter pulsing with ambient subtraction (`iremit` 1: per pair, the receiver is read with its emitter off and on; signal = 2048 + lit − dark). The two emitter pins GPIO4 / GPIO13 are a **proposal** and are never touched unless `iremit` is 1.
+* `ircli.h`: `:ir` (status, `cal clear|near`, `mode`, `on|off`, `emit on|off`, `side`, `reset`).
 * Navigation: approach that slows with the signal, cautious single-sensor alignment, stop at the shooting position, search by rotation toward the last known side.
 * Faults `IR_FRONT` (sensor 0, CRITICAL) and `IR_ALIGN` (sensor 1, DEGRADED).
-* Configuration: sensor mode, calibration, thresholds, mounting side, speeds (configuration version 13: a saved configuration from the old firmware is replaced by the defaults once).
+* Configuration: sensor mode, calibration, thresholds, mounting side, speeds (configuration version 14: a saved configuration from the old firmware is replaced by the defaults once).
 * The goal heading (registered by the gyro 5 s after power-on) and the shot (aim, reverse, full-power drive); no kicker pin exists or is assumed.
 
 ## Files
 
 | File | Change |
 |---|---|
-| `Robosoccer26_Cyberbots/pins.h` | multiplexer pins removed; IR pins GPIO35/GPIO36; `static_assert`s updated (14 outputs, 2 input-only sensors) |
-| `config.h` | ring/engine/mux parameters removed; sensor, navigation, goal and shot parameters; version 13 |
+| `Robosoccer26_Cyberbots/pins.h` | multiplexer pins removed; receiver pins GPIO35/GPIO36; proposed emitter pins GPIO4/GPIO13; `static_assert`s updated (14 outputs, 2 input-only receivers, 2 emitter pins) |
+| `config.h` | ring/engine/mux parameters removed; sensor (incl. `iremit`, `irsettle`), navigation, goal and shot parameters; version 14 |
 | `ir2.h`, `ircli.h` | new |
 | `irscan.h`, `auxin.h`, `auxcli.h` | deleted |
 | `health.h` | IR faults replaced; statistics trimmed |

@@ -164,6 +164,8 @@ static void t_pinmap() {
     CHECK(WHEEL_PINS[i].in1 == spec[i].in1 && WHEEL_PINS[i].in2 == spec[i].in2 && WHEEL_PINS[i].en == spec[i].en);
   }
   CHECK(PIN_IR[0] == 35 && PIN_IR[1] == 36);
+  CHECK(PIN_IR_EMIT[0] == 4 && PIN_IR_EMIT[1] == 13);          // PROPOSED emitter pins (docs/IR_SENSORS.md): distinct from every motor / I2C / receiver pin
+  for (int e = 0; e < 2; e++) { for (int i = 0; i < 4; i++) CHECK(PIN_IR_EMIT[e] != WHEEL_PINS[i].in1 && PIN_IR_EMIT[e] != WHEEL_PINS[i].in2 && PIN_IR_EMIT[e] != WHEEL_PINS[i].en); CHECK(PIN_IR_EMIT[e] != PIN_I2C_SDA && PIN_IR_EMIT[e] != PIN_I2C_SCL && PIN_IR_EMIT[e] != PIN_IR[0] && PIN_IR_EMIT[e] != PIN_IR[1]); }
   CHECK(PIN_I2C_SDA == 16 && PIN_I2C_SCL == 17);
   setup();
   for (int w = 0; w < 4; w++) {
@@ -604,7 +606,7 @@ static void t_diag_no_motion() {
   ballAt(0, 30);
   simRunTracking(1500);
   CHECK(!anyWheelEverMoved);
-  CHECK(outHas("IR sensors (2)") && outHas("MPU6050"));
+  CHECK(outHas("IR pairs (2") && outHas("MPU6050"));
   CHECK(outHas("HARDWARE HEALTH REPORT"));
   CHECK(outHas("state=IDLE"));
   CHECK(outHas("persist=ON"));
@@ -1293,6 +1295,94 @@ static void t_ball_offset_and_shooting_position() {
   CHECK(g_ball.held && !g_ball.offsetKnown);
 }
 
+
+// ================================================================================================
+// emitter pulsing (reflected light, ambient subtraction)
+static void t_ir_emit_pins_untouched_by_default() {
+  bootCal();
+  simRun(2000);
+  CHECK(g_cfg.irEmit == 0 && !g_emitDriven);
+  CHECK(g_pinMode[PIN_IR_EMIT[0]] != OUTPUT && g_pinMode[PIN_IR_EMIT[1]] != OUTPUT);    // the proposed emitter pins are never configured unless enabled
+  CHECK(g_mockEmitWrites[PIN_IR_EMIT[0]] == 0 && g_mockEmitWrites[PIN_IR_EMIT[1]] == 0);
+  send(":ir emit on\n"); simRun(100);
+  CHECK(g_cfg.irEmit == 1 && g_emitDriven && g_pinMode[PIN_IR_EMIT[0]] == OUTPUT && g_pinMode[PIN_IR_EMIT[1]] == OUTPUT);
+  CHECK(outHas("through YOUR transistor driver") && !irCalibrated(g_cfg, 0));            // calibrations are cleared: the signal changed meaning
+  CHECK(g_pinLevel[PIN_IR_EMIT[0]] == 0 && g_pinLevel[PIN_IR_EMIT[1]] == 0);            // LOW (off) between pulses
+  CHECK(g_mockEmitWrites[PIN_IR_EMIT[0]] > 10);
+  send(":ir emit off\n"); simRun(100);
+  CHECK(!g_emitDriven && g_pinMode[PIN_IR_EMIT[0]] == INPUT && g_pinLevel[PIN_IR_EMIT[0]] == 0 && g_pinLevel[PIN_IR_EMIT[1]] == 0);
+}
+
+static void t_ir_emit_ambient_rejection() {
+  g_mockEmitModel = true;
+  g_mockAmbient[PIN_IR[0]] = g_mockAmbient[PIN_IR[1]] = 1500;                            // lit room: both receivers see 1500 with the emitters off
+  bootCal();
+  simRun(300);
+  send(":ir emit on\n"); simRun(100);
+  send(":ir cal clear 0\n"); send(":ir cal clear 1\n"); simRun(50);
+  g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 1500;                            // the ball reflects 1500 counts of OUR emitter (shooting position)
+  simRun(100);
+  send(":ir cal near 0\n"); send(":ir cal near 1\n"); simRun(50);
+  CHECK(irCalibrated(g_cfg, 0) && irCalibrated(g_cfg, 1) && absf((float)g_cfg.irClear0 - 2048.0f) < 3.0f && g_cfg.irNear0 > g_cfg.irClear0);
+  g_cfg.irOffsetSide = 1;
+  // ambient light swings from dark to bright sunlight: nothing changes (it is in both the dark and the lit reading)
+  g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 0;
+  for (uint16_t amb : {0, 800, 2500, 3300}) {
+    g_mockAmbient[PIN_IR[0]] = g_mockAmbient[PIN_IR[1]] = amb; simRun(150);
+    CHECK(!g_irs[0].seen && !g_irs[1].seen && absf(g_irs[0].s) < 0.1f);
+  }
+  // the reflection is what counts, at any ambient level
+  g_mockAmbient[PIN_IR[0]] = g_mockAmbient[PIN_IR[1]] = 2500;
+  g_mockReflect[PIN_IR[0]] = 700; g_mockReflect[PIN_IR[1]] = 0; simRun(150);
+  CHECK(g_irs[0].seen && !g_irs[0].near && !g_irs[1].seen && g_ball.seenMask == 1);     // only pair 0 sees a reflection
+  g_mockReflect[PIN_IR[0]] = 1500; g_mockReflect[PIN_IR[1]] = 1400; simRun(150);
+  CHECK(g_irs[0].near && g_irs[1].seen && g_ball.held && g_ball.ready);
+  CHECK(g_irs[0].lit > g_irs[0].dark);
+  // a receiver that does not react to its emitter (nothing reflects) shows strength about 0
+  g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 0; simRun(150);
+  CHECK(absf(g_irs[0].s) < 0.1f);
+  simRun(500);
+  CHECK(!g_ball.valid);
+  // the same room WITHOUT emitter pulsing (emitters hard-wired on): ambient light alone looks like a ball
+  send(":ir emit off\n"); simRun(100);
+  g_mockAmbient[PIN_IR[0]] = g_mockAmbient[PIN_IR[1]] = 0; g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 0; simRun(100);
+  send(":ir cal clear 0\n"); send(":ir cal clear 1\n"); simRun(50);
+  g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 1500; simRun(100);
+  send(":ir cal near 0\n"); send(":ir cal near 1\n"); simRun(50);
+  g_mockReflect[PIN_IR[0]] = g_mockReflect[PIN_IR[1]] = 0; simRun(100);
+  CHECK(!g_irs[0].seen);
+  g_mockAmbient[PIN_IR[0]] = 1000; simRun(150);
+  CHECK(g_irs[0].seen);                                                                  // sunlight on the receiver: a false "ball"
+}
+
+static void t_ir_emit_pair_independence_and_digital() {
+  g_mockEmitModel = true;
+  bootCal();
+  simRun(300);
+  send(":ir emit on\n"); simRun(100);
+  send(":ir cal clear 0\n"); send(":ir cal clear 1\n"); simRun(50);
+  g_mockReflect[PIN_IR[0]] = 2000; g_mockReflect[PIN_IR[1]] = 2000; simRun(100);
+  send(":ir cal near 0\n"); send(":ir cal near 1\n"); simRun(50);
+  g_cfg.irOffsetSide = 1;
+  // pair 1's emitter lights only receiver 1: receiver 0's lit reading never contains pair 1's reflection
+  g_mockReflect[PIN_IR[0]] = 0; g_mockReflect[PIN_IR[1]] = 2000; simRun(150);
+  CHECK(g_irs[1].near && !g_irs[0].seen && g_ball.seenMask == 2 && g_ball.offset > 0.5f);
+  CHECK(g_irs[0].lit == g_irs[0].dark);
+  // a digital receiver (comparator output: HIGH when it sees the reflection) works the same way, with half-scale difference
+  send(":ir mode 0 digital\n"); simRun(50);
+  CHECK(g_cfg.irMode0 == 1 && !irCalibrated(g_cfg, 0));
+  g_mockAmbient[PIN_IR[0]] = 0; g_mockReflect[PIN_IR[0]] = 0; simRun(100);
+  send(":ir cal clear 0\n"); simRun(20);
+  g_mockReflect[PIN_IR[0]] = 3000; simRun(100);
+  send(":ir cal near 0\n"); simRun(20);
+  CHECK(irCalibrated(g_cfg, 0));
+  g_mockReflect[PIN_IR[0]] = 0; simRun(100); CHECK(!g_irs[0].seen);
+  g_mockReflect[PIN_IR[0]] = 3000; simRun(100); CHECK(g_irs[0].seen && g_irs[0].near);
+  // the rail check does not apply while the emitters are pulsed
+  g_mockReflect[PIN_IR[1]] = 0; g_mockAmbient[PIN_IR[1]] = 0; simRun(g_cfg.irRailMs + 600);
+  CHECK(!faultActive(F_IR_ALIGN) && !faultActive(F_IR_FRONT));
+}
+
 // ================================================================================================
 // navigation with two sensors
 static void t_nav_approach_and_stop() {
@@ -1597,6 +1687,7 @@ static void t_old_hardware_removed() {
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
+  T(t_ir_emit_pins_untouched_by_default), T(t_ir_emit_ambient_rejection), T(t_ir_emit_pair_independence_and_digital),
   T(t_angles),
   T(t_timer_rollover),
   T(t_mecanum),

@@ -36,13 +36,22 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
   /* BR */ {P_BR_IN1, P_BR_IN2, P_BR_EN, "BR"},
 };
 
-// ---- Front IR sensors (two 2-pin sensors, one GPIO each) --------------------------------------------
+// ---- Front IR receivers (two 2-pin receivers, one GPIO each) and the two IR emitter LEDs -------------
 // Both are input-only ADC1 pins. They have no internal pull-up/pull-down: whatever circuit makes a 2-pin
 // photodiode/phototransistor produce a voltage (resistor to 3.3 V or GND) is external. Both can also be read as digital inputs.
-#define P_IR0 35                                   // sensor 0: front CENTRE; decides "ball close enough to be in the shooting position"
-#define P_IR1 36                                   // sensor 1: front, slightly OFFSET to one side; helps judge centred / off-centre
+#define P_IR0 35                                   // receiver 0: front CENTRE; decides "ball close enough to be in the shooting position"
+#define P_IR1 36                                   // receiver 1: front, slightly OFFSET to one side; helps judge centred / off-centre
 static const uint8_t PIN_IR[2] = {P_IR0, P_IR1};
 static const uint8_t IR_SENSORS = 2;
+
+// IR TRANSMITTER LEDs (one per receiver; the two pairs look forward from the front of the robot, reflected-light detection).
+// PROPOSED pins, NOT taken from the project wiring notes: nothing in the notes assigns a GPIO to the emitters, so these two are free pins
+// chosen by this firmware and must be confirmed against how you actually wire the LED drivers. The firmware NEVER touches them unless
+// the operator enables emitter pulsing (':set iremit 1'); with the default iremit = 0 the emitters are assumed to be hard-wired on
+// (or driven by something else) and the pins stay unused inputs. A GPIO cannot drive an IR LED directly (see docs/IR_SENSORS.md): use a transistor.
+#define P_IR_EMIT0 4                               // emitter of pair 0 (next to sensor 0, front centre)
+#define P_IR_EMIT1 13                              // emitter of pair 1 (next to sensor 1, front, offset)
+static const uint8_t PIN_IR_EMIT[2] = {P_IR_EMIT0, P_IR_EMIT1};
 
 // ---- MPU6050 (I2C) ---------------------------------------------------------------
 #define P_SDA 16
@@ -63,10 +72,15 @@ static_assert(__builtin_popcountll(OUTPUT_PIN_MASK) == 14, "a GPIO is assigned t
 #define IR_PIN_MASK (PIN_BIT(P_IR0) | PIN_BIT(P_IR1))
 static_assert(__builtin_popcountll(IR_PIN_MASK) == 2, "the two IR sensors must use different pins");
 static_assert((IR_PIN_MASK & OUTPUT_PIN_MASK) == 0, "an IR sensor pin must not be a motor or I2C pin");
+#define IR_EMIT_PIN_MASK (PIN_BIT(P_IR_EMIT0) | PIN_BIT(P_IR_EMIT1))
+static_assert(__builtin_popcountll(IR_EMIT_PIN_MASK) == 2, "the two IR emitter pins must be different");
+static_assert((IR_EMIT_PIN_MASK & (OUTPUT_PIN_MASK | IR_PIN_MASK)) == 0, "an IR emitter pin must not be a motor, I2C or IR receiver pin");
+static_assert((IR_EMIT_PIN_MASK & ((0x3FULL << 6) | PIN_BIT(0) | PIN_BIT(12))) == 0, "emitter pins must not be flash pins, GPIO0 or GPIO12");
 static_assert((OUTPUT_PIN_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
 static_assert((OUTPUT_PIN_MASK & PIN_BIT(12)) == 0 && (OUTPUT_PIN_MASK & PIN_BIT(0)) == 0, "GPIO12 (flash voltage) and GPIO0 (boot mode) are unused on purpose");
 #ifdef SOC_GPIO_VALID_OUTPUT_GPIO_MASK   // only visible on the real toolchain
 static_assert((OUTPUT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");
+static_assert((IR_EMIT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an IR emitter pin is not output-capable on this SoC");
 static_assert((IR_PIN_MASK & SOC_GPIO_VALID_GPIO_MASK) == IR_PIN_MASK && (IR_PIN_MASK & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
               "the IR sensor pins (GPIO35, GPIO36) must be valid INPUT-ONLY GPIOs");
 #endif

@@ -1,6 +1,6 @@
 # Calibration guide, first power-on, and physical test plan
 
-See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_SENSORS.md` (the two IR sensors).
+See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_SENSORS.md` (the two IR emitter/receiver pairs).
 
 Everything here is a **procedure for you to run**. No step has been performed on the robot; every result below is **NOT TESTED**.
 
@@ -8,9 +8,9 @@ Everything here is a **procedure for you to run**. No step has been performed on
 
 1. **Hardware first** (power off): remove the ENA/ENB jumpers on both L298N boards; add 4.7–10 kΩ pull-downs on all 12 L298N control inputs
    (IN1–IN4, ENA, ENB, both boards); common ground everywhere; a regulated 5 V for the ESP32 (not the L298N regulator when the pack is above 12 V);
-   the two IR sensors wired as in `IR_SENSORS.md` (**confirm their type and pin voltage with a meter before applying power**); fuse the battery.
+   the two IR pairs: each receiver through its own resistor/amplifier circuit and, if the firmware is to pulse the LEDs, each emitter through a transistor driver (`IR_SENSORS.md` §2–3; **the receivers cannot connect straight to a GPIO; confirm the part types and every pin voltage with a meter before applying power**); fuse the battery.
 2. **Wheels off the ground**, robot on a stand, motor battery connector reachable. First flash with the motor battery **disconnected** (USB only).
-3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, IR sensors (`NOT CALIBRATED`), MPU6050 found at 0x68/0x69.
+3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, IR pairs (`NOT CALIBRATED`), MPU6050 found at 0x68/0x69.
    Expect warnings: wheels NOT TESTED, sensors NOT TESTED. Confirm **no wheel moved** and autonomy is DISABLED.
 4. Press reset several times and power-cycle: with the motor battery *connected* and wheels lifted, confirm no wheel twitches at reset (validates the pull-downs; GPIO5/14 boot behaviour).
 5. Connect the motor battery. Send `h` and `?`. Nothing may move.
@@ -27,9 +27,9 @@ disconnect the motor battery for a hard stop.
 3. `:dtest` → `:confirm` runs forward, backward, strafe left, strafe right, rotate cw, rotate ccw. If strafes are mirrored but forward/rotate are right → `:roller O`.
 4. Find the smallest PWM that starts a wheel under load: `:set minpwm <n>`; set `:set maxauto`/`maxmanual` from the motor/driver ratings. `:save`.
 
-## C. IR sensor calibration and testing
+## C. IR pair calibration and testing
 
-Follow `IR_SENSORS.md` ("Calibration and sensor-testing procedure"): raw check, `:ir mode`, `:ir cal clear|near 0|1`, `:set iroffset 1|-1`, state test with the ball, distance table,
+Follow `IR_SENSORS.md` §7: circuit check, raw check, `:ir mode`, `:ir emit on` (if the LED drivers are wired), `:ir cal clear|near 0|1`, `:set iroffset 1|-1`, state test with the ball, distance table,
 interference test in competition lighting, then `:save`. Autonomy (`a`) is refused until sensor 0 is calibrated.
 
 ## D. IMU calibration

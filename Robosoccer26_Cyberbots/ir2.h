@@ -1,14 +1,17 @@
-// ir2.h - the two front IR sensors, read directly by the ESP32 (two GPIO pins, nothing else in the signal path).
+// ir2.h - the two front IR pairs (IR emitter LED + 2-pin IR receiver each), reflected-light ball detection.
 //
-//   sensor 0 (GPIO35): front CENTRE. Its strength tells how close the ball is: "near" = the ball is in the shooting position.
-//   sensor 1 (GPIO36): front, slightly OFFSET to one side (config irOffsetSide). Together with sensor 0 it tells whether the
-//                      ball is centred or to one side.
+//   pair 0: front CENTRE (receiver GPIO35, emitter GPIO4 when pulsed by the firmware): how strong the reflection is -> "seen", and
+//           "near" = the ball is close enough to be in the shooting position
+//   pair 1: front, slightly OFFSET to one side (receiver GPIO36, emitter GPIO13): with pair 0, whether the ball is centred or to one side
 //
-// What the firmware does NOT assume: whether a sensor is analog or digital (irMode0/1), or which level means "ball". Each sensor is
-// calibrated on the robot (':ir cal clear' with nothing in front, ':ir cal near' with the ball in the shooting position); the
-// strength is then (value - clear) / (near - clear), so either polarity works and a digital sensor is simply a two-valued one.
-// A 2-pin sensor can only report how strongly it is driven. It cannot report the ball's position or distance by itself, and it
-// cannot see a ball outside its own field of view: see docs/IR_SENSORS.md for what that means for searching.
+// This detects light REFLECTED from the ball, not an opponent goal and not the ball's own emission. With emitter pulsing on (iremit = 1)
+// every cycle reads the receiver with its emitter off ("dark": ambient light, the ball's own IR) and on ("lit"); the signal is
+// 2048 + (lit - dark), so ambient light and any constant emission cancel and only the reflection of OUR emitter remains.
+//
+// What the firmware does NOT assume: whether a receiver is read as analog or digital (irMode0/1), or which level means "ball". Each receiver
+// is calibrated on the robot (':ir cal clear' with nothing in front, ':ir cal near' with the ball in the shooting position); the strength is
+// (signal - clear) / (near - clear), so either polarity works. A 2-pin receiver gives strength only: it cannot report the ball's position or
+// distance by itself, and it cannot see a ball outside its field of view: see docs/IR_SENSORS.md.
 #pragma once
 #include "config.h"
 #include "health.h"
@@ -18,7 +21,8 @@ static const uint16_t IR_RAIL_LO = 8, IR_RAIL_HI = 4087;
 
 struct IrSensor {
   bool init;                 // first sample taken
-  uint16_t raw;              // last reading (digital sensors: 0 or 4095)
+  uint16_t raw;              // last SIGNAL (what is calibrated): the reading, or 2048 + (lit - dark) with emitter pulsing
+  uint16_t dark, lit;        // last readings with the emitter off / on (iremit = 1 only)
   float avg;                 // smoothed reading
   float s;                   // strength: 0 = "clear" value, 1 = "near" value (negative or above 1 are possible)
   bool seen, near;           // debounced states
@@ -45,6 +49,7 @@ struct Ball {
 };
 static Ball g_ball;
 static uint32_t g_irLastSampleMs = 0;
+static bool g_emitDriven = false;                 // the emitter pins are configured as outputs (iremit = 1)
 
 // ---- calibration accessors --------------------------------------------------------------------
 static uint16_t irClearOf(const Config& c, uint8_t i) { return i == 0 ? c.irClear0 : c.irClear1; }
@@ -93,11 +98,24 @@ static void irBegin() {
   memset(&g_ball, 0, sizeof(g_ball));
   for (uint8_t i = 0; i < IR_SENSORS; i++) g_irs[i].rawMin = 0xFFFF;
   g_irLastSampleMs = 0;
+  g_emitDriven = false;                              // the emitter pins are not touched until iremit = 1
 }
 
-static void irStep(const Config& c, uint8_t i, uint32_t nowMs) {
+// Emitter pins: outputs, LOW (off) between pulses, only while iremit = 1; released to inputs again when it is switched off.
+static void irEmitSync(const Config& c) {
+  if (c.irEmit && !g_emitDriven) {
+    for (uint8_t i = 0; i < IR_SENSORS; i++) { digitalWrite(PIN_IR_EMIT[i], LOW); pinMode(PIN_IR_EMIT[i], OUTPUT); digitalWrite(PIN_IR_EMIT[i], LOW); }
+    g_emitDriven = true;
+    for (uint8_t i = 0; i < IR_SENSORS; i++) g_irs[i].init = false;          // the signal changes meaning: restart the smoothing
+  } else if (!c.irEmit && g_emitDriven) {
+    for (uint8_t i = 0; i < IR_SENSORS; i++) { digitalWrite(PIN_IR_EMIT[i], LOW); pinMode(PIN_IR_EMIT[i], INPUT); }
+    g_emitDriven = false;
+    for (uint8_t i = 0; i < IR_SENSORS; i++) g_irs[i].init = false;
+  }
+}
+
+static void irStep(const Config& c, uint8_t i, uint16_t raw, uint32_t nowMs) {
   IrSensor& s = g_irs[i];
-  uint16_t raw = irReadRaw(c, i);
   s.raw = raw;
   s.samples++;
   if (raw < s.rawMin) s.rawMin = raw;
@@ -111,7 +129,7 @@ static void irStep(const Config& c, uint8_t i, uint32_t nowMs) {
   uint16_t clr = irClearOf(c, i), nr = irNearOf(c, i);
   bool rising = nr > clr;
   bool clearAtRail = rising ? (clr <= IR_RAIL_LO + 30) : (clr >= IR_RAIL_HI - 30);
-  bool atRail = !digital && irCalibrated(c, i) && !clearAtRail && (rising ? raw <= IR_RAIL_LO : raw >= IR_RAIL_HI);
+  bool atRail = !c.irEmit && !digital && irCalibrated(c, i) && !clearAtRail && (rising ? raw <= IR_RAIL_LO : raw >= IR_RAIL_HI);   // no wiring check in emitter mode: a dark receiver cannot be told from a dead one
   if (atRail) {
     s.offRailSinceMs = 0;
     if (!s.railSinceMs) s.railSinceMs = nowMs ? nowMs : 1u;
@@ -162,11 +180,29 @@ static void irUpdateBall(const Config& c, uint32_t nowMs) {
   g_ball.ready = ready;
 }
 
-// Every loop iteration: cheap unless 5 ms have passed.
+// Every loop iteration: cheap unless 5 ms have passed. With emitter pulsing each enabled pair costs one settle time (irsettle, 200 us).
 static void irService(const Config& c, uint32_t nowMs) {
   if (g_irLastSampleMs && elapsedMs(nowMs, g_irLastSampleMs) < IR_SAMPLE_MS) return;
   g_irLastSampleMs = nowMs ? nowMs : 1u;
-  for (uint8_t i = 0; i < IR_SENSORS; i++) if (irEnabled(c, i)) irStep(c, i, nowMs);
+  irEmitSync(c);
+  if (!c.irEmit) {
+    for (uint8_t i = 0; i < IR_SENSORS; i++) if (irEnabled(c, i)) { g_irs[i].dark = g_irs[i].lit = 0; irStep(c, i, irReadRaw(c, i), nowMs); }
+  } else {
+    uint16_t dark[IR_SENSORS] = {0, 0};
+    for (uint8_t i = 0; i < IR_SENSORS; i++) if (irEnabled(c, i)) dark[i] = irReadRaw(c, i);       // both receivers, all emitters off
+    for (uint8_t i = 0; i < IR_SENSORS; i++) {
+      if (!irEnabled(c, i)) continue;
+      digitalWrite(PIN_IR_EMIT[i], HIGH);                                                           // only THIS pair's emitter: no cross-talk between the pairs
+      delayMicroseconds(c.irSettleUs);
+      uint16_t lit = irReadRaw(c, i);
+      digitalWrite(PIN_IR_EMIT[i], LOW);
+      int d = (int)lit - (int)dark[i];
+      if (irModeOf(c, i)) d /= 2;                                                                   // digital receiver: 0 / 4095 -> +-2047
+      int sig = 2048 + d;
+      g_irs[i].dark = dark[i]; g_irs[i].lit = lit;
+      irStep(c, i, (uint16_t)(sig < 0 ? 0 : (sig > 4095 ? 4095 : sig)), nowMs);
+    }
+  }
   irUpdateBall(c, nowMs);
 }
 

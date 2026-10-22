@@ -1,96 +1,132 @@
-# The two front IR sensors: roles, limits, calibration and testing
+# The two front IR pairs (emitter LED + 2-pin receiver): reflected-light ball detection
 
-Hardware: **two 2-pin IR sensors**, no multiplexer, no sensor ring. Each one is wired to its own ESP32 pin and read directly.
+**Status of the circuit: NOT FINAL.** The exact emitter and receiver models are not known to this repository. The circuits below are candidates that depend on the answers to the
+questions in §8. Do not build the final wiring from this page before those are answered.
 
-| Sensor | GPIO | Mounting | Role in the firmware |
+## 1. What is built
+
+Exactly **2 IR transmitter LEDs and 2 two-pin IR receivers**, as **two transmitter–receiver pairs at the front** of the robot. No multiplexer, no 12-receiver ring.
+They detect the ball by **reflected infrared light**: the emitter lights the space in front of the robot and the receiver measures how much of that light comes back from the ball.
+This is a ball detector. It is **not** an opponent-goal detector and not a detector of the ball's own emission.
+
+| Pair | Mounting | Receiver pin | Emitter pin | Role |
+|---|---|---|---|---|
+| **0** | front **centre** | **GPIO35** (input-only, ADC1) | GPIO4 (*proposed*, only if the firmware pulses the LED) | reflection strength → *seen*; *near* = the ball is close enough to be in the shooting position |
+| **1** | front, slightly **off-centre** (right or left of pair 0) | **GPIO36** (input-only, ADC1) | GPIO13 (*proposed*) | with pair 0: is the ball centred or to one side |
+
+**The emitter pins are a proposal, not taken from your wiring notes.** Your notes assign no GPIO to the LEDs. GPIO4 and GPIO13 are free, ordinary I/O pins chosen by this firmware; confirm them or
+tell me different free pins. The firmware **never touches them** unless you set `:set iremit 1` (`:ir emit on`); with the default `iremit 0` it assumes the emitters are hard-wired on (or driven by something else) and uses no GPIO for them.
+
+## 2. Can the two-pin receivers connect directly to the ESP32? (verification)
+
+**No, not as bare parts. This was checked against what a 2-pin IR receiver is and what the ESP32 inputs are; the exact part is still needed to finish it.**
+
+* A two-pin IR receiver is a **photodiode or phototransistor**. It is a current source controlled by light, not a logic output. Wired alone between a GPIO and 3.3 V or GND it produces **no defined voltage**: the pin floats.
+* It therefore needs, at the least, **one resistor** so the light-dependent current becomes a voltage. Whether that alone is enough depends on the part:
+
+| Receiver type | What it gives | Minimum circuit | Amplification / comparator? |
 |---|---|---|---|
-| **0** | **35** | front **centre** | how strong the ball's signal is → *seen*, and *near* = "the ball is close enough to be in the shooting position" |
-| **1** | **36** | front, **slightly off-centre** (to the right or left of sensor 0) | together with sensor 0: is the ball centred or to one side |
+| **Phototransistor** (typically a dark/black or clear 3/5 mm part with a flat or domed lens) | tens of µA to a few mA when lit | **resistor** to make a voltage, ADC or comparator on the pin (circuit A, §2.1) | usually not needed for a reflective sensor at a few cm; a longer range or weak reflection may need a comparator or a higher resistor |
+| **Photodiode** (a clear-lens 5 mm part, often with a flat sensitive area) | **nanoamps to a few µA** | a **transimpedance amplifier** (op-amp) or a very large resistor with a buffer (circuit B) | **yes**: with the 100 kΩ–1 MΩ resistor it would need, the source impedance is far above what the ESP32 ADC input tolerates (about 10 kΩ or less [2nd]) |
+| **Receiver module with its own demodulator/comparator** (TSOP-type) | a logic level | none | already conditioned, but these are **3-pin**: not a 2-pin part |
 
-GPIO35 and GPIO36 are input-only pins with no internal pull resistors, both on ADC1. They can be read as analog (default) or digital.
+Also required, whatever the receiver:
 
-## What a 2-pin sensor can and cannot tell the robot
+* the pin must stay **between 0 and 3.3 V** (the ESP32 is not 5 V tolerant);
+* GPIO35 and GPIO36 are **input-only with no internal pull resistors**: any pull-up or pull-down must be external;
+* an unfiltered receiver sees **ambient light and the ball's own emission**: sunlight, lamps, other robots' IR. That is why the firmware can pulse the emitter and subtract (§4), and why a daylight filter / shroud may still be needed;
+* the ESP32 ADC is not linear near its ends and has a limited input range (about 0.1–3.1 V at the default attenuation [2nd]); the firmware therefore calibrates with real readings instead of assuming a transfer curve.
 
-**Unknown until you tell me the part.** "2-pin IR sensor" is not enough to know what it outputs: a bare IR photodiode or phototransistor
-(2 leads) is a *current*, which needs a resistor to become a voltage on the pin; a 2-pin IR receiver *module* (some have only signal and
-ground plus an internal supply) behaves differently again. Send the **exact part number or a photo of both sensors and of the circuit
-around them**. Until then the firmware assumes nothing about them:
+### 2.1 Circuit A – phototransistor (candidate; values are starting points, not verified)
 
-* whether the pin is read as **analog** (ADC, `:ir mode <n> analog`, the default) or **digital** (`:ir mode <n> digital`) is a setting;
-* which direction means "ball" is **not assumed**: you calibrate each sensor with nothing in front (*clear*) and with the ball in the shooting
-  position (*near*); the strength is `(reading − clear) / (near − clear)`, so a reading that rises *or* falls with the ball both work, and a
-  digital sensor is simply one whose readings are only 0 and 4095.
+```
+ 3.3 V ──┬── collector ┐
+         │             │ phototransistor (emitter toward the pin)
+         │      emitter┴───┬──────── GPIO35 (or GPIO36)
+         │                 │
+         │               R_L  (start with 10 kΩ; 1 kΩ–4.7 kΩ if it saturates, higher if the signal is tiny)
+         │                 │
+ GND ────┴─────────────────┴──── 100 nF from the pin to GND (optional, reduces noise)
+```
+The voltage rises with the light (the firmware also accepts the opposite polarity: e.g. the common-emitter variant with the load resistor to 3.3 V, where the voltage falls when lit; `:ir cal` finds the direction).
+Choose R_L so that, with the ball in the shooting position, the pin sits well inside 0.3–3.0 V and changes by **at least 500 counts** from the "nothing in front" reading.
 
-What one sensor **cannot** do, whatever its type:
+### 2.2 Circuit B – photodiode (candidate)
 
-1. **It gives strength, not position or distance.** It cannot say where the ball is within its field of view, nor how far away it is.
-   Strength is only a proxy for distance, and only for this ball, this mounting, this lighting, and the same surface/colour.
-2. **It sees nothing outside its own field of view.** With two sensors at the front, the robot has no 360° view. A ball behind or beside the
-   robot is invisible. The firmware's answer is a **search**: rotate in place (toward the side where the ball was last seen), pause,
-   reverse direction, give up after a limited number of attempts (`searchtime`, `searchtries`, `searchpause`). That finds a ball only when its signal is detectable from the
-   position the robot rotates around, i.e. it depends on the **range** of the sensors.
-3. **If the sensors are short-range** (reflective sensors that see only a few centimetres) the robot cannot find a distant ball by
-   rotating: it would see it only when it is almost touching the front. A practical fix, if you find that is the case: a longer-range ball
-   sensor (for example a wider-angle receiver for the ball's own IR emission, or a camera) with the two close-range sensors kept for the
-   shooting position. This is **not** added to the firmware: it needs your decision, and the part number.
-4. **Ambient light and other IR sources** change the readings of an unmodulated sensor: sunlight, incandescent lamps, other robots' IR, the
-   ball's own emission. A bare photodiode cannot tell the ball from sunlight. Test in the lighting of the competition hall.
+A reverse-biased photodiode into an op-amp transimpedance stage (feedback resistor in the 100 kΩ–1 MΩ range with a small capacitor), the op-amp powered from 3.3 V, output to the pin.
+It needs a rail-to-rail 3.3 V op-amp and care with leakage and noise: do not build it before the photodiode's datasheet (dark current, sensitivity at the LED's wavelength) is known.
 
-## How the two sensors are used
+### 2.3 If the receivers turn out to be unsuitable
 
-Every 5 ms each enabled sensor is read, smoothed, converted to strength, and compared with two thresholds (with hysteresis and a debounce of `irdebounce` samples):
+If the part is a 3-pin receiver module, or has an open-collector / digital output, the interface is simpler (a pull-up to 3.3 V, read as digital: `:ir mode <n> digital`), but this is **not** the case that was described.
 
-* **seen** at `irseen` % (default 15 %) of the clear→near span;
-* **near** at `irnearpct` % (default 70 %).
+## 3. The IR transmitter LEDs (candidate)
 
-From the two sensors:
+A GPIO **cannot drive an IR LED directly**: an ESP32 pin should source only about 12 mA continuously (the absolute maximum is higher, but not for a load) [2nd], while typical IR LEDs are run at 20–100 mA.
+Use a transistor driver per emitter (or one for both):
 
-| What the sensors report | What the robot does |
+```
+ supply (3.3 V or 5 V) ── R_LED ── LED anode … LED cathode ── NPN collector (or N-MOSFET drain)
+                                                    NPN emitter (or source) ── GND
+ ESP32 emitter pin ── 1 kΩ ── NPN base        (for a logic-level N-MOSFET: pin to the gate, 10 kΩ gate-to-GND)
+```
+`R_LED = (V_supply − V_f − V_ce(sat)) / I_f`. With **assumed** values V_supply = 5 V, V_f = 1.3 V (typical for a 940 nm LED; **read yours**), V_ce(sat) = 0.2 V and I_f = 20 mA this is about 175 Ω (use 180 Ω).
+Use the LED's datasheet for the real forward voltage, the continuous current and the pulsed current. The firmware pulses an emitter for about `irsettle` (200 µs) every 5 ms, which is a duty of a few percent.
+**HIGH on the emitter pin = LED on.** Common ground with the ESP32 is required.
+
+If you choose not to let the firmware control the LEDs, hard-wire each LED with its resistor to the supply (always on). Detection still works, but ambient light is no longer cancelled (§4).
+
+## 4. How the firmware uses the pairs
+
+Every 5 ms each enabled receiver is read. With `iremit 0` (default) the reading is used as it is. With `iremit 1` each pair is measured **twice**: with its emitter off ("dark": ambient light and any constant emission such as the ball's own)
+and on ("lit"), one pair at a time so the pairs do not disturb each other. The signal is `2048 + (lit − dark)`, so only the reflection of **our own** emitter remains.
+`2048` means "no reflection"; the direction of change (up or down) is learned in the calibration, so a receiver that goes low when lit works as well.
+
+From the signal: strength = `(signal − clear) / (near − clear)`, **seen** at `irseen` % (15 %) and **near** at `irnearpct` % (70 %), with hysteresis and `irdebounce` samples.
+
+| What the pairs report | What the robot does |
 |---|---|
 | neither sees the ball | no ball: after `losthold` ms (300) the ball is "lost" and the robot searches |
-| the ball is seen, far | drives forward at `approach` speed, slowing smoothly as the strength rises to the near level (down to `slow`) |
-| **only one** sensor sees it | cautious: forward speed limited to `slow`, plus a small sideways move (at most `alignspeed`) toward the ball's side **if the mounting side of sensor 1 is set** (`:ir side right|left`, or `:set iroffset 1|-1`). Sensor 1 alone → the ball is on sensor 1's side; sensor 0 alone → on the other side |
-| **both** see it | sideways correction from the strength difference until centred (`|offset| ≤ center`, default 0.35) |
-| sensor 0 reports **near** (and, with `irneedboth` = 1, sensor 1 sees it too) | **shooting position**: forward motion stops, a small sideways correction continues only while off-centre |
-| shooting position **and** centred, held for `shoothold` ms, goal heading registered, `shootenable` = 1 | the shot (below) |
+| the ball is seen, far | drives forward at `approach` speed, slowing as the reflection strengthens (down to `slow`) |
+| **only one** pair sees it | cautious: forward speed limited to `slow`, plus a small sideways move (at most `alignspeed`) toward the ball's side **if the mounting side of pair 1 is set** (`:ir side right|left`). Pair 1 alone → the ball is on pair 1's side; pair 0 alone → on the other side |
+| **both** see it | sideways correction from the strength difference until centred (`|offset| ≤ center`, 0.35) |
+| pair 0 reports **near** (and, with `irneedboth` 1, pair 1 sees it too) | **shooting position**: forward motion stops; a small sideways correction continues only while off-centre |
+| shooting position and centred for `shoothold` ms, goal heading registered, `shootenable` 1 | the shot (§6) |
 
-Assumptions to **check on the robot** (the firmware cannot know them):
+Assumptions to **check on the robot**: the two beams overlap at the shooting position (otherwise `:set irneedboth 0`); which side pair 1 is on (`iroffset` 0 = not set → no sideways move is ever made); the offset sign (−1 left … +1 right as seen from behind).
 
-* **Overlap.** "Both sensors see the ball ⇒ shooting position" assumes the two fields of view overlap at the shooting distance. If at the shooting
-  position sensor 1 does *not* see the ball, `:set irneedboth 0` makes sensor 0 alone decide.
-* **Side.** With the mounting side not set (`iroffset` 0, the default) no sideways move is ever made; the robot only slows down and
-  stops forward motion at the shooting position.
-* **Offset sign convention.** The offset is −1 (left) … +1 (right) as seen from behind the robot. If the robot strafes the wrong way, set the opposite side.
+## 5. Limits that no software can remove
 
-## Shooting (no kicker is installed)
+1. **Strength, not position or distance.** A receiver cannot say where in its field of view the ball is, or how far. Reflection strength also depends on the ball's size, colour and surface, the emitter's current, the angle, and the receiver's aim.
+2. **Short range.** A reflective pair typically sees a few centimetres to a few tens of centimetres, depending on the parts. Outside its field of view and range it sees nothing, so the robot has **no 360° view**: it finds a ball by **rotating** (search), which only works when the ball is within range of the front pairs. If your parts turn out to be short-range, a longer-range ball sensor (or a camera) is the practical fix for *finding* the ball; the pairs stay for the shooting position. Nothing like that is added without your decision.
+3. **Other IR sources.** Pulsing the emitter removes ambient light and the ball's own emission from the signal; it does not remove other pulsed IR sources aimed at the receivers, nor sunlight so strong that the receiver saturates (then both the dark and lit readings sit at the end stop and the reflection is lost). A shroud, a daylight filter or a lower R_L helps.
+4. **Nothing here is tested on the robot.** Whether these parts detect your ball reliably, at what range and in what lighting, is **NOT TESTED**.
 
-The project has **no kicker or other shooting actuator**, and none is invented. The "shot" is the one built in the firmware: aim, reverse a
-little, then drive forward at full power. It is **off by default** (`shootenable 0`).
+## 6. Shooting (no kicker is installed)
+
+There is **no kicker or other shooting actuator** in the project and none is assumed. The "shot" is the one built in the firmware (off by default, `shootenable 0`): aim, reverse a little, then drive forward at full power.
 
 1. Place the robot pointing straight at the goal and keep it still. `goalregms` (5 s) after power-on, once the MPU6050 is calibrated, the heading is registered as "straight at the goal" (`:goal` shows it, `:goal set` registers again, `:goal clear` forgets it).
-2. When the ball is in the shooting position (above) for `shoothold` ms: rotate in place until within half the aim window of the goal heading; at the same time (`shootparallel` 1) reverse at `shootbackspeed` for `shootbackms`; then drive forward along the goal heading for `shootdrivems` at `shootpwm` (255 = full power; the acceleration limit is lifted for the shot).
-3. Aim window from the goal size: half-angle = atan(((goalwidth − balldia) / 2) / goaldist), clamped to 2–20°; the shot fires inside half of that. Defaults: goal 450 mm, ball 43 mm, distance 1000 mm → window ±11.5°, fires within about ±5.7°. Set your field's real values with `:set goalwidth` and `:set goaldist` (the 2024 international rules were reported to give 600 mm and Australian rules 450 mm; the current rulebook could not be downloaded here: check yours).
-4. Cancelled (cooldown started) if the aim takes longer than `aimtimeout`, the gyro reference is lost, or the ball leaves the shooting position for 400 ms. One shot per ball: the ball must leave sensor 0 before another shot can start. `:zero`, a gyro recalibration or an IMU outage invalidate the registered goal heading (`:goal` says INVALID; `:goal set`).
+2. With the ball in the shooting position for `shoothold` ms: rotate in place until within half the aim window of the goal heading; at the same time (`shootparallel` 1) reverse at `shootbackspeed` for `shootbackms`; then drive forward along the goal heading for `shootdrivems` at `shootpwm` (255 = full power; the acceleration limit is lifted for the shot).
+3. Aim window from the goal size: half-angle = atan(((goalwidth − balldia) / 2) / goaldist), clamped to 2–20°; the shot fires inside half of that. Defaults: goal 450 mm, ball 43 mm, distance 1000 mm → ±11.5°, fires within about ±5.7°. Set your field's real values (`:set goalwidth`, `:set goaldist`).
+4. Cancelled (cooldown started) if the aim exceeds `aimtimeout`, the gyro reference is lost, or the ball leaves the shooting position for 400 ms. One shot per ball. `:zero`, a gyro recalibration or an IMU outage invalidate the registered goal heading (`:goal set`). The registered heading drifts with the gyro.
 
-The registered heading drifts with the gyro; nothing corrects it during a match.
+## 7. Calibration and testing procedure (motors off, wheels lifted)
 
-## Wiring a 2-pin IR sensor (example; check against your part)
-
-An IR **phototransistor/photodiode** gives a current. To read it, make a divider: sensor between 3.3 V and the pin, resistor from the pin to GND
-(or the other way round). Start with 10 kΩ and adjust until the reading with nothing in front is clearly away from 0 and 4095 and changes by at least
-500 counts with the ball in the shooting position. Keep the pin voltage between 0 and 3.3 V. Add a 100 nF capacitor from the pin to GND close to the ESP32 if the reading is noisy.
-Whichever way you wire it, `:ir cal` learns the direction. A sensor with its own LED (reflective type) needs the LED supply and resistor as its datasheet says.
-
-## Calibration and sensor-testing procedure (motors off, wheels lifted)
-
-1. Power up. `i` shows both sensors, `NOT CALIBRATED`; `a` is refused until sensor 0 is calibrated. Autonomy is off.
-2. **Check the raw readings.** With nothing in front: `i` repeatedly for 30 s: raw should be stable (a few counts). Cover the sensor with your hand / hold the ball in front: raw should change clearly. Note min/max (`:ir reset` clears them). Once calibrated, a reading held at the end stop on the *clear* side for 2 s (stuck at 0 for a sensor whose reading rises with the ball, at 4095 for one that falls) raises `IR_FRONT` (sensor 0, CRITICAL: SAFE_STOP) or `IR_ALIGN` (sensor 1, DEGRADED): check the wiring. The end stop on the *near* side is legitimate (a ball touching the sensor can saturate it). Calibrate the *clear* reading in the lighting you will use: a photodiode that reads 0 in a dark hall must be calibrated there, otherwise the check will fire (a clear value within 38 counts of the end stop switches the check off).
-3. If the sensor is a digital output (reads only 0 / 4095): `:ir mode 0 digital` (this clears its calibration).
-4. **Calibrate sensor 0:** nothing in front → `:ir cal clear 0`; ball in the shooting position → `:ir cal near 0`. The firmware says whether a higher or lower reading means a closer ball. Same for sensor 1 (`:ir cal clear 1`, `:ir cal near 1` with the ball where sensor 1 should see it).
-5. `:set iroffset 1` (sensor 1 right of sensor 0) or `-1` (left). `:save`.
-6. **Test the states.** `I` toggles a live view. Move the ball from far to near on the centre line: `seen`, then `near` on sensor 0. Move it left and right at the shooting distance: the printed `off=` should be `left`/`centre`/`right` correctly; if it is mirrored, change `iroffset`. Cover each sensor in turn: single-sensor guidance.
-7. **Record a table** (distance in cm vs raw for each sensor, with the ball centred and 2 cm left/right) for your own thresholds. Adjust `irseen`, `irnearpct`, `center`, `irdebounce`.
-8. **Interference.** Repeat step 2 with the lighting of the competition hall, sunlight if there is any, other robots' emitters on, and the motors running with the wheels lifted. A bare IR sensor that moves with these has to be shielded (tube, hood, filter) or replaced by a modulated receiver.
+1. **Before any power:** answer the questions in §8; build the receiver circuit (§2) and, if you want the firmware to pulse the LEDs, the driver (§3); check with a meter that each receiver pin stays within 0–3.3 V in light and dark and that no emitter pin sources more than a few mA.
+2. Power up. `i` shows both pairs, `NOT CALIBRATED`; `a` is refused until pair 0 is calibrated. Autonomy is off.
+3. **Raw readings** (emitters as wired, `iremit 0`): `i` repeatedly for 30 s with nothing in front: stable to a few counts. Put the ball in front: the reading must change clearly. `:ir reset` clears min/max. Stuck at the end stop on the clear side for 2 s raises `IR_FRONT` (pair 0, CRITICAL) / `IR_ALIGN` (pair 1, DEGRADED): check the wiring.
+4. If the receiver output is digital (only two values): `:ir mode <n> digital`. To let the firmware pulse the emitters: `:ir emit on` (clears the calibrations); check with the LEDs visible through a phone camera that they blink.
+5. **Calibrate** each pair: nothing in front → `:ir cal clear 0`; ball in the shooting position → `:ir cal near 0`; same for pair 1. The firmware says whether a higher or lower signal means a closer ball. `:set iroffset 1|-1` (or `:ir side right|left`). `:save`.
+6. **States.** `I` shows a live view. Move the ball far → near on the centre line (`seen`, then `near`), left/centre/right at the shooting distance (the printed offset side must match), cover each receiver in turn.
+7. **Table.** Distance (cm) against signal for each pair with the ball centred and 2 cm to each side; adjust `irseen`, `irnearpct`, `center`, `irdebounce`.
+8. **Interference.** Repeat step 3 in the competition lighting, with sunlight if there is any, other robots' emitters on, and the motors running (wheels lifted). Note how the signal moves with `iremit 0` and with `iremit 1`.
 9. Only then: autonomy on the stand (`a`), then the floor at low speed.
 
-Nothing in this procedure has been performed on the robot: the response of your sensors to the real ball is **NOT TESTED**.
+## 8. What I need from you before the circuit can be finalised
+
+1. **Receivers:** the exact part number or marking, or a clear photo of both sides (lens colour, flat or domed, any markings) and the datasheet link. Photodiode or phototransistor? Any filter (black/dark epoxy)?
+2. **Emitters:** the exact part number (wavelength, forward voltage, maximum continuous and pulsed current), and how you want them powered (3.3 V, 5 V, or the motor battery through a regulator).
+3. **Emitter control:** may the firmware control the LEDs? If yes, which free GPIOs do you want (the proposal is GPIO4 and GPIO13), and what driver do you have (NPN, logic-level MOSFET)? If no, they stay hard-wired on.
+4. **Mounting:** the distance between the two pairs, their aiming (straight ahead or angled), the side the offset pair is on, the height above the floor, and whether a shroud or tube separates the receivers from the emitters (the receiver must not see the LED directly).
+5. **Ball:** the ball you use (the RoboCupJunior IR ball emits its own IR, so a reflective pair sees the ball's emission as well as the reflection; pulsing the emitter cancels the emission) and its colour.

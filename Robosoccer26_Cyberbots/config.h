@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 13
+#define CFG_VERSION 14
 
 struct Config {
   uint32_t magic;
@@ -37,7 +37,10 @@ struct Config {
   uint8_t irDebounce;            // consecutive 5 ms samples needed to change a sensor's state
   int8_t irOffsetSide;           // sensor 1 is mounted to the RIGHT (+1) or LEFT (-1) of sensor 0 as seen from behind; 0 = not set: no sideways guidance
   uint8_t irNeedBoth;            // 1: the shooting position also needs sensor 1 to see the ball (when sensor 1 is usable)
-  uint16_t irRailMs;             // an analog sensor held at the ADC end stops this long is reported faulty (wiring)
+  uint16_t irRailMs;             // an analog sensor held at the ADC end stop on its clear side this long is reported faulty (wiring); not checked while iremit = 1
+  uint8_t irEmit;                // 0 = emitters hard-wired (always on) or driven elsewhere: the firmware does not touch the emitter pins.
+                                 // 1 = the firmware pulses each emitter and subtracts the ambient light: signal = 2048 + (lit - dark), per pair
+  uint16_t irSettleUs;           // iremit = 1: wait this long after switching an emitter before reading its receiver
 
   // ---- navigation ----
   uint16_t lostHoldMs;           // ball stays "valid" this long after both sensors stopped seeing it
@@ -125,6 +128,8 @@ static const ParamDef PARAMS[] = {
   PD("iroffset", PT_I8, irOffsetSide, -1, 1),
   PD("irneedboth", PT_U8, irNeedBoth, 0, 1),
   PD("irrailms", PT_U16, irRailMs, 200, 20000),
+  PD("iremit", PT_U8, irEmit, 0, 1),
+  PD("irsettle", PT_U16, irSettleUs, 20, 2000),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
   PD("center", PT_F32, centerBand, 0.1, 0.9),
   PD("approach", PT_F32, approachSpeed, 0.15, 1.0),
@@ -223,6 +228,8 @@ static void cfgDefaults(Config& c) {
   c.irOffsetSide = 0;            // unknown mounting side: no sideways guidance until ':set iroffset 1|-1'
   c.irNeedBoth = 1;
   c.irRailMs = 2000;
+  c.irEmit = 0;                  // emitter control is OFF until you confirm how the LEDs are driven and set ':set iremit 1'
+  c.irSettleUs = 200;
   c.lostHoldMs = 300;
   c.centerBand = 0.35f;
   c.approachSpeed = 0.5f;

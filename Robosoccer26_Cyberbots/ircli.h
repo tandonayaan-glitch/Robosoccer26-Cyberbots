@@ -1,4 +1,4 @@
-// ircli.h - ':ir' command: status, per-sensor calibration, read mode, mounting side.
+// ircli.h - ':ir' command: status, per-receiver calibration, read mode, emitter pulsing, mounting side.
 #pragma once
 
 static bool g_irCalSet[2][2];                       // [sensor][0 = clear, 1 = near] captured since boot
@@ -14,6 +14,15 @@ static void cmdIr(Config& c, const char* a1, const char* a2, const char* a3) {
   if (!a1) { printIrSnapshot(c); return; }
   uint8_t i;
   if (!strcmp(a1, "reset")) { irResetStats(); say("INFO", "IR min/max cleared"); return; }
+  if (!strcmp(a1, "emit") && a2 && (!strcmp(a2, "on") || !strcmp(a2, "off"))) {
+    c.irEmit = !strcmp(a2, "on") ? 1 : 0;
+    c.irClear0 = c.irNear0 = c.irClear1 = c.irNear1 = 0;
+    for (uint8_t k = 0; k < 2; k++) g_irCalSet[k][0] = g_irCalSet[k][1] = false;
+    if (c.irEmit) say("INFO", "emitter pulsing ON: the firmware drives GPIO%u (pair 0) and GPIO%u (pair 1) HIGH = LED on, through YOUR transistor driver (never straight from the pin). The signal is now 2048 + (lit - dark). Calibrations cleared: ':ir cal clear|near 0|1' again, then ':save'",
+                    (unsigned)PIN_IR_EMIT[0], (unsigned)PIN_IR_EMIT[1]);
+    else say("INFO", "emitter pulsing OFF: the emitter pins are released (inputs); the emitters must be hard-wired on. Calibrations cleared: ':ir cal clear|near 0|1' again");
+    return;
+  }
   if (!strcmp(a1, "side") && a2) {
     if (!strcmp(a2, "right")) c.irOffsetSide = 1;
     else if (!strcmp(a2, "left")) c.irOffsetSide = -1;
@@ -49,5 +58,5 @@ static void cmdIr(Config& c, const char* a1, const char* a2, const char* a3) {
     }
     return;
   }
-  say("WARN", "usage: :ir | :ir cal clear|near <0|1> | :ir mode <0|1> analog|digital | :ir on|off <0|1> | :ir side right|left|none | :ir reset");
+  say("WARN", "usage: :ir | :ir cal clear|near <0|1> | :ir mode <0|1> analog|digital | :ir on|off <0|1> | :ir emit on|off | :ir side right|left|none | :ir reset");
 }

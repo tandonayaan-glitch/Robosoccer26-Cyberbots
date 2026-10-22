@@ -8,10 +8,10 @@ Nothing here is a measurement of the physical robot.
 
 | Check | Result |
 |---|---|
-| **REAL-BUILD**, Arduino-ESP32 **2.0.17**, FQBN `esp32:esp32:esp32`, `--warnings all` | builds, **0 warnings**, 408,269 B flash (31 %), 64,396 B RAM (19 %) |
-| **REAL-BUILD**, Arduino-ESP32 **3.0.7** | builds, **0 warnings**, 431,745 B flash (32 %), 63,128 B RAM (19 %) |
-| **HOST** (`test/run_tests.sh`): 62 test cases × 2 core API shapes (mock core v3 and v2) | **124/124 runs pass**, 4,568 checks, `-Wall -Wextra -Wshadow`, ASan + UBSan |
-| Pin map | `static_assert`s: 12 motor + 2 I2C output pins distinct; the two IR pins distinct, not outputs, valid input-only GPIOs on the real SoC masks; no flash pins, GPIO0 or GPIO12 |
+| **REAL-BUILD**, Arduino-ESP32 **2.0.17**, FQBN `esp32:esp32:esp32`, `--warnings all` | builds, **0 warnings**, 410,181 B flash (31 %), 64,428 B RAM (19 %) |
+| **REAL-BUILD**, Arduino-ESP32 **3.0.7** | builds, **0 warnings**, 433,477 B flash (33 %), 63,160 B RAM (19 %) |
+| **HOST** (`test/run_tests.sh`): 65 test cases × 2 core API shapes (mock core v3 and v2) | **130/130 runs pass**, 4,656 checks, `-Wall -Wextra -Wshadow`, ASan + UBSan |
+| Pin map | `static_assert`s: 12 motor + 2 I2C output pins distinct; the two receiver pins distinct, not outputs, valid input-only GPIOs on the real SoC masks; the two (proposed) emitter pins distinct from every other pin, output-capable, not flash pins, GPIO0 or GPIO12; the emitter pins are never touched while `iremit` = 0 (`t_ir_emit_pins_untouched_by_default`) |
 | Removed hardware | `test/run_tests.sh` greps the firmware sources for the old multiplexer, ring and three-pin receiver names and fails if any reappears; `t_old_hardware_removed` checks that the old commands are gone and the outputs mention none of it |
 | STATIC | cppcheck: 1 style note (a never-used variable in `cli.h`, pre-existing); clang-tidy: 1 known analyser artefact in `util.h` (pre-existing); Valgrind memcheck clean on 12 test cases |
 
@@ -28,7 +28,8 @@ Simulated shot timing (assumed rotation model of 180°/s at full rotation comman
 
 ## What was NOT verified
 
-* **The real sensors**: their type, polarity, range, field of view, response to the real ball, lighting and motor-noise sensitivity (**PHYS**). The test inputs are made-up numbers.
+* **The real receivers and emitters**: their models, the receiver and LED-driver circuits (candidates only), polarity, range, field of view, response to the real ball, lighting and motor-noise sensitivity (**PHYS**). The test inputs are made-up numbers; the emitter model in the tests (reading = ambient + reflection while lit) is an assumption.
+* Whether the emitter pins GPIO4 / GPIO13 match your wiring (they are a proposal).
 * Whether the two fields of view overlap at the shooting position, and which side sensor 1 is on (set by you).
 * The motors' direction and rotation, speeds, stall, the reset-state of the L298N inputs, the power supply (**PHYS**).
 * The gyro drift over a match and the real rotation speed used by the aim; whether 400 ms of full power is the right shot (**PHYS**).

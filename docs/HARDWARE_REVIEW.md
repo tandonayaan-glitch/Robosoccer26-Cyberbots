@@ -12,11 +12,12 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 | 4 | yellow BO geared DC motor | stall current **[?]**; measure |
 | 4 | mecanum wheel | roller layout X or O: `:roller X|O`, tested with `:dtest` |
 | 1 | 3S 11.1 V 4500 mAh battery | 12.6 V when full: see the L298N regulator note below |
-| 2 | 2-pin IR sensor | **exact part [?]**: see `docs/IR_SENSORS.md` |
+| 2 | IR transmitter LED | front, one per pair; **exact part [?]** (wavelength, forward voltage, current) |
+| 2 | 2-pin IR receiver (photodiode or phototransistor) | front, one per pair; **exact part [?]**: it cannot connect to a GPIO without at least a resistor: see `docs/IR_SENSORS.md` §2 |
 | 1 | MPU6050 (gyro + accelerometer) breakout | |
 | 1 | breadboard, jumper wires, power wiring | |
 
-**Removed hardware (do not reintroduce):** the CD74HC4067 multiplexer and the 12-receiver three-pin TSOP ring. The firmware contains no code for them
+**Ball detection hardware: exactly 2 IR transmitter LEDs and 2 IR receivers**, as two transmitter–receiver pairs at the front, for **reflected-light** ball detection. **Removed hardware (do not reintroduce):** the CD74HC4067 multiplexer and the 12-receiver three-pin TSOP ring. The firmware contains no code for them
 (`test/run_tests.sh` fails if their names reappear in the sources).
 
 **No kicker or shooting actuator is installed.** No kicker pin exists. The firmware "shot" is a drive burst (`docs/IR_SENSORS.md`).
@@ -38,9 +39,10 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 
 | Device | Pin on the device | ESP32 | Notes |
 |---|---|---|---|
-| IR sensor 0 (front centre) | signal node | **GPIO35** | input-only, ADC1_CH7, no internal pull; analog by default, digital selectable |
-| IR sensor 1 (front, offset) | signal node | **GPIO36** | input-only, ADC1_CH0, no internal pull |
-| both sensors | supply / return | 3.3 V (or as the part requires) and GND | the pin voltage must stay within 0–3.3 V |
+| IR receiver 0 (pair 0, front centre) | signal node of the receiver circuit | **GPIO35** | input-only, ADC1_CH7, no internal pull; **needs a resistor (or more) between the 2-pin part and the pin: not a direct connection** (`docs/IR_SENSORS.md` §2) |
+| IR receiver 1 (pair 1, front, offset) | signal node of the receiver circuit | **GPIO36** | input-only, ADC1_CH0, no internal pull |
+| IR emitter 0 / 1 driver input | transistor base (via about 1 kΩ) or MOSFET gate | **GPIO4 / GPIO13 – PROPOSED, not from your notes; used only if `iremit` = 1** | a GPIO cannot drive an IR LED directly: use a transistor driver (`docs/IR_SENSORS.md` §3); HIGH = LED on |
+| receivers and emitters | supply / return | 3.3 V or 5 V per the part and the driver design; GND common | every receiver pin voltage must stay within 0–3.3 V |
 | MPU6050 | SDA | **GPIO16** | explicit `Wire.begin(16, 17)`; address 0x68 or 0x69 auto-detected |
 | MPU6050 | SCL | **GPIO17** | |
 | MPU6050 | VCC / GND | 3.3 V (check your breakout's regulator) / GND | |
@@ -59,13 +61,13 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 | Used | GPIOs |
 |---|---|
 | Motors (12) | 18, 19, 21, 22, 23, 5 (left) · 25, 26, 27, 14, 33, 32 (right) |
-| IR sensors (2) | 35, 36 |
+| IR receivers (2) | 35, 36 |
+| IR emitter drivers (2), **proposed**, unused unless `iremit` = 1 | 4, 13 |
 | I2C / MPU6050 (2) | 16, 17 |
 | Serial | 1, 3 |
 | Unusable | 6–11 (flash) |
 
-**Still free** (after removing the multiplexer): **GPIO34** and **GPIO39** (input-only, ADC1; no internal pull) · **GPIO4, GPIO13** (ordinary I/O; GPIO4 appears in the
-strapping register: expect no effect on a high-impedance input) · **GPIO2** and **GPIO15** (strapping pins: GPIO2 must not be pulled high at boot, GPIO15 silences the boot log
+**Still free** (after removing the multiplexer): **GPIO34** and **GPIO39** (input-only, ADC1; no internal pull) · **GPIO2** and **GPIO15** (strapping pins: GPIO2 must not be pulled high at boot, GPIO15 silences the boot log
 when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12** are boot-strapping pins and are deliberately left unused
 (GPIO0 selects the download mode, GPIO12 selects the flash voltage). GPIO32–39 other than those used are ADC1.
 
@@ -77,7 +79,8 @@ when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12**
 | L298N inputs from 3.3 V | normally accepted [2nd]; remove the ENA/ENB jumpers |
 | L298N motor supply | 11.1 V nominal. The bipolar L298N drops about 2 V, so a motor sees about 9 V at full duty [2nd]; about 2 A per channel continuous [2nd] |
 | BO motor current **[?]** | measure the stall current; add current limiting/fuses if it exceeds the driver rating. Firmware limits: manual PWM ≤ 150/255, autonomous ≤ 170/255 (placeholders), the shot's drive phase uses `shootpwm` (255 by default: lower it if the driver or battery cannot take it) |
-| IR sensor pins | input-only, **no internal pull-up/down**. An open (unconnected) analog pin floats; a reading stuck at an end stop for 2 s raises a fault; a floating pin in the middle of the range does not |
+| IR receiver pins | input-only, **no internal pull-up/down**. A bare 2-pin receiver needs a resistor (phototransistor) or an amplifier (photodiode). An open (unconnected) analog pin floats; a reading stuck at the clear-side end stop for 2 s raises a fault (not checked while the emitters are pulsed); a floating pin in the middle of the range does not |
+| IR emitter LEDs | never from a GPIO directly (about 12 mA limit [2nd] against typically 20–100 mA); transistor driver, resistor from the LED datasheet; the firmware pulses an emitter for about 200 µs every 5 ms (a few percent duty) only when `iremit` = 1 |
 | Motor noise | the L298N drivers and brushed motors inject noise into supplies: decouple the sensor supply (100 nF close to the sensor), keep the sensor wires away from motor wires |
 | MPU6050 breakout **[?]** | GY-521-type boards carry a 3.3 V regulator and 4.7 kΩ pull-ups to the regulated rail; confirm yours does not pull SDA/SCL up to 5 V |
 | I2C on GPIO16/17 | free on a plain ESP-32S (WROOM) module; PSRAM modules use them |
@@ -93,8 +96,8 @@ when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12**
 
 ## 6. Known limitations
 
-1. **The IR sensors give strength only** (no position, no distance) and have a limited field of view: see `docs/IR_SENSORS.md`. The robot finds a ball outside the field of view only by rotating.
-2. **Response to the real ball is NOT TESTED**; the sensors' type and circuit are not known to the firmware.
+1. **The IR pairs give reflection strength only** (no position, no distance), have a limited range and field of view, and the receiver circuit is not final: see `docs/IR_SENSORS.md`. The robot finds a ball outside their range only by rotating.
+2. **Response to the real ball is NOT TESTED**; the receivers' and emitters' exact models and circuits are not known to the firmware.
 3. **No wheel feedback**: commanded PWM only. Rotation, stall, driver faults and wheel slip are NOT MEASURABLE; `:mok` records an operator observation only.
 4. **No battery or current measurement.** Brownout resets are the only power evidence.
 5. **Gyro heading drifts**; it is relative to the last reference. The goal heading is registered once at start-up.

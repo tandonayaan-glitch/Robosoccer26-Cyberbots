@@ -59,6 +59,11 @@ static uint64_t g_mockUs = 5000000ULL;   // start at 5 s so nothing depends on t
 static uint16_t g_mockAnalog[64];
 static uint8_t g_pinLevel[64];
 static uint8_t g_pinMode[64];
+// Optional emitter model (g_mockEmitModel = true): a receiver reads ambient + (its emitter lit ? reflection : 0). The emitter is "lit" while the firmware
+// drives its pin HIGH; while the pin is not an output the emitter counts as hard-wired on when g_mockEmitHardwired is true.
+static bool g_mockEmitModel = false, g_mockEmitHardwired = true;
+static uint16_t g_mockAmbient[64], g_mockReflect[64];
+static uint32_t g_mockEmitWrites[64];
 
 // Serial TX model: 115200 8N1 ~ 11520 B/s, 2048 B buffer
 static double g_serialRoom = 2048;
@@ -80,13 +85,20 @@ static inline void yield() {}
 
 // ---- GPIO --------------------------------------------------------------------------------
 static inline void pinMode(uint8_t p, uint8_t m) { g_pinMode[p] = m; }
-static inline void digitalWrite(uint8_t p, uint8_t v) { g_pinLevel[p] = v ? 1 : 0; }
+static inline void digitalWrite(uint8_t p, uint8_t v) { g_pinLevel[p] = v ? 1 : 0; g_mockEmitWrites[p]++; }
+static inline int analogRead(uint8_t p);
 static inline int digitalRead(uint8_t p) {
-  if (p == 35 || p == 36) return g_mockAnalog[p] >= 2048 ? 1 : 0;
+  if (p == 35 || p == 36) return analogRead(p) >= 2048 ? 1 : 0;
   if (p == 16 || p == 17) return 1;
   return g_pinLevel[p];
 }
-static inline int analogRead(uint8_t p) { return g_mockAnalog[p]; }
+static inline int analogRead(uint8_t p) {
+  if (!g_mockEmitModel) return g_mockAnalog[p];
+  int emit = p == 35 ? 4 : (p == 36 ? 13 : -1);
+  bool lit = emit >= 0 && (g_pinMode[emit] == OUTPUT ? g_pinLevel[emit] != 0 : g_mockEmitHardwired);
+  int v = (int)g_mockAmbient[p] + (lit ? (int)g_mockReflect[p] : 0);
+  return v > 4095 ? 4095 : v;
+}
 
 // ---- LEDC -----------------------------------------------------------------------------------
 static uint32_t g_pwmDuty[64];
