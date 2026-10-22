@@ -238,6 +238,7 @@ static void cliExecLine(char* line, uint32_t now) {
     } else if (t[1] && !strcmp(t[1], "clear")) { g_goalRefSet = false; g_goalWaitNoted = false; g_goalAutoOff = true; say("INFO", "goal heading cleared; it stays unregistered until ':goal set' (no shot without it)"); }
     else if (t[1]) say("WARN", "usage: :goal [set|clear]");
     else if (!g_goalRefSet) say("INFO", "goal heading not registered (registers %u ms after power-on; ':goal set' does it now)", (unsigned)c.goalRegisterMs);
+    else if (!goalValid()) say("WARN", "goal heading registered but INVALID: the gyro reference was reset (':zero', recalibration or an IMU outage). Point the robot at the goal and use ':goal set'");
     else say("INFO", "goal heading %.1f deg (gyro yaw), current yaw %.1f, error %.1f deg; aim window +-%.1f deg (goal %u mm wide, %u mm away, ball %u mm); fires at half of it",
              (double)g_goalYaw, (double)g_imu.yaw, (double)angDiffDeg(g_goalYaw, g_imu.yaw), (double)shootAimTolDeg(c), (unsigned)c.goalWidthMm, (unsigned)c.goalDistMm, (unsigned)c.ballDiaMm);
   }

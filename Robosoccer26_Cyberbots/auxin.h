@@ -36,6 +36,7 @@ struct AuxState {
   uint32_t dSamples, dRaw[2], dMin[2], dMax[2]; float dAvg[2];
   uint8_t level[2];                                    // 0 clear, 1 near (slow down), 2 stop zone
   bool held; uint8_t heldCount;                        // ball held at the front sensor (debounced)
+  uint8_t init;                                        // bit i: dAvg[i] has been seeded with a first reading
 };
 static AuxState g_aux;
 
@@ -90,7 +91,7 @@ static bool holdState(float raw, uint16_t clearRaw, uint16_t heldRaw, bool prev)
   return prev ? (x > -m) : (x > m);
 }
 // Pin 36 carries an analog sensor (avoidance sensor 1 or the ball-held sensor): no edge interrupts there.
-static bool auxPin36Analog(const Config& c) { return (c.avoidMask & 2) || (c.holdEnable && c.holdSensor == 1); }
+static bool auxPin36Analog(const Config& c) { return (c.avoidMask & 2) || c.holdSensor == 1; }
 
 static void auxAttachRx(bool want) {
   static bool attached = false;
@@ -122,7 +123,8 @@ static void auxService(uint32_t nowMs) {
     g_aux.dRaw[i] = raw;
     if (raw < g_aux.dMin[i]) g_aux.dMin[i] = raw;
     if (raw > g_aux.dMax[i]) g_aux.dMax[i] = raw;
-    g_aux.dAvg[i] = g_aux.dSamples == 0 ? (float)raw : g_aux.dAvg[i] * 0.6f + (float)raw * 0.4f;   // about 2-3 samples = 40-60 ms
+    if (!((g_aux.init >> i) & 1u)) { g_aux.init |= (uint8_t)(1u << i); g_aux.dAvg[i] = (float)raw; }
+    else g_aux.dAvg[i] = g_aux.dAvg[i] * 0.6f + (float)raw * 0.4f;   // about 2-3 samples = 40-60 ms
     uint16_t slow = i == 0 ? g_cfg.avoid0Slow : g_cfg.avoid1Slow, stop = i == 0 ? g_cfg.avoid0Stop : g_cfg.avoid1Stop;
     g_aux.level[i] = ((g_cfg.avoidMask >> i) & 1u) ? avoidLevel(g_aux.dAvg[i], slow, stop, g_aux.level[i]) : 0;
   }

@@ -17,6 +17,7 @@ static bool g_pwmAttached[WHEEL_COUNT];
 static bool g_motorsEnabled = false;      // false = every output forced LOW/0
 static float g_wheelCur[WHEEL_COUNT];     // ramped, signed PWM counts (logical direction)
 static float g_wheelTgt[WHEEL_COUNT];     // requested, signed PWM counts
+static bool g_rampBoost = false;          // the shot's drive phase: acceleration limit lifted (the ramp would eat most of the 400 ms)
 static int16_t g_wheelOut[WHEEL_COUNT];   // last value written (signed, logical direction)
 static uint32_t g_wheelHoldUntil[WHEEL_COUNT];
 static bool g_wheelHolding[WHEEL_COUNT];
@@ -168,7 +169,7 @@ static void motorsUpdate(const Config& c, uint32_t nowMs) {
       float lim = (float)c.minPwm < absf(tgt) ? (float)c.minPwm : absf(tgt);
       cur = tgt > 0 ? lim : -lim;
     }
-    float step = (speedingUp ? (float)c.accelPwmPerS : (float)c.decelPwmPerS) * dt;
+    float step = (speedingUp ? (g_rampBoost ? 5000.0f : (float)c.accelPwmPerS) : (float)c.decelPwmPerS) * dt;
     if (tgt > cur) cur = (cur + step > tgt) ? tgt : cur + step;
     else if (tgt < cur) cur = (cur - step < tgt) ? tgt : cur - step;
     if (cur == 0 && g_wheelCur[i] != 0 && g_wheelTgt[i] != 0 && ((g_wheelTgt[i] > 0) != (g_wheelCur[i] > 0))) {

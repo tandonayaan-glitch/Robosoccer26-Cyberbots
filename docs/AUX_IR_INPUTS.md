@@ -78,5 +78,11 @@ holding the goal heading; (3) **drive forward at full speed** for `shootdrivems`
 seeking, cooldown started) after `aimtimeout`, if the heading is lost, or if the ball is no longer held for 400 ms. At least `shootcooldown` between shots.
 Obstacle limits still apply (a rear obstacle stops the reverse phase, a front obstacle in the stop zone cuts the drive phase).
 
+Safeguards found in review and tested on the host:
+* The registered heading is tied to the gyro's reference. `:zero`, a gyro recalibration or an IMU outage (the yaw restarts at 0) **invalidate** it: `:goal` says INVALID, no shot starts, a running shot stops. Point the robot at the goal and `:goal set`. It is never re-registered silently.
+* After a shot the ball must leave the front sensor before another shot can start (a stuck sensor cannot fire every cooldown period).
+* The wheel acceleration limit (`accel`, 500 PWM/s by default) would spend most of a 400 ms drive just ramping up, and the reverse-to-forward dwell (`revdead`) comes first. During the drive phase the acceleration limit is lifted, and the `shootdrivems` clock starts when the wheels actually turn forward.
+* A stale front-sensor reading (loop stalled) cannot start a shot.
+
 Untested on the robot: whether the ball stays at the front while the robot turns and reverses, what the front sensor reads, the gyro drift over a match,
 the real rotation speed, and whether 400 ms of full speed is the right power. Test with the wheels lifted first, then with the robot restrained.

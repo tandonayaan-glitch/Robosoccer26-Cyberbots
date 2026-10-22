@@ -21,6 +21,7 @@ struct ImuState {
   uint8_t addr, whoami, consecErr, consecInvalid, goodStreak, calState;  // calState 0 idle,1 running,2 done,3 failed
   float gx, gy, gz, ax, ay, az;     // dps, g
   float yaw;                        // degrees, clockwise positive, relative, (-180,180]
+  uint32_t yawEpoch;                // counts every time the yaw reference is reset (zeroed, recalibrated, recovered): a stored heading from an earlier epoch is meaningless
   float bias;                       // dps
   float calSum, calSumSq;
   uint16_t calN;
@@ -131,7 +132,7 @@ static bool imuFresh(const Config& c, uint32_t nowMs) {
 static bool imuHeadingUsable(const Config& c, uint32_t nowMs) {
   return c.hdgEnable && g_imu.present && g_imu.calibrated && g_imu.yawValid && imuFresh(c, nowMs);
 }
-static void imuZeroYaw() { g_imu.yaw = 0; g_imu.yawValid = g_imu.calibrated; }
+static void imuZeroYaw() { g_imu.yaw = 0; g_imu.yawValid = g_imu.calibrated; g_imu.yawEpoch++; }
 
 // Call every loop. Reads at most every 5 ms; I2C timeouts are bounded by Wire.setTimeOut().
 static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
@@ -186,6 +187,7 @@ static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
     if (g_imu.hadFault) { g_imu.recoveries++; g_stats.imuRecoveries++; }
     g_imu.hadFault = false;
     g_imu.yaw = 0;                                          // reference lost during the outage
+    g_imu.yawEpoch++;
     g_imu.yawValid = g_imu.calibrated;
     return;
   }
@@ -196,7 +198,7 @@ static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
       float var = g_imu.calSumSq / (float)g_imu.calN - mean * mean;
       float sd = sqrtf(var > 0 ? var : 0);
       if (sd <= c.imuStillDps && absf(mean) < 20.0f) {
-        g_imu.bias = mean; g_imu.calibrated = true; g_imu.calState = 2; g_imu.yaw = 0; g_imu.yawValid = true;
+        g_imu.bias = mean; g_imu.calibrated = true; g_imu.calState = 2; g_imu.yaw = 0; g_imu.yawValid = true; g_imu.yawEpoch++;
         say("INFO", "IMU gyro bias %.3f dps (sd %.3f) measured; heading reference zeroed", mean, sd);
       } else {
         g_imu.calState = 3;

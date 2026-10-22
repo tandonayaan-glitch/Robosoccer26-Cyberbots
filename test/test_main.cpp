@@ -2488,6 +2488,65 @@ static void t_hold_sensor_is_not_an_obstacle() {
   g_cfg.holdEnable = 0; vx = 0; vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy);
   CHECK(vy < 0.5f);                                           // without the hold role it would
 }
+static void t_goal_invalid_after_gyro_reset() {
+  holdSetup();
+  ballAt(0, 12.0f);
+  startAuto(); simRun(800);
+  CHECK(goalValid());
+  g_mockAnalog[35] = 3000; simRun(100);
+  send("s"); simRun(100);
+  send(":zero\n"); simRun(100);                               // the gyro reference is reset: the registered heading no longer means anything
+  CHECK(g_goalRefSet && !goalValid());
+  Serial.out.clear(); simRun(200); send(":goal\n"); simRun(20);
+  CHECK(outHas("INVALID") || outHas("goal heading INVALID"));
+  startAuto(); simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // no shot on a stale heading
+  send(":goal set\n"); simRun(300);
+  CHECK(goalValid());
+  // an IMU outage (the yaw is reset to 0 on recovery) invalidates it again
+  uint32_t ep = g_imu.yawEpoch;
+  g_mpu.mode = 1; simRun(800); g_mpu.mode = 0; simRun(3500);
+  CHECK(g_imu.yawEpoch > ep && !goalValid());
+}
+static void t_shoot_launch_clock_and_one_shot_per_ball() {
+  holdSetup();
+  g_cfg.shootCooldownMs = 500;
+  ballAt(0, 12.0f);
+  startAuto(); simRun(1200);
+  g_mockAnalog[35] = 3000;
+  uint64_t tLaunch = 0, tFull = 0, tEnd = 0; int shots0 = 0;
+  uint64_t end = g_mockUs + 5000000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) {
+    emulateAimRotation(); loop(); mockAdvance(50);
+    if (g_navState == NAV_SHOOT && g_shootPhase == 2 && g_shootLaunched && !tLaunch) tLaunch = g_mockUs;
+    if (tLaunch && !tFull && maxWheelDuty() >= (int)(g_cfg.maxAuto * 0.9f)) tFull = g_mockUs;
+  }
+  tEnd = g_mockUs;
+  CHECK(g_stats.shots == 1 && tLaunch && tFull);
+  CHECK(tFull - tLaunch < 120000ULL);                         // the ramp was lifted: (nearly) full speed within ~100 ms of the wheels turning forward
+  CHECK_NEAR((double)(tEnd - tLaunch) / 1000.0, (double)g_cfg.shootDriveMs, 80.0);   // the drive lasts shootdrivems from the launch, not from the dwell
+  CHECK(!g_rampBoost);                                        // boost is released when the shot ends
+  // the ball is still on the sensor: no second shot however long we wait (after the cooldown too)
+  shots0 = (int)g_stats.shots; simRun(3000);
+  CHECK((int)g_stats.shots == shots0);
+  // the ball leaves and a new one is taken: the next shot is allowed
+  g_mockAnalog[35] = 500; simRun(400);
+  g_mockAnalog[35] = 3000;
+  end = g_mockUs + 5000000ULL;
+  while (g_mockUs < end && (int)g_stats.shots == shots0) { emulateAimRotation(); loop(); mockAdvance(50); }
+  CHECK((int)g_stats.shots == shots0 + 1);
+}
+static void t_hold_sensor1_calibration() {
+  bootCal();
+  send(":set holdsensor 1\n"); simRun(20);
+  g_mockAnalog[36] = 700; send(":aux on\n"); simRun(300);
+  CHECK(!g_isrFn36);                                          // GPIO36 is analog now: no edge interrupts on it
+  send(":hold cal clear\n"); simRun(20); CHECK(g_cfg.holdClearRaw == 700);
+  g_mockAnalog[36] = 3300; simRun(400);
+  send(":hold cal held\n"); simRun(20); CHECK(g_cfg.holdHeldRaw == 3300);
+  send(":hold on\n"); simRun(300); CHECK(g_cfg.holdEnable == 1 && g_aux.held);
+}
+
 static void t_e2_phantom_exposure() {
   // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
   // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
@@ -2522,7 +2581,7 @@ static const TestCase TESTS[] = {
   T(t_cal_startup_defaults), T(t_health_report_text),
   T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
   T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_goal_register_and_aim_window), T(t_hold_functions), T(t_hold_cli), T(t_shoot_sequence), T(t_shoot_preconditions), T(t_shoot_aim_timeout_and_ball_lost), T(t_shoot_blocked_behind), T(t_hold_sensor_is_not_an_obstacle), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_goal_register_and_aim_window), T(t_hold_functions), T(t_hold_cli), T(t_shoot_sequence), T(t_shoot_preconditions), T(t_shoot_aim_timeout_and_ball_lost), T(t_shoot_blocked_behind), T(t_hold_sensor_is_not_an_obstacle), T(t_goal_invalid_after_gyro_reset), T(t_shoot_launch_clock_and_one_shot_per_ball), T(t_hold_sensor1_calibration), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
 };
 
 int main(int argc, char** argv) {
