@@ -6,20 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 11
-
-// Per-IR-channel calibration record (CD74HC4067 channel == array index).
-struct ChCfg {
-  uint8_t enabled;      // scanned at all?
-  uint8_t activeLow;    // 1: receiver output is LOW while a modulated signal is present (TSOP17xx family)
-  uint8_t trusted;      // operator allows this channel in navigation
-  uint8_t bearingCal;   // 1 once the bearing has been measured/confirmed by the operator
-  float bearingDeg;     // horizontal bearing, 0 = robot forward, + = clockwise (to the right)
-  float tiltDownDeg;    // mounting tilt below horizontal (metadata only, used for documentation)
-  uint8_t verified;     // operator-run controlled ball test passed (persisted operator record)
-  uint8_t verifyFails;  // controlled ball tests that failed (0..5)
-  uint8_t pad[2];
-};
+#define CFG_VERSION 13
 
 struct Config {
   uint32_t magic;
@@ -40,50 +27,29 @@ struct Config {
   uint16_t reverseDeadMs;        // pause at zero when a wheel changes direction
   uint16_t manualHoldMs;         // manual motion auto-stops after this long without a repeated key
 
-  // ---- IR acquisition ----
-  uint16_t irWindowUs;           // observation window per channel
-  uint8_t irMinEdges;            // active-level pulses needed in one window to call it a detection
-  uint8_t irNoisyPerMs;          // more than this many pulses per ms => interference, not a ball
-  uint8_t irSettleUs;            // mux settle time before a window opens
-  uint8_t irHistMinOn;           // detections in the last 8 windows to switch a channel "active"
-  uint8_t engine;                // 0 = legacy history-fraction estimator (fallback), 2 = leaky-evidence engine (default). 1 was removed (see docs/LATENCY_OPTIMIZATION.md)
-  uint8_t acqStreak;             // engine 2: hits (leaky counter) that equal one unit of acquisition evidence, summed over neighbouring receivers
-  uint8_t dirWindows;            // engine 2: freshness span of a hit for the direction estimate, in ring cycles
-  uint8_t gateDeg;               // engine 2: evidence must lie within +-gateDeg of the current bearing to refresh the ball
-  uint16_t dirTauMs;             // engine 2: direction smoothing time constant
-  uint16_t acqSpan1Ms;           // engine 2: evidence on ONE receiver must have lasted this long before the ball is acquired
-  uint16_t acqSpan2Ms;           // engine 2: ... for two or more neighbouring receivers (after one full ring look-around)
-  uint16_t epIdleMs;             // engine 2: evidence is forgotten after this long without a hit
-  uint8_t focusOn;               // engine 2: spend every second window on the receivers of a candidate / weak track
-  uint8_t lossEpsExp;            // engine 2: a run of misses is "loss" when its probability at the measured hit rate is below 10^-this
-  uint16_t reacqMs;              // engine 2: after a loss, evidence consistent with the last bearing is accepted faster for this long
-  uint8_t irFullHits;            // hits (of the last 8 windows) at which a channel counts with full weight
-  uint8_t acqCycles;             // consecutive scan cycles above acqConf needed to acquire the ball
-  uint16_t irPeriodMinUs;        // pulse-period gate (0/0 = OFF): accept only mean pulse periods in [min,max] us
-  uint16_t irPeriodMaxUs;        // set from a measured ball with ":irgate auto"; rejects unrelated modulated sources
-  uint32_t irStuckMs;            // output held active this long => suspect
-  uint32_t irStuckFailMs;        // ... this long => confirmed fault
-  float fovHalfDeg;              // assumed half acceptance angle per receiver (coverage maths; ASSUMPTION)
-  float maxGapDeg;               // widest tolerated uncovered gap before DEGRADED
-  uint8_t minTrusted;            // fewer trusted channels than this => ball seeking unavailable
+  // ---- IR sensors: two 2-pin sensors at the front (sensor 0 = front centre on GPIO35, sensor 1 = front, offset, on GPIO36) ----
+  uint8_t irEnable;              // bit0: sensor 0 in use, bit1: sensor 1 in use
+  uint8_t irMode0, irMode1;      // how the pin is read: 0 = analog (ADC, 12 bit), 1 = digital (HIGH/LOW). NOT assumed: set to what your circuit is
+  uint16_t irClear0, irNear0;    // sensor 0 calibration (':ir cal'): raw value with nothing in front / with the ball in the shooting position
+  uint16_t irClear1, irNear1;    // sensor 1 calibration; clear and near must differ by >= 50 (digital: 0 and 4095), otherwise the sensor is "not calibrated"
+  uint8_t irSeenPct;             // a sensor "sees" the ball when its strength (percent of the clear -> near span) reaches this
+  uint8_t irNearPct;             // ... and reports "ball at the shooting position" at this strength
+  uint8_t irDebounce;            // consecutive 5 ms samples needed to change a sensor's state
+  int8_t irOffsetSide;           // sensor 1 is mounted to the RIGHT (+1) or LEFT (-1) of sensor 0 as seen from behind; 0 = not set: no sideways guidance
+  uint8_t irNeedBoth;            // 1: the shooting position also needs sensor 1 to see the ball (when sensor 1 is usable)
+  uint16_t irRailMs;             // an analog sensor held at the ADC end stops this long is reported faulty (wiring)
 
   // ---- navigation ----
-  float acqConf;
-  uint16_t lostHoldMs;           // grace without track-consistent evidence before the ball is declared lost (strong signal)
-  uint16_t lostHoldMaxMs;        // engine 2: upper bound of the grace period (weak / intermittent signals)
-  uint16_t flickerHoldMs;        // engine 2: grace period for a signal that was already flickering (>= 25 % of visits missed)
-  float centerDeg;
-  float approachSpeed;           // 0..1 of maxAuto
-  float attackSpeed;
-  float slowSpeed;
-  float aggressiveConf;
+  uint16_t lostHoldMs;           // ball stays "valid" this long after both sensors stopped seeing it
+  float centerBand;              // |offset| (0..1) below this counts as centred
+  float approachSpeed;           // 0..1 of maxAuto; forward speed while the ball is far
+  float slowSpeed;               // forward speed close to the ball, and while only one sensor sees it
+  float alignSpeed;              // largest sideways speed used to centre the ball
   float searchSpin;
   uint32_t searchTimeoutMs;
   uint8_t searchAttempts;
   uint16_t searchPauseMs;
   float degradedScale;
-  float turnKp;                  // fallback turn-toward-ball gain (per degree)
-  float fallbackAlignDeg;
 
   // ---- heading / IMU ----
   uint8_t hdgEnable;
@@ -96,18 +62,7 @@ struct Config {
   float imuStillDps;
   uint8_t imuAddrPref;           // 0 = auto (0x68 then 0x69), else 0x68 / 0x69
 
-  // ---- obstacle avoidance: the two auxiliary IR distance sensors (GPIO35 = sensor 0, GPIO36 = sensor 1), see docs/AUX_IR_INPUTS.md ----
-  uint8_t avoidMask;             // bit0: sensor 0 in use, bit1: sensor 1 in use as a distance sensor (bit1 takes GPIO36 away from the receiver diagnostic); 0 = OFF
-  float avoid0Deg, avoid1Deg;    // direction each sensor faces (0 = robot front, clockwise positive)
-  uint16_t avoid0Slow, avoid0Stop, avoid1Slow, avoid1Stop;   // raw ADC thresholds from ':avoid cal'; stop beyond slow in either direction (rising raw = closer if stop > slow)
-  uint8_t avoidSlowPct;          // near an obstacle: speed toward it limited to this % of full speed
-  uint8_t avoidCautionPct;       // obstacle in the stop zone but the BALL is in that direction: creep toward it at this %
-  uint8_t avoidSectorDeg;        // the ball counts as "in that direction" within +- this angle of the sensor's direction
-
-  // ---- ball held (one IR sensor at the front, analog) and the goal heading registered by the gyro after power-on ----
-  uint8_t holdEnable;            // 1 = the sensor below tells whether the ball is held at the front (needed for the shot)
-  uint8_t holdSensor;            // 0 = GPIO35, 1 = GPIO36
-  uint16_t holdClearRaw, holdHeldRaw;   // raw ADC values with no ball and with the ball held (':hold cal'); must differ by >= 50
+  // ---- goal heading registered by the gyro after power-on ----
   uint16_t goalRegisterMs;       // the robot's heading at this time after power-on is registered as "straight at the goal"
   uint16_t goalWidthMm;          // inner width of the goal (RoboCupJunior: 450 mm in some rule sets, 600 mm in others: check yours)
   uint16_t goalDistMm;           // expected distance from the shooting spot to the goal line (operator estimate)
@@ -115,30 +70,30 @@ struct Config {
   float aimSpeed;                // rotation speed while aiming, 0..1 of full
   uint16_t aimTimeoutMs;         // give up aiming after this long
 
-  // ---- shot: aim at the registered goal heading, reverse a little, then drive forward at full speed ----
+  // ---- shot: aim at the registered goal heading, reverse a little, then drive forward at full speed (NO kicker is installed) ----
   uint8_t shootEnable;           // 0 = never shoot (default)
+  uint8_t shootPwm;              // wheel PWM limit during the drive phase (the shot ignores the autonomous limit maxauto; 255 = full power)
+  uint8_t shootParallel;         // 1 = turn toward the goal heading WHILE reversing (faster); 0 = aim first, then reverse
   uint16_t shootBackMs;          // reverse phase length
   float shootBackSpeed;          // reverse speed, 0..1 of full
   uint16_t shootDriveMs;         // full-speed forward phase length
-  uint8_t shootAlignDeg;         // ball must be within +- this angle of straight ahead
-  uint16_t shootHoldMs;          // ... for this long, with the goal in view, before the shot starts
+  uint16_t shootHoldMs;          // the ball must stay in the shooting position this long before the shot starts
   uint16_t shootCooldownMs;      // minimum time between shots
 
   // ---- logging ----
   uint16_t snapshotMs;
-  uint16_t detailMs;             // 0 = detailed per-channel rows off
+  uint16_t detailMs;             // 0 = detailed per-sensor rows off
   uint32_t fileMaxBytes;
   uint8_t maxFiles;
   uint32_t fsReserveBytes;
   uint16_t flushMs;
-  uint16_t frPeriodMs;
-  uint16_t frPostMs;
+  uint16_t frPeriodMs;           // flight recorder sampling period
+  uint16_t frPostMs;             // post-trigger capture time
   uint16_t streamMs;             // 'I' live IR view period
 
   // ---- recovery ----
   uint16_t recoverVerifyMs;
 
-  ChCfg ch[MUX_CHANNELS];
   uint32_t crc;                  // CRC32 of every byte before this field
 };
 
@@ -157,47 +112,29 @@ static const ParamDef PARAMS[] = {
   PD("decel", PT_U16, decelPwmPerS, 50, 10000),
   PD("revdead", PT_U16, reverseDeadMs, 0, 500),
   PD("manualhold", PT_U16, manualHoldMs, 100, 5000),
-  PD("irwindow", PT_U16, irWindowUs, 1000, 20000),
-  PD("irminedges", PT_U8, irMinEdges, 1, 10),
-  PD("irnoisy", PT_U8, irNoisyPerMs, 2, 50),
-  PD("irsettle", PT_U8, irSettleUs, 2, 100),
-  PD("irhistmin", PT_U8, irHistMinOn, 1, 8),
-  PD("engine", PT_U8, engine, 0, 2),
-  PD("acqspan1", PT_U16, acqSpan1Ms, 20, 1000),
-  PD("acqspan2", PT_U16, acqSpan2Ms, 0, 1000),
-  PD("epidle", PT_U16, epIdleMs, 50, 2000),
-  PD("focus", PT_U8, focusOn, 0, 1),
-  PD("losseps", PT_U8, lossEpsExp, 1, 9),
-  PD("reacq", PT_U16, reacqMs, 0, 3000),
-  PD("acqstreak", PT_U8, acqStreak, 1, 6),
-  PD("dirwindows", PT_U8, dirWindows, 1, 8),
-  PD("gatedeg", PT_U8, gateDeg, 30, 180),
-  PD("dirtau", PT_U16, dirTauMs, 5, 500),
-  PD("irfullhits", PT_U8, irFullHits, 2, 8),
-  PD("acqcycles", PT_U8, acqCycles, 1, 6),
-  PD("irperlo", PT_U16, irPeriodMinUs, 0, 20000),
-  PD("irperhi", PT_U16, irPeriodMaxUs, 0, 20000),
-  PD("irstuck", PT_U32, irStuckMs, 500, 30000),
-  PD("irstuckfail", PT_U32, irStuckFailMs, 2000, 120000),
-  PD("fov", PT_F32, fovHalfDeg, 10, 90),
-  PD("maxgap", PT_F32, maxGapDeg, 30, 180),
-  PD("mintrusted", PT_U8, minTrusted, 1, 12),
-  PD("acqconf", PT_F32, acqConf, 0.2, 0.95),
+  PD("irenable", PT_U8, irEnable, 0, 3),
+  PD("irmode0", PT_U8, irMode0, 0, 1),
+  PD("irmode1", PT_U8, irMode1, 0, 1),
+  PD("irclear0", PT_U16, irClear0, 0, 4095),
+  PD("irnear0", PT_U16, irNear0, 0, 4095),
+  PD("irclear1", PT_U16, irClear1, 0, 4095),
+  PD("irnear1", PT_U16, irNear1, 0, 4095),
+  PD("irseen", PT_U8, irSeenPct, 5, 90),
+  PD("irnearpct", PT_U8, irNearPct, 20, 100),
+  PD("irdebounce", PT_U8, irDebounce, 1, 20),
+  PD("iroffset", PT_I8, irOffsetSide, -1, 1),
+  PD("irneedboth", PT_U8, irNeedBoth, 0, 1),
+  PD("irrailms", PT_U16, irRailMs, 200, 20000),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
-  PD("losthold_max", PT_U16, lostHoldMaxMs, 40, 3000),
-  PD("flickerhold", PT_U16, flickerHoldMs, 40, 3000),
-  PD("center", PT_F32, centerDeg, 5, 60),
+  PD("center", PT_F32, centerBand, 0.1, 0.9),
   PD("approach", PT_F32, approachSpeed, 0.15, 1.0),
-  PD("attack", PT_F32, attackSpeed, 0.15, 1.0),
   PD("slow", PT_F32, slowSpeed, 0.1, 0.6),
-  PD("aggrconf", PT_F32, aggressiveConf, 0.5, 0.99),
+  PD("alignspeed", PT_F32, alignSpeed, 0.05, 0.5),
   PD("searchspin", PT_F32, searchSpin, 0.1, 0.6),
   PD("searchtime", PT_U32, searchTimeoutMs, 2000, 60000),
   PD("searchtries", PT_U8, searchAttempts, 1, 10),
   PD("searchpause", PT_U16, searchPauseMs, 500, 10000),
   PD("degscale", PT_F32, degradedScale, 0.2, 1.0),
-  PD("turnkp", PT_F32, turnKp, 0.002, 0.05),
-  PD("alignfallback", PT_F32, fallbackAlignDeg, 15, 90),
   PD("hdgenable", PT_U8, hdgEnable, 0, 1),
   PD("hdgkp", PT_F32, hdgKp, 0.0, 0.1),
   PD("hdgmax", PT_F32, hdgMaxRot, 0.05, 0.5),
@@ -207,20 +144,6 @@ static const ParamDef PARAMS[] = {
   PD("imucal", PT_U16, imuCalSamples, 100, 2000),
   PD("imustill", PT_F32, imuStillDps, 0.5, 20),
   PD("imuaddr", PT_U8, imuAddrPref, 0, 0x69),
-  PD("avoidmask", PT_U8, avoidMask, 0, 3),
-  PD("avoid0deg", PT_F32, avoid0Deg, 0, 359.9),
-  PD("avoid1deg", PT_F32, avoid1Deg, 0, 359.9),
-  PD("avoid0slow", PT_U16, avoid0Slow, 0, 4095),
-  PD("avoid0stop", PT_U16, avoid0Stop, 0, 4095),
-  PD("avoid1slow", PT_U16, avoid1Slow, 0, 4095),
-  PD("avoid1stop", PT_U16, avoid1Stop, 0, 4095),
-  PD("avoidslowpct", PT_U8, avoidSlowPct, 5, 100),
-  PD("avoidcaution", PT_U8, avoidCautionPct, 5, 100),
-  PD("avoidsector", PT_U8, avoidSectorDeg, 10, 90),
-  PD("holdenable", PT_U8, holdEnable, 0, 1),
-  PD("holdsensor", PT_U8, holdSensor, 0, 1),
-  PD("holdclear", PT_U16, holdClearRaw, 0, 4095),
-  PD("holdheld", PT_U16, holdHeldRaw, 0, 4095),
   PD("goalregms", PT_U16, goalRegisterMs, 1000, 30000),
   PD("goalwidth", PT_U16, goalWidthMm, 200, 1000),
   PD("goaldist", PT_U16, goalDistMm, 200, 3000),
@@ -228,10 +151,11 @@ static const ParamDef PARAMS[] = {
   PD("aimspeed", PT_F32, aimSpeed, 0.1, 0.6),
   PD("aimtimeout", PT_U16, aimTimeoutMs, 500, 10000),
   PD("shootenable", PT_U8, shootEnable, 0, 1),
-  PD("shootbackms", PT_U16, shootBackMs, 50, 1500),
+  PD("shootpwm", PT_U8, shootPwm, 80, 255),
+  PD("shootparallel", PT_U8, shootParallel, 0, 1),
+  PD("shootbackms", PT_U16, shootBackMs, 0, 1500),
   PD("shootbackspeed", PT_F32, shootBackSpeed, 0.1, 1.0),
   PD("shootdrivems", PT_U16, shootDriveMs, 100, 1500),
-  PD("shootalign", PT_U8, shootAlignDeg, 3, 45),
   PD("shoothold", PT_U16, shootHoldMs, 50, 3000),
   PD("shootcooldown", PT_U16, shootCooldownMs, 500, 20000),
   PD("snapms", PT_U16, snapshotMs, 50, 5000),
@@ -292,47 +216,23 @@ static void cfgDefaults(Config& c) {
   c.decelPwmPerS = 1200;
   c.reverseDeadMs = 60;
   c.manualHoldMs = 600;
-  c.irWindowUs = 3000;
-  c.irMinEdges = 2;
-  c.irNoisyPerMs = 3;     // ball ~1.2 pulses/ms; motor-PWM/interference is several per ms
-  c.irSettleUs = 10;
-  c.irHistMinOn = 2;
-  c.engine = 2;
-  c.acqSpan1Ms = 140;
-  c.acqSpan2Ms = 70;
-  c.epIdleMs = 250;
-  c.focusOn = 1;
-  c.lossEpsExp = 4;
-  c.reacqMs = 300;
-  c.acqStreak = 4;
-  c.dirWindows = 3;
-  c.gateDeg = 100;
-  c.dirTauMs = 40;
-  c.irFullHits = 8;
-  c.acqCycles = 2;
-  c.irPeriodMinUs = 0;     // gate OFF until the real ball has been measured
-  c.irPeriodMaxUs = 0;
-  c.irStuckMs = 2000;
-  c.irStuckFailMs = 15000;
-  c.fovHalfDeg = 35.0f;
-  c.maxGapDeg = 100.0f;
-  c.minTrusted = 4;
-  c.acqConf = 0.45f;
-  c.lostHoldMs = 150;
-  c.lostHoldMaxMs = 300;
-  c.flickerHoldMs = 290;
-  c.centerDeg = 20.0f;
-  c.approachSpeed = 0.7f;
-  c.attackSpeed = 1.0f;
-  c.slowSpeed = 0.3f;
-  c.aggressiveConf = 0.75f;
+  c.irEnable = 3;
+  c.irMode0 = c.irMode1 = 0;     // analog: a guess for a 2-pin photodiode/phototransistor with a resistor; change with ':set irmode0 1' for a digital output
+  c.irClear0 = c.irNear0 = c.irClear1 = c.irNear1 = 0;   // NOT calibrated: autonomy is refused until ':ir cal' has been done for sensor 0
+  c.irSeenPct = 15; c.irNearPct = 70; c.irDebounce = 3;
+  c.irOffsetSide = 0;            // unknown mounting side: no sideways guidance until ':set iroffset 1|-1'
+  c.irNeedBoth = 1;
+  c.irRailMs = 2000;
+  c.lostHoldMs = 300;
+  c.centerBand = 0.35f;
+  c.approachSpeed = 0.5f;
+  c.slowSpeed = 0.25f;
+  c.alignSpeed = 0.2f;
   c.searchSpin = 0.25f;
   c.searchTimeoutMs = 8000;
   c.searchAttempts = 3;
   c.searchPauseMs = 2000;
   c.degradedScale = 0.6f;
-  c.turnKp = 0.015f;
-  c.fallbackAlignDeg = 45.0f;
   c.hdgEnable = 1;
   c.hdgKp = 0.02f;
   c.hdgMaxRot = 0.25f;
@@ -342,13 +242,8 @@ static void cfgDefaults(Config& c) {
   c.imuCalSamples = 400;
   c.imuStillDps = 3.0f;
   c.imuAddrPref = 0;
-  c.avoidMask = 0;                // avoidance is OFF until a sensor is wired, calibrated (':avoid cal') and switched on
-  c.avoid0Deg = 0.0f; c.avoid1Deg = 180.0f;
-  c.avoid0Slow = c.avoid0Stop = c.avoid1Slow = c.avoid1Stop = 0;
-  c.avoidSlowPct = 40; c.avoidCautionPct = 25; c.avoidSectorDeg = 45;
-  c.holdEnable = 0; c.holdSensor = 0; c.holdClearRaw = 0; c.holdHeldRaw = 0;
-  c.goalRegisterMs = 5000; c.goalWidthMm = 450; c.goalDistMm = 1000; c.ballDiaMm = 43; c.aimSpeed = 0.3f; c.aimTimeoutMs = 3000;
-  c.shootEnable = 0; c.shootBackMs = 250; c.shootBackSpeed = 0.5f; c.shootDriveMs = 400; c.shootAlignDeg = 12; c.shootHoldMs = 300; c.shootCooldownMs = 3000;
+  c.goalRegisterMs = 5000; c.goalWidthMm = 450; c.goalDistMm = 1000; c.ballDiaMm = 43; c.aimSpeed = 0.5f; c.aimTimeoutMs = 3000;
+  c.shootEnable = 0; c.shootPwm = 255; c.shootParallel = 1; c.shootBackMs = 150; c.shootBackSpeed = 0.7f; c.shootDriveMs = 400; c.shootHoldMs = 100; c.shootCooldownMs = 3000;
   c.snapshotMs = 250;
   c.detailMs = 0;
   c.fileMaxBytes = 65536;
@@ -359,14 +254,6 @@ static void cfgDefaults(Config& c) {
   c.frPostMs = 2000;
   c.streamMs = 500;
   c.recoverVerifyMs = 3000;
-  for (uint8_t i = 0; i < MUX_CHANNELS; i++) {
-    c.ch[i].enabled = (i < IR_PLANNED_CHANNELS) ? 1 : 0;   // C12..C15 stay off until hardware exists
-    c.ch[i].activeLow = 1;
-    c.ch[i].trusted = 1;
-    c.ch[i].bearingCal = 0;                                // placeholder bearings are NOT measured
-    c.ch[i].bearingDeg = (float)((i % 12) * 30);     // placeholder; spare channels reuse 0..90
-    c.ch[i].tiltDownDeg = 22.0f;                           // proposed starting experiment (20-25 deg)
-  }
 }
 
 static void cfgSeal(Config& c) {
@@ -406,34 +293,13 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
     c.minPwm = d.minPwm; c.maxManual = d.maxManual; c.maxAuto = d.maxAuto; bad++; repNote(rep, repN, "minpwm/max");
   }
   if (c.testPwm < c.minPwm || c.testPwm > c.maxManual) { c.testPwm = d.testPwm; bad++; repNote(rep, repN, "testpwm"); }
-  if (c.slowSpeed > c.attackSpeed) { c.slowSpeed = d.slowSpeed; c.attackSpeed = d.attackSpeed; bad++; repNote(rep, repN, "slow/attack"); }
-  bool gateOff = (c.irPeriodMinUs == 0 && c.irPeriodMaxUs == 0);
-  if (!gateOff && !(c.irPeriodMinUs >= 100 && c.irPeriodMaxUs > c.irPeriodMinUs)) { c.irPeriodMinUs = c.irPeriodMaxUs = 0; bad++; repNote(rep, repN, "irperiodgate"); }
-  if ((c.avoidMask & 1) && (c.avoid0Slow > c.avoid0Stop ? c.avoid0Slow - c.avoid0Stop : c.avoid0Stop - c.avoid0Slow) < 50) { c.avoidMask &= (uint8_t)~1u; bad++; repNote(rep, repN, "avoid0 thresholds"); }
-  if ((c.avoidMask & 2) && (c.avoid1Slow > c.avoid1Stop ? c.avoid1Slow - c.avoid1Stop : c.avoid1Stop - c.avoid1Slow) < 50) { c.avoidMask &= (uint8_t)~2u; bad++; repNote(rep, repN, "avoid1 thresholds"); }
-  if (c.holdEnable && (c.holdHeldRaw > c.holdClearRaw ? c.holdHeldRaw - c.holdClearRaw : c.holdClearRaw - c.holdHeldRaw) < 50) { c.holdEnable = 0; bad++; repNote(rep, repN, "hold thresholds"); }
+  if (c.slowSpeed > c.approachSpeed) { c.slowSpeed = d.slowSpeed; c.approachSpeed = d.approachSpeed; bad++; repNote(rep, repN, "slow/approach"); }
+  if (c.irSeenPct >= c.irNearPct) { c.irSeenPct = d.irSeenPct; c.irNearPct = d.irNearPct; bad++; repNote(rep, repN, "irseen/irnearpct"); }
   if (c.ballDiaMm * 2 >= c.goalWidthMm) { c.ballDiaMm = d.ballDiaMm; c.goalWidthMm = d.goalWidthMm; bad++; repNote(rep, repN, "balldia/goalwidth"); }
-  if (c.avoidCautionPct > c.avoidSlowPct) { c.avoidCautionPct = d.avoidCautionPct; c.avoidSlowPct = d.avoidSlowPct; bad++; repNote(rep, repN, "avoidcaution/slowpct"); }
-  if (c.engine == 1) { c.engine = d.engine; bad++; repNote(rep, repN, "engine(1 removed)"); }
-  if (c.lostHoldMaxMs < c.lostHoldMs) { c.lostHoldMaxMs = c.lostHoldMs; bad++; repNote(rep, repN, "losthold/max"); }
-  if (c.flickerHoldMs < c.lostHoldMs || c.flickerHoldMs > c.lostHoldMaxMs) { c.flickerHoldMs = c.lostHoldMs; bad++; repNote(rep, repN, "flickerhold"); }
-  if (c.irStuckFailMs <= c.irStuckMs) { c.irStuckMs = d.irStuckMs; c.irStuckFailMs = d.irStuckFailMs; bad++; repNote(rep, repN, "irstuck"); }
-  for (int i = 0; i < MUX_CHANNELS; i++) {
-    ChCfg& h = c.ch[i];
-    ChCfg& dh = d.ch[i];
-    bool badCh = false;
-    if (h.enabled > 1) { h.enabled = dh.enabled; badCh = true; }
-    if (h.activeLow > 1) { h.activeLow = dh.activeLow; badCh = true; }
-    if (h.trusted > 1) { h.trusted = dh.trusted; badCh = true; }
-    if (h.bearingCal > 1) { h.bearingCal = 0; badCh = true; }
-    if (h.verified > 1) { h.verified = 0; badCh = true; }
-    if (h.verifyFails > 5) { h.verifyFails = 0; badCh = true; }
-    if (!isfinite(h.bearingDeg) || h.bearingDeg < 0.0f || h.bearingDeg >= 360.0f) {
-      h.bearingDeg = dh.bearingDeg; h.bearingCal = 0; badCh = true;
-    }
-    if (!isfinite(h.tiltDownDeg) || h.tiltDownDeg < 0.0f || h.tiltDownDeg > 90.0f) { h.tiltDownDeg = dh.tiltDownDeg; badCh = true; }
-    if (badCh) { bad++; repNote(rep, repN, "channel"); }
-  }
+  // A sensor whose clear and near values are (almost) equal has no usable range: that is "not calibrated" and is stored as 0/0
+  // so nothing can mistake it for a calibration.
+  if (c.irClear0 != c.irNear0 && (c.irClear0 > c.irNear0 ? c.irClear0 - c.irNear0 : c.irNear0 - c.irClear0) < 50) { c.irClear0 = c.irNear0 = 0; bad++; repNote(rep, repN, "ir0 calibration"); }
+  if (c.irClear1 != c.irNear1 && (c.irClear1 > c.irNear1 ? c.irClear1 - c.irNear1 : c.irNear1 - c.irClear1) < 50) { c.irClear1 = c.irNear1 = 0; bad++; repNote(rep, repN, "ir1 calibration"); }
   return bad;
 }
 

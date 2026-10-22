@@ -6,13 +6,13 @@
 static bool g_fsMounted = false;     // LittleFS.begin(false) succeeded
 static bool g_fsRwOk = false;        // a real write+read-back test passed
 static char g_fsDetail[64] = "not initialised";
-static SemaphoreHandle_t g_fsMux = nullptr;   // serialises the log-writer task, export and config I/O
+static SemaphoreHandle_t g_fsMutex = nullptr;   // serialises the log-writer task, export and config I/O
 
 static inline bool fsLock(uint32_t waitMs) {
-  if (!g_fsMux) return true;
-  return xSemaphoreTake(g_fsMux, pdMS_TO_TICKS(waitMs)) == pdTRUE;
+  if (!g_fsMutex) return true;
+  return xSemaphoreTake(g_fsMutex, pdMS_TO_TICKS(waitMs)) == pdTRUE;
 }
-static inline void fsUnlock() { if (g_fsMux) xSemaphoreGive(g_fsMux); }
+static inline void fsUnlock() { if (g_fsMutex) xSemaphoreGive(g_fsMutex); }
 
 static uint32_t fsFreeBytes() {
   if (!g_fsMounted) return 0;
@@ -38,7 +38,7 @@ static bool fsReadWriteTest() {
 }
 
 static bool fsInit() {
-  if (!g_fsMux) g_fsMux = xSemaphoreCreateMutex();
+  if (!g_fsMutex) g_fsMutex = xSemaphoreCreateMutex();
   g_fsMounted = LittleFS.begin(false);   // formatOnFail=false: never erase existing data
   g_fsRwOk = false;
   if (!g_fsMounted) {

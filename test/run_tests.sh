@@ -6,6 +6,8 @@ cd "$(dirname "$0")"
 FAIL=0
 TOTAL_T=0; TOTAL_P=0; TOTAL_C=0
 rm -rf /tmp/mockfs /tmp/mockfs_*          # clean, reproducible start: no state from earlier runs
+# The removed hardware (CD74HC4067 multiplexer, the 12-receiver ring, 3-pin TSOP receivers) must not come back into the firmware sources.
+if grep -rniE "CD74|4067|multiplex|TSOP|PIN_MUX|MUX_CHANNELS|\bmux\b|irscan|TSSP" ../Robosoccer26_Cyberbots/ ; then echo "OBSOLETE HARDWARE REFERENCE FOUND IN THE FIRMWARE SOURCES"; exit 1; fi
 for CORE in 3 2; do
   BIN=/tmp/rs26_test_core$CORE
   echo "=== building (mock core v$CORE, -Wall -Wextra -Wshadow, ASan+UBSan) ==="
@@ -13,11 +15,10 @@ for CORE in 3 2; do
       -DMOCK_CORE_V3=$([ $CORE = 3 ] && echo 1 || echo 0) -I. -o "$BIN" test_main.cpp || { echo "BUILD FAILED"; exit 1; }
   rm -rf /tmp/mockfs_reboot
   for T in $("$BIN" --list); do
-    if [ "$T" = "t_reboot_phase2" ]; then :; fi
     OUT=$("$BIN" "$T" 2>&1); RC=$?
     LAST=$(echo "$OUT" | tail -1)
     echo "[core v$CORE] $LAST"
-    echo "$OUT" | grep -E "^  (latency|sweep):" 
+    echo "$OUT" | grep -E "^  (shot|launch):"
     CK=$(echo "$LAST" | sed -nE 's/.*\(([0-9]+) checks.*/\1/p'); TOTAL_C=$((TOTAL_C + ${CK:-0})); TOTAL_T=$((TOTAL_T + 1))
     if [ $RC -ne 0 ]; then echo "$OUT" | head -40; FAIL=1; else TOTAL_P=$((TOTAL_P + 1)); fi
   done

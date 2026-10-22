@@ -1,6 +1,6 @@
 // Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware (ESP32-S, Arduino-ESP32 2.x or 3.x)
 //
-// 4x mecanum (2x L298N) | 12x TSOP17xx via CD74HC4067 | MPU6050 | LittleFS CSV logging
+// 4x mecanum (2x L298N) | 2x front IR sensors (GPIO35, GPIO36) | MPU6050 | LittleFS CSV logging
 // Safe by construction: motors off at boot, autonomy only after an explicit 'a', every fault
 // degrades or stops instead of guessing. See docs/ for wiring review, calibration and test plan.
 //
@@ -55,7 +55,7 @@ static void logTask(void*) {
 }
 #endif
 
-static void bootIrSettle(uint32_t ms) {            // let a few scan cycles complete before the report
+static void bootIrSettle(uint32_t ms) {            // let the sensors settle before the report
   uint32_t t0 = millis();
   while (elapsedMs(millis(), t0) < ms) {
     uint32_t now = millis();
@@ -88,9 +88,10 @@ void setup() {
   bool pwmOk = motorsAttachPwm(g_cfg);
   say("BOOT", "motor PWM init: %s (%u Hz, %u-bit)", pwmOk ? "OK" : "FAILED", (unsigned)g_cfg.pwmFreq, (unsigned)PWM_BITS);
 
-  // IR acquisition.
-  irBegin(g_cfg);
-  say("BOOT", "IR mux configured: %u channel(s) enabled, window %u us", (unsigned)irCountEnabled(g_cfg), (unsigned)g_cfg.irWindowUs);
+  // IR sensors (two, GPIO35 / GPIO36).
+  irBegin();
+  say("BOOT", "IR sensors: sensor 0 GPIO%u %s %s | sensor 1 GPIO%u %s %s", (unsigned)PIN_IR[0], irModeOf(g_cfg, 0) ? "digital" : "analog", irCalibrated(g_cfg, 0) ? "calibrated" : "NOT CALIBRATED",
+      (unsigned)PIN_IR[1], irModeOf(g_cfg, 1) ? "digital" : "analog", irCalibrated(g_cfg, 1) ? "calibrated" : "NOT CALIBRATED");
 
   // IMU: probe, configure, measure gyro bias while stationary.
   bool imuOk = imuInit(g_cfg, true);
@@ -128,7 +129,7 @@ void setup() {
   say("BOOT", "autonomous mode: DISABLED. Bench-test first ('t'), then send 'a'. '?' lists commands.");
   g_bootPhase = false;
   outFlushBlocking(1500);
-  irRestartSchedule(); g_loopMaxEverUs = 0;            // statistics start after the boot-time blocking work
+  g_loopMaxEverUs = 0;                                  // statistics start after the boot-time blocking work
 
 #ifndef HOST_TEST
   xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, &g_logTaskHandle, 0);   // flash writes live off the control core
@@ -153,7 +154,6 @@ void loop() {
 
   cliPoll(now);
   irService(g_cfg, now);
-  auxService(now);
   goalService(g_cfg, now);
   imuUpdate(g_cfg, now, motorsAllZero() && elapsedMs(now, g_motorsStoppedSinceMs) > 1000);
 

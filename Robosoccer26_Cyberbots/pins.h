@@ -36,27 +36,19 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
   /* BR */ {P_BR_IN1, P_BR_IN2, P_BR_EN, "BR"},
 };
 
-// ---- CD74HC4067 16-channel multiplexer ------------------------------------------
-#define P_MUX_SIG 34
-static const uint8_t PIN_MUX_SIG = P_MUX_SIG;   // input-only GPIO, no internal pull-up/down
-static const uint8_t PIN_MUX_S0 = 4;
-static const uint8_t PIN_MUX_S1 = 13;
-static const uint8_t PIN_MUX_S2 = 15;    // strapping pin (MTDO): boot-log silencing
-static const uint8_t PIN_MUX_S3 = 2;     // strapping pin: must not be pulled high during download-boot
-static const uint8_t MUX_CHANNELS = 16;  // C0..C15
-static const uint8_t IR_PLANNED_CHANNELS = 12;  // C0..C11 are the planned receivers
+// ---- Front IR sensors (two 2-pin sensors, one GPIO each) --------------------------------------------
+// Both are input-only ADC1 pins. They have no internal pull-up/pull-down: whatever circuit makes a 2-pin
+// photodiode/phototransistor produce a voltage (resistor to 3.3 V or GND) is external. Both can also be read as digital inputs.
+#define P_IR0 35                                   // sensor 0: front CENTRE; decides "ball close enough to be in the shooting position"
+#define P_IR1 36                                   // sensor 1: front, slightly OFFSET to one side; helps judge centred / off-centre
+static const uint8_t PIN_IR[2] = {P_IR0, P_IR1};
+static const uint8_t IR_SENSORS = 2;
 
 // ---- MPU6050 (I2C) ---------------------------------------------------------------
 #define P_SDA 16
 #define P_SCL 17
 static const uint8_t PIN_I2C_SDA = P_SDA;
 static const uint8_t PIN_I2C_SCL = P_SCL;
-
-// ---- auxiliary IR inputs (input-only GPIOs, no internal pull; both off until ':aux on') -------------
-#define P_AUX_DIST 35                              // analog IR distance sensor (ADC1_CH7): output must stay below 3.3 V
-#define P_AUX_RX 36                                // digital IR receiver (TSOP style, active LOW, needs 3.3 V supply); ADC1_CH0 / SENSOR_VP
-static const uint8_t PIN_AUX_DIST = P_AUX_DIST;
-static const uint8_t PIN_AUX_RX = P_AUX_RX;
 
 // Serial
 static const uint32_t SERIAL_BAUD = 115200;
@@ -66,19 +58,15 @@ static const uint32_t SERIAL_BAUD = 115200;
 #define OUTPUT_PIN_MASK                                                                              \
   (PIN_BIT(P_FL_IN1) | PIN_BIT(P_FL_IN2) | PIN_BIT(P_FL_EN) | PIN_BIT(P_FR_IN1) | PIN_BIT(P_FR_IN2) | \
    PIN_BIT(P_FR_EN) | PIN_BIT(P_BL_IN1) | PIN_BIT(P_BL_IN2) | PIN_BIT(P_BL_EN) | PIN_BIT(P_BR_IN1) |  \
-   PIN_BIT(P_BR_IN2) | PIN_BIT(P_BR_EN) | PIN_BIT(4) | PIN_BIT(13) | PIN_BIT(15) | PIN_BIT(2) |        \
-   PIN_BIT(P_SDA) | PIN_BIT(P_SCL))
-static_assert(__builtin_popcountll(OUTPUT_PIN_MASK) == 18, "a GPIO is assigned twice (12 motor + 4 mux select + 2 I2C)");
-static_assert((PIN_BIT(P_MUX_SIG) & OUTPUT_PIN_MASK) == 0, "mux SIG must not double as an output pin");
+   PIN_BIT(P_BR_IN2) | PIN_BIT(P_BR_EN) | PIN_BIT(P_SDA) | PIN_BIT(P_SCL))
+static_assert(__builtin_popcountll(OUTPUT_PIN_MASK) == 14, "a GPIO is assigned twice (12 motor + 2 I2C)");
+#define IR_PIN_MASK (PIN_BIT(P_IR0) | PIN_BIT(P_IR1))
+static_assert(__builtin_popcountll(IR_PIN_MASK) == 2, "the two IR sensors must use different pins");
+static_assert((IR_PIN_MASK & OUTPUT_PIN_MASK) == 0, "an IR sensor pin must not be a motor or I2C pin");
 static_assert((OUTPUT_PIN_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
 static_assert((OUTPUT_PIN_MASK & PIN_BIT(12)) == 0 && (OUTPUT_PIN_MASK & PIN_BIT(0)) == 0, "GPIO12 (flash voltage) and GPIO0 (boot mode) are unused on purpose");
-static_assert(P_AUX_DIST != P_AUX_RX && P_AUX_DIST != P_MUX_SIG && P_AUX_RX != P_MUX_SIG, "auxiliary input pins must be distinct from each other and from mux SIG");
-static_assert(((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & OUTPUT_PIN_MASK) == 0, "auxiliary inputs must not collide with an output pin");
-static_assert(P_AUX_RX >= 32 && P_AUX_RX <= 39, "the aux receiver ISR reads GPIO_IN1: pin must be GPIO32..39");
 #ifdef SOC_GPIO_VALID_OUTPUT_GPIO_MASK   // only visible on the real toolchain
-static_assert(((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & SOC_GPIO_VALID_GPIO_MASK) == (PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) &&
-              ((PIN_BIT(P_AUX_DIST) | PIN_BIT(P_AUX_RX)) & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "aux pins must be valid INPUT-ONLY GPIOs");
 static_assert((OUTPUT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");
-static_assert((PIN_BIT(P_MUX_SIG) & SOC_GPIO_VALID_GPIO_MASK) != 0 && (PIN_BIT(P_MUX_SIG) & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
-              "mux SIG (GPIO34) must be a valid INPUT-ONLY pin");
+static_assert((IR_PIN_MASK & SOC_GPIO_VALID_GPIO_MASK) == IR_PIN_MASK && (IR_PIN_MASK & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
+              "the IR sensor pins (GPIO35, GPIO36) must be valid INPUT-ONLY GPIOs");
 #endif

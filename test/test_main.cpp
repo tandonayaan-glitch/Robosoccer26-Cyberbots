@@ -2,8 +2,8 @@
 // (./run_tests.sh), so all firmware globals start fresh. "Reboot" tests re-launch the binary
 // and share the on-disk mock LittleFS directory.
 //
-// Everything here is SOFTWARE verification against a simulated ball, IMU and filesystem.
-// It says nothing about the physical robot.
+// Everything here is SOFTWARE verification against simulated sensor values, a simulated IMU and a simulated filesystem.
+// It says nothing about the physical robot: the real IR sensors' response to the real ball is NOT TESTED.
 #define HOST_TEST 1
 #include "../Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino"
 
@@ -35,15 +35,26 @@ static bool allWheelsStopped() {
   for (int i = 0; i < 4; i++) if (wheelDir(i) != 0 || g_pwmDuty[WHEEL_PINS[i].en] != 0) return false;
   return true;
 }
+static int maxWheelDuty() { int m = 0; for (int i = 0; i < 4; i++) m = std::max(m, (int)g_pwmDuty[WHEEL_PINS[i].en]); return m; }
 static bool anyWheelEverMoved = false;
-// Bearing-based ball model: every channel whose configured bearing is within `fov` deg sees the ball.
-static void clearBall() { for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE; }
-static void ballAt(float deg, float fov = 20.0f) {
-  clearBall();
-  for (int i = 0; i < 12; i++) if (absf(angDiffDeg(g_cfg.ch[i].bearingDeg, deg)) <= fov) g_simMode[i] = SIM_BALL;
+
+// Sensor model of the tests: an ANALOG sensor that reads CLR with nothing in front and NEAR with the ball in the shooting position
+// (rising polarity). The simulated "strength" is the fraction of that span. These numbers are test inputs, not measurements.
+static const uint16_t CLR = 500, NEAR = 3000;
+static void sensors(float s0, float s1) {
+  g_mockAnalog[PIN_IR[0]] = (uint16_t)(CLR + s0 * (NEAR - CLR) + 0.5f);
+  g_mockAnalog[PIN_IR[1]] = (uint16_t)(CLR + s1 * (NEAR - CLR) + 0.5f);
 }
-static void calibrateAll() { for (int i = 0; i < 12; i++) { g_cfg.ch[i].bearingCal = 1; g_cfg.ch[i].bearingDeg = (float)i * 30.0f; } }
-static void bootCal() { setup(); calibrateAll(); }
+static void ballGone() { sensors(0.0f, 0.0f); }
+static void ballFar() { sensors(0.35f, 0.35f); }          // both sensors see the ball, not near
+static void ballHeld() { sensors(1.0f, 0.9f); }           // sensor 0 near, sensor 1 sees it, centred: the shooting position
+// Compatibility with the older tests: a ball roughly ahead is seen by both sensors, anything else is not seen.
+static void ballAt(float deg, float = 20.0f) { if (absf(deg) <= 45.0f) ballFar(); else ballGone(); }
+static void calibrateAll() {
+  g_cfg.irClear0 = CLR; g_cfg.irNear0 = NEAR; g_cfg.irClear1 = CLR; g_cfg.irNear1 = NEAR;
+  g_cfg.irOffsetSide = 1;                                   // sensor 1 mounted to the right of sensor 0
+}
+static void bootCal() { ballGone(); setup(); calibrateAll(); }
 static bool wheelsMatchStrafeRight() { return wheelDir(W_FL) > 0 && wheelDir(W_FR) < 0 && wheelDir(W_BL) < 0 && wheelDir(W_BR) > 0; }
 static void trackWheelMotion() { if (!allWheelsStopped()) anyWheelEverMoved = true; }
 static void simRunTracking(uint32_t ms) {
@@ -57,6 +68,29 @@ static void startAuto() {
 
 // ================================================================================================
 // pure logic
+
+static uint32_t parseExportAndCrc(const std::string& out, const char* beginTag, bool* ok, int* lines) {
+  *ok = false; *lines = 0;
+  size_t b = out.find(beginTag);
+  if (b == std::string::npos) return 0;
+  size_t s = out.find('\n', b) + 1;
+  size_t e = out.find("#END-EXPORT", s);
+  if (e == std::string::npos) return 0;
+  uint32_t crc = 0; int n = 0;
+  size_t p = s;
+  while (p < e) {
+    size_t nl = out.find('\n', p);
+    std::string line = out.substr(p, nl - p + 1);
+    if (line[0] != '[') { crc = crc32Update(crc, (const uint8_t*)line.data(), line.size()); n++; }
+    p = nl + 1;
+  }
+  unsigned want = 0; int wl = 0;
+  sscanf(out.c_str() + e, "#END-EXPORT lines=%d crc32=%x", &wl, &want);
+  *ok = (want == crc) && wl == n;
+  *lines = n;
+  return crc;
+}
+
 static void t_angles() {
   CHECK_NEAR(angDiffDeg(359, 1), -2, 1e-4);
   CHECK_NEAR(angDiffDeg(1, 359), 2, 1e-4);
@@ -88,7 +122,7 @@ static void t_timer_rollover() {
   CHECK(g_navState == NAV_APPROACH);
   CHECK(g_cond == COND_NORMAL);
   CHECK(g_ball.valid);
-  clearBall();
+  ballGone();
   simRun(1500);
   CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE);
 }
@@ -129,7 +163,7 @@ static void t_pinmap() {
   for (int i = 0; i < 4; i++) {
     CHECK(WHEEL_PINS[i].in1 == spec[i].in1 && WHEEL_PINS[i].in2 == spec[i].in2 && WHEEL_PINS[i].en == spec[i].en);
   }
-  CHECK(PIN_MUX_SIG == 34 && PIN_MUX_S0 == 4 && PIN_MUX_S1 == 13 && PIN_MUX_S2 == 15 && PIN_MUX_S3 == 2);
+  CHECK(PIN_IR[0] == 35 && PIN_IR[1] == 36);
   CHECK(PIN_I2C_SDA == 16 && PIN_I2C_SCL == 17);
   setup();
   for (int w = 0; w < 4; w++) {
@@ -232,12 +266,12 @@ static void t_config() {
   CHECK(cfgValidate(c, rep, sizeof(rep)) == 0);
   // NaN / out of range / bad enumerations are replaced with safe defaults and reported
   Config d; cfgDefaults(d);
-  c.acqConf = NAN;                 CHECK(cfgValidate(c, rep, sizeof(rep)) == 1 && c.acqConf == d.acqConf && strstr(rep, "acqconf"));
+  c.irSeenPct = 200;               CHECK(cfgValidate(c, rep, sizeof(rep)) == 1 && c.irSeenPct == d.irSeenPct && strstr(rep, "irseen"));
   c.maxAuto = 0;                   CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.maxAuto == d.maxAuto);
   c.pwmFreq = 60000;               CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.pwmFreq == d.pwmFreq);
   c.reverse[2] = 7;                CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.reverse[2] == 0);
-  c.ch[3].bearingDeg = 720;        CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ch[3].bearingDeg == d.ch[3].bearingDeg && !c.ch[3].bearingCal);
-  c.ch[4].enabled = 9;             CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ch[4].enabled == d.ch[4].enabled);
+  c.irOffsetSide = 5;              CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.irOffsetSide == d.irOffsetSide);
+  c.irClear0 = 1000; c.irNear0 = 1020; CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.irClear0 == 0 && c.irNear0 == 0);   // no usable span: stored as "not calibrated"
   c.minPwm = 200; c.maxManual = 100; CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.minPwm < c.maxManual);
   c.imuYawSign = 3;                CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.imuYawSign == -1);
   c.imuAddrPref = 0x30;            CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.imuAddrPref == 0);
@@ -247,10 +281,10 @@ static void t_config() {
   // CRC / persistence
   freshFs("config");
   CHECK(fsInit());
-  Config s; cfgDefaults(s); s.maxAuto = 123; s.ch[5].bearingDeg = 150; s.ch[5].bearingCal = 1;
+  Config s; cfgDefaults(s); s.maxAuto = 123; s.irClear0 = 800; s.irNear0 = 3200;
   CHECK(cfgSave(s));
   Config l; CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_OK);
-  CHECK(l.maxAuto == 123 && l.ch[5].bearingCal == 1);
+  CHECK(l.maxAuto == 123 && l.irClear0 == 800 && l.irNear0 == 3200);
   // corrupt one byte in the middle -> CRC failure -> defaults + reported
   { std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "r+b"); fseek(f, 40, SEEK_SET); fputc(0xAB, f); fclose(f); }
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADCRC && l.maxAuto == d.maxAuto);
@@ -262,260 +296,17 @@ static void t_config() {
   { std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite("short", 1, 5, f); fclose(f); }
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADSIZE && l.maxAuto == d.maxAuto);
   // valid CRC but invalid field -> repaired, others kept
-  { Config v; cfgDefaults(v); v.maxManual = 111; v.acqConf = 7.0f; cfgSeal(v); std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
-  CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_REPAIRED && l.maxManual == 111 && l.acqConf == d.acqConf && strstr(rep, "acqconf"));
+  { Config v; cfgDefaults(v); v.maxManual = 111; v.irSeenPct = 200; cfgSeal(v); std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
+  CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_REPAIRED && l.maxManual == 111 && l.irSeenPct == d.irSeenPct && strstr(rep, "irseen"));
   // never persist invalid settings
-  Config bad; cfgDefaults(bad); bad.acqConf = NAN;
+  Config bad; cfgDefaults(bad); bad.irSeenPct = 200;
   CHECK(!cfgSave(bad));
-  // pulse-period gate must be both-zero or a sane band
-  { Config g; cfgDefaults(g); g.irPeriodMinUs = 500; g.irPeriodMaxUs = 0; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1 && g.irPeriodMinUs == 0 && strstr(rep, "irperiodgate")); }
-  { Config g; cfgDefaults(g); g.irPeriodMinUs = 900; g.irPeriodMaxUs = 800; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1 && g.irPeriodMaxUs == 0); }
-  { Config g; cfgDefaults(g); g.irPeriodMinUs = 50; g.irPeriodMaxUs = 800; CHECK(cfgValidate(g, rep, sizeof(rep)) >= 1); }
-  { Config g; cfgDefaults(g); g.irPeriodMinUs = 400; g.irPeriodMaxUs = 1500; CHECK(cfgValidate(g, rep, sizeof(rep)) == 0); }
   // pins are not part of the configuration: no parameter name can touch them
   for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(strstr(PARAMS[i].name, "gpio") == nullptr && strncmp(PARAMS[i].name, "pin", 3) != 0);
   // and no ParamDef offset can reach outside the Config struct
-  for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(PARAMS[i].off + 1 <= offsetof(Config, ch));
+  for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(PARAMS[i].off + 1 <= offsetof(Config, crc));
 }
 
-static void t_classify() {
-  Config c; cfgDefaults(c);
-  CHECK(irClassifyWindow(c, 0, 0, 3000, false, false) == WS_NONE);
-  CHECK(irClassifyWindow(c, 1, 300, 3000, false, false) == WS_NONE);        // one pulse is not enough
-  CHECK(irClassifyWindow(c, 2, 700, 3000, false, false) == WS_DETECT);
-  CHECK(irClassifyWindow(c, 4, 1400, 3000, false, false) == WS_DETECT);     // ~1.2 kHz ball
-  CHECK(irClassifyWindow(c, 40, 1500, 3000, false, false) == WS_NOISY);     // 13 pulses/ms
-  CHECK(irClassifyWindow(c, 0, 3000, 3000, true, true) == WS_STUCK);
-  CHECK(irClassifyWindow(c, 0, 1000, 3000, true, false) == WS_NONE);        // went inactive: not stuck
-  CHECK(irClassifyWindow(c, 250, 0, 3000, false, false) == WS_NOISY);       // flood cap
-}
-
-// ================================================================================================
-// IR
-static void t_ir_detect() {
-  bootCal();
-  simRun(1500);
-  CHECK(!g_ball.valid);
-  CHECK(g_cond == COND_NORMAL);                      // no ball is a navigation condition, not a failure
-  for (int i = 0; i < 12; i++) CHECK(irChStatus(g_cfg, i) == CH_UNVERIFIED);
-  CHECK(!faultActive(F_IR_CHANNEL));
-  // scan timing: 12 * (window + settle + loop quantisation)
-  CHECK(g_scan.cycleCount > 5);
-  CHECK(g_scan.cycleUs >= 12 * 3000 && g_scan.cycleUs < 12 * 3200);
-  CHECK(g_scan.enabledCount == 12);
-  for (int i = 12; i < 16; i++) CHECK(g_ir[i].windows == 0);   // C12..C15 never scanned
-  ballAt(90, 10);                                    // only channel 3 sees it
-  simRun(1200);
-  CHECK(g_ir[3].active && g_ir[3].detCount > 3);
-  CHECK(g_ir[3].edges >= 2 && g_ir[3].edges <= 5);
-  CHECK_NEAR(g_ir[3].periodUs, 833, 120);            // measured pulse period of the simulated ball
-  int others = 0; for (int i = 0; i < 12; i++) if (i != 3 && g_ir[i].active) others++;
-  CHECK(others == 0);
-  CHECK(g_ball.valid);
-  CHECK_NEAR(g_ball.bearingDeg, 90, 1.0);
-  CHECK(g_ball.conf >= g_cfg.acqConf);
-  CHECK(g_ball.conf <= 0.86);                        // channel is UNVERIFIED -> 0.85 factor
-  g_cfg.ch[3].verified = 1;
-  simRun(500);
-  CHECK(g_ball.conf > 0.95);
-  // ball taken away: held for lostHold then declared lost, with no sensor fault
-  clearBall();
-  simRun(g_cfg.lostHoldMs + 600);
-  CHECK(!g_ball.valid);
-  CHECK(!faultActive(F_IR_CHANNEL) && g_cond == COND_NORMAL);
-  CHECK(g_stats.channelTestFailMask == 0);
-}
-
-static void t_ir_wrap() {
-  bootCal();
-  clearBall();
-  g_simMode[11] = SIM_BALL; g_simMode[0] = SIM_BALL;       // bearings 330 and 0 -> ball near 345 (= -15)
-  simRun(1500);
-  CHECK(g_ball.valid);
-  CHECK_NEAR(g_ball.bearingDeg, -15, 2.0);                 // not 165
-  CHECK(g_ball.rInst > 0.95);
-  clearBall(); simRun(1500);
-  g_simMode[5] = SIM_BALL; g_simMode[6] = SIM_BALL; g_simMode[7] = SIM_BALL;   // 150,180,210 -> 180
-  simRun(1500);
-  CHECK(fabsf(g_ball.bearingDeg) > 175);
-}
-
-static void t_ir_ambiguous() {
-  bootCal();
-  g_simMode[0] = SIM_BALL; g_simMode[6] = SIM_BALL;        // opposite sides: contradictory
-  simRun(2000);
-  CHECK(g_ball.anyDetect);
-  CHECK(g_ball.rInst < 0.5);
-  CHECK(g_ball.ambiguous);
-  CHECK(g_ball.conf < g_cfg.acqConf);
-  CHECK(!g_ball.valid);                                    // never acts on contradictory data
-}
-
-static void t_ir_stuck_and_recover() {
-  bootCal();
-  g_simMode[5] = SIM_STUCK_ACTIVE;
-  simRun(1500);
-  CHECK(irChStatus(g_cfg, 5) == CH_UNVERIFIED);            // not yet long enough to suspect
-  simRun(1500);                                            // > 2 s
-  CHECK(irChStatus(g_cfg, 5) == CH_SUSPECT_STUCK);
-  CHECK(!irTrusted(g_cfg, 5));
-  CHECK(faultActive(F_IR_CHANNEL) && g_cond == COND_DEGRADED);
-  CHECK(outHas("IR_CHANNEL"));
-  simRun(14000);
-  CHECK(irChStatus(g_cfg, 5) == CH_FAIL_STUCK);
-  uint8_t nT, nU; float gap = irCoverageGap(g_cfg, &nT, &nU);
-  CHECK(nT == 11);                                         // recalculated usable channel count
-  CHECK(gap == 0);                                         // 30 deg spacing with a 35 deg fov: still covered
-  // remaining channels still find the ball
-  g_simMode[2] = SIM_BALL; simRun(1500);
-  CHECK(g_ball.valid && fabsf(g_ball.bearingDeg - 60) < 2);
-  // the transient clears: suspect first, verification period, then fault cleared
-  g_simMode[5] = SIM_IDLE; g_simMode[2] = SIM_IDLE;
-  simRun(2500);
-  CHECK(irChStatus(g_cfg, 5) != CH_FAIL_STUCK);
-  simRun(g_cfg.recoverVerifyMs + 2500);
-  CHECK(irChStatus(g_cfg, 5) == CH_UNVERIFIED || irChStatus(g_cfg, 5) == CH_SUSPECT_STUCK);
-}
-
-static void t_ir_noise() {
-  bootCal();
-  g_simMode[2] = SIM_NOISE;
-  simRun(3000);
-  CHECK(g_ir[2].noisy);
-  CHECK(irChStatus(g_cfg, 2) == CH_SUSPECT_NOISY && !irTrusted(g_cfg, 2));
-  CHECK(!g_ball.valid);                                    // noise never becomes a ball
-  g_simMode[2] = SIM_IDLE;
-  simRun(3000);
-  CHECK(!g_ir[2].noisy);
-  CHECK(irTrusted(g_cfg, 2));
-}
-
-static void t_ir_polarity() {
-  bootCal();
-  send(":ch 4 pol high\n");
-  simRun(50);
-  CHECK(g_cfg.ch[4].activeLow == 0);
-  g_simActiveHigh[4] = true;                               // module idles LOW, pulses HIGH
-  g_simMode[4] = SIM_BALL;
-  simRun(1500);
-  CHECK(g_ir[4].active);
-  g_simMode[4] = SIM_IDLE;
-  simRun(1500);
-  CHECK(!g_ir[4].active && irChStatus(g_cfg, 4) == CH_UNVERIFIED);   // idle-LOW is not "stuck" for an active-high channel
-}
-
-static void t_ir_system_loss() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  CHECK(g_autoEnabled);
-  for (int i = 0; i < 12; i++) { char b[40]; snprintf(b, sizeof(b), ":ch %d en 0\n", i); send(b); }
-  simRun(300);
-  CHECK(faultActive(F_IR_NO_CHANNELS));
-  CHECK(g_cond == COND_SAFE_STOP);
-  CHECK(!g_autoEnabled);
-  CHECK(g_navState == NAV_SAFE_STOP);
-  CHECK(allWheelsStopped());
-  Serial.out.clear();
-  send("a"); simRun(100);
-  CHECK(!g_autoEnabled && outHas("REFUSED"));
-  // diagnostics stay alive in SAFE_STOP
-  Serial.out.clear(); send("h"); simRun(300);
-  CHECK(outHas("HARDWARE HEALTH REPORT") && outHas("IR_NO_CHANNELS"));
-  // re-enable channels: fault clears only after the verification period; autonomy stays OFF
-  for (int i = 0; i < 12; i++) { char b[40]; snprintf(b, sizeof(b), ":ch %d en 1\n", i); send(b); }
-  simRun(500);
-  CHECK(g_cond == COND_SAFE_STOP);                         // not yet verified
-  simRun(g_cfg.recoverVerifyMs + 1500);
-  CHECK(g_cond != COND_SAFE_STOP);
-  CHECK(!g_autoEnabled);
-  CHECK(g_navState == NAV_IDLE);
-}
-
-static void t_ir_trusted_low() {
-  bootCal();
-  for (int i = 3; i < 12; i++) { char b[40]; snprintf(b, sizeof(b), ":ch %d trust 0\n", i); send(b); }   // 3 trusted left (< 4)
-  simRun(500);
-  CHECK(faultActive(F_IR_TRUSTED_LOW) && g_cond == COND_SAFE_STOP);
-  startAuto();
-  CHECK(!g_autoEnabled);
-}
-
-static void t_ir_scan_stall() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(1500);
-  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());
-  g_scan.running = false;                                  // scheduler dies
-  simRun(1500);
-  CHECK(faultActive(F_IR_SCAN_STALL));
-  CHECK(g_cond == COND_SAFE_STOP && !g_autoEnabled && allWheelsStopped());
-  g_scan.running = true; g_scan.open = false;
-  simRun(500);
-  CHECK(g_cond == COND_SAFE_STOP);                         // recovery must be verified, not instant
-  simRun(g_cfg.recoverVerifyMs + 1000);
-  CHECK(g_cond == COND_NORMAL);
-  CHECK(!g_autoEnabled && allWheelsStopped());             // never auto-resumes
-}
-
-static void t_ir_overrun() {
-  bootCal();
-  simRun(500);
-  uint32_t ov0 = g_stats.scanOverruns;
-  g_simMode[3] = SIM_BALL;
-  simRun(1000, 20000);                                     // control loop only runs every 20 ms: windows overrun
-  CHECK(g_stats.scanOverruns > ov0);
-  CHECK(irChStatus(g_cfg, 3) != CH_SUSPECT_STUCK && irChStatus(g_cfg, 3) != CH_FAIL_STUCK);
-  CHECK(!faultActive(F_IR_CHANNEL));                       // late windows are discarded, not misread
-}
-
-static void t_ir_coverage() {
-  bootCal();
-  for (int i = 2; i <= 7; i++) { char b[40]; snprintf(b, sizeof(b), ":ch %d trust 0\n", i); send(b); }   // leaves 0,1,8..11 = 6 trusted
-  simRun(600);
-  uint8_t nT, nU; float gap = irCoverageGap(g_cfg, &nT, &nU);
-  CHECK(nT == 6);
-  CHECK(gap > g_cfg.maxGapDeg);
-  CHECK(faultActive(F_IR_GAP) && g_cond == COND_DEGRADED);
-  CHECK(!faultActive(F_IR_TRUSTED_LOW));
-  startAuto();
-  CHECK(g_autoEnabled);                                    // degraded but allowed
-  CHECK(outHas("DEGRADED"));
-  CHECK_NEAR(navSensorScale(g_cfg), g_cfg.degradedScale, 1e-6);
-}
-
-static void t_ir_probe() {
-  bootCal();
-  simRun(600);
-  // controlled test with the ball on channel 7: PASS and persistent flag
-  g_simMode[7] = SIM_BALL;
-  send(":verify 7\n");
-  simRun(5000);
-  CHECK(outHas("C7 PASS"));
-  CHECK(g_cfg.ch[7].verified == 1 && irChStatus(g_cfg, 7) == CH_VERIFIED);
-  // channel 8: ball NOT present -> suspect first, then confirmed fail on a second failed test
-  Serial.out.clear();
-  send(":verify 8\n"); simRun(5000);
-  CHECK(outHas("C8 SUSPECT") && irChStatus(g_cfg, 8) == CH_SUSPECT_TEST && irTrusted(g_cfg, 8));
-  send(":verify 8\n"); simRun(5000);
-  CHECK(outHas("C8 FAIL") && irChStatus(g_cfg, 8) == CH_FAIL_TEST && !irTrusted(g_cfg, 8));
-  CHECK((g_stats.channelTestFailMask & (1u << 8)) != 0);
-  CHECK(faultActive(F_IR_CHANNEL));
-  send(":chreset 8\n"); simRun(100);
-  CHECK(irChStatus(g_cfg, 8) == CH_UNVERIFIED);
-  // coverage learning at a known bearing
-  clearBall(); g_simMode[2] = SIM_BALL; g_simMode[3] = SIM_BALL;
-  Serial.out.clear();
-  send(":learn 75\n"); simRun(4000);
-  CHECK(g_covN == 1 && g_cov[0].mask == ((1u << 2) | (1u << 3)) && g_cov[0].deg == 75);
-  send(":cov\n"); simRun(200);
-  CHECK(outHas("COV,75,000C"));
-}
-
-// ================================================================================================
-// IMU
 static void t_imu_integrate() {
   setup();
   CHECK(g_imu.present && g_imu.ok && g_imu.calibrated && g_imu.yawValid);
@@ -555,20 +346,20 @@ static void t_imu_missing() {
   CHECK(!g_imu.present);
   CHECK(faultActive(F_IMU_MISSING) && g_cond == COND_DEGRADED);
   CHECK(outHas("NOT FOUND"));
-  // ball seeking remains available with a robot-relative fallback
+  // ball seeking remains available without heading hold
   simRun(500);
   startAuto();
   CHECK(g_autoEnabled);
-  CHECK(outHas("turn-toward-ball"));
-  ballAt(60);
+  CHECK(outHas("heading hold unavailable"));
+  ballAt(0);
   simRun(2000);
   CHECK(g_navState == NAV_APPROACH);
   CHECK(isnan(g_hdgErr));
-  CHECK(g_reqW > 0);                                        // turns toward a ball on the right
+  CHECK(g_reqW == 0.0f);                                    // no heading, no bearing: the robot never turns toward the ball
   CHECK(fabsf(g_reqW) <= g_cfg.hdgMaxRot + 1e-6);
   CHECK(!allWheelsStopped());
   // slower than the healthy case because the condition is DEGRADED
-  CHECK(sqrtf(g_reqVx * g_reqVx + g_reqVy * g_reqVy) <= g_cfg.degradedScale * g_cfg.attackSpeed + 1e-4);
+  CHECK(sqrtf(g_reqVx * g_reqVx + g_reqVy * g_reqVy) <= g_cfg.degradedScale * g_cfg.approachSpeed + 1e-4);
 }
 
 static void t_imu_dropout() {
@@ -641,116 +432,6 @@ static void t_heading_hold() {
   CHECK(fabsf(g_reqW) < 1e-6);
 }
 
-// ================================================================================================
-// navigation
-static void t_nav_approach() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  CHECK(g_autoEnabled && g_navState == NAV_SEEK);
-  ballAt(90, 10);                                           // ball exactly to the right
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);
-  CHECK(g_reqVx > 0.3 && fabsf(g_reqVy) < 0.2);             // strafe right
-  CHECK(wheelsMatchStrafeRight());
-  ballAt(0, 10);                                            // dead ahead
-  simRun(2500);
-  CHECK(g_reqVy > 0.5 && fabsf(g_reqVx) < 0.15);
-  CHECK(wheelDir(W_FL) > 0 && wheelDir(W_FR) > 0 && wheelDir(W_BL) > 0 && wheelDir(W_BR) > 0);
-  ballAt(270, 10);                                          // left
-  simRun(2500);
-  CHECK(g_reqVx < -0.3);
-  // aggressive only with confidence + healthy sensing
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  ballAt(0, 40);
-  simRun(2500);
-  CHECK(g_ball.conf > g_cfg.aggressiveConf);
-  CHECK(sqrtf(g_reqVx * g_reqVx + g_reqVy * g_reqVy) > g_cfg.approachSpeed + 0.05f);
-  CHECK(g_cond == COND_NORMAL);
-}
-
-static void t_nav_unreliable_slow() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0, 10);
-  simRun(2500);
-  float normal = sqrtf(g_reqVx * g_reqVx + g_reqVy * g_reqVy);
-  g_simMode[8] = SIM_NOISE;                                 // interference on another channel
-  simRun(4000);
-  CHECK(g_ir[8].noisy);
-  float reduced = sqrtf(g_reqVx * g_reqVx + g_reqVy * g_reqVy);
-  CHECK(reduced < normal);
-  CHECK(g_cond == COND_DEGRADED);
-}
-
-static void t_nav_lost_search() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0, 10);
-  simRun(2000);
-  CHECK(g_navState == NAV_APPROACH);
-  clearBall();
-  simRun(g_cfg.lostHoldMs + 400);
-  CHECK(g_navState == NAV_SEARCH);
-  CHECK(g_stats.ballLossEvents == 1);
-  simRun(500);
-  CHECK(fabsf(g_reqW) > 0.1 && g_reqVx == 0 && g_reqVy == 0);   // slow rotation in place
-  CHECK(fabsf(g_reqW) <= g_cfg.searchSpin + 1e-6);
-  CHECK(!faultActive(F_IR_CHANNEL) && g_cond == COND_NORMAL);   // losing the ball is not a fault
-  // reacquire during the search
-  ballAt(180, 15);
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);
-  CHECK(g_stats.reacquisitions == 1 && g_stats.reacquireTotalMs > 0);
-  // bounded search: exhaust attempts and end up stopped, never spinning forever
-  clearBall();
-  simRun(g_cfg.lostHoldMs + 200);
-  uint32_t perAttempt = g_cfg.searchTimeoutMs + g_cfg.searchPauseMs + 500;
-  simRun(perAttempt * (g_cfg.searchAttempts + 1));
-  CHECK(g_navState == NAV_WAIT);
-  CHECK(allWheelsStopped());
-  CHECK(g_autoEnabled);
-  ballAt(30, 15);
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);                         // watching while stopped, resumes on its own
-  clearBall();
-  simRun(g_cfg.lostHoldMs + 200 + perAttempt * (g_cfg.searchAttempts + 1) + 61000);
-  CHECK(g_navState == NAV_IDLE && !g_autoEnabled);           // gives up after a long wait
-}
-
-static void t_nav_hysteresis() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0, 40);
-  simRun(2500);
-  // a ball hovering around the centre boundary must not flip the centred flag every cycle
-  int flips = 0; bool last = g_centered;
-  for (int i = 0; i < 40; i++) {
-    ballAt((i & 1) ? 17.0f : 23.0f, 12);
-    simRun(150);
-    if (g_centered != last) { flips++; last = g_centered; }
-  }
-  CHECK(flips <= 4);
-}
-
-static void t_nav_isolated_samples() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  clearBall();
-  // single isolated detections (one window) on random channels never start the approach
-  for (int k = 0; k < 20; k++) {
-    int ch = (k * 5) % 12;
-    g_simMode[ch] = SIM_BALL; simRun(36); g_simMode[ch] = SIM_IDLE; simRun(500);
-  }
-  CHECK(g_stats.ballLossEvents == 0);
-  CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEEK || g_navState == NAV_SEARCH_PAUSE || g_navState == NAV_WAIT);
-  CHECK(g_navState != NAV_APPROACH);
-}
-
 static void t_safe_stop_moving() {
   bootCal();
   simRun(500);
@@ -758,7 +439,7 @@ static void t_safe_stop_moving() {
   ballAt(0, 10);
   simRun(2500);
   CHECK(!allWheelsStopped());
-  for (int i = 0; i < 12; i++) g_simMode[i] = SIM_STUCK_ACTIVE;   // every receiver wedged: sensing lost
+  g_mockAnalog[PIN_IR[0]] = 0;                              // front sensor wiring fault: sensing lost
   uint64_t t0 = g_mockUs;
   while (g_cond != COND_SAFE_STOP && g_mockUs - t0 < 30000000ULL) { loop(); mockAdvance(50); }
   CHECK(g_cond == COND_SAFE_STOP);
@@ -829,8 +510,6 @@ static void t_reset_wdt() {
   CHECK(outHas("TASK_WDT"));
 }
 
-// ================================================================================================
-// serial interface
 static void t_cli_manual() {
   bootCal();
   simRun(300);
@@ -856,10 +535,10 @@ static void t_cli_manual() {
   // '!' emergency stop
   send("f"); simRun(100); send("!"); simRun(10);
   CHECK(allWheelsStopped());
-  // 'a' refused with uncalibrated bearings
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].bearingCal = 0;
+  // 'a' refused with uncalibrated sensors
+  g_cfg.irClear0 = g_cfg.irNear0 = 0;
   Serial.out.clear(); send("a"); simRun(100);
-  CHECK(!g_autoEnabled && outHas("REFUSED") && outHas("calibrated bearing"));
+  CHECK(!g_autoEnabled && outHas("REFUSED") && outHas("not calibrated"));
 }
 
 static void t_cli_robust() {
@@ -925,27 +604,17 @@ static void t_diag_no_motion() {
   ballAt(0, 30);
   simRunTracking(1500);
   CHECK(!anyWheelEverMoved);
-  CHECK(outHas("IR snapshot") && outHas("MPU6050"));
+  CHECK(outHas("IR sensors (2)") && outHas("MPU6050"));
   CHECK(outHas("HARDWARE HEALTH REPORT"));
   CHECK(outHas("state=IDLE"));
   CHECK(outHas("persist=ON"));
   CHECK(outHas("TEST MODE"));
   CHECK(outHas("commands (115200 baud)"));
-  CHECK(outHas("no distance or signal strength"));
+  CHECK(outHas("signal STRENGTH only"));
   CHECK(!outHas("distance:"));                              // no fabricated distance anywhere
   CHECK(g_streamIr);                                        // 'I' toggled the live view on
   send("I"); simRun(100);
   CHECK(!g_streamIr);
-}
-
-static void t_live_ir_rate() {
-  bootCal();
-  simRun(300);
-  Serial.out.clear();
-  send("I"); simRun(5000);
-  int lines = outCount("cyc=");
-  CHECK(lines >= 8 && lines <= 11);                         // ~streamMs=500 -> 10 lines in 5 s, not unlimited
-  send("I"); simRun(100);
 }
 
 static void t_motor_test() {
@@ -981,8 +650,8 @@ static void t_motor_test() {
   send("s"); simRun(20);
   CHECK(allWheelsStopped() && g_mtest.state == 0);
   // motor test while in SAFE_STOP due to a sensing fault is allowed on the bench
-  for (int i = 0; i < 12; i++) { char b[40]; snprintf(b, sizeof(b), ":ch %d en 0\n", i); send(b); }
-  simRun(300);
+  g_mockAnalog[PIN_IR[0]] = 0;                              // front sensor wiring fault
+  simRun(g_cfg.irRailMs + 600);
   CHECK(g_cond == COND_SAFE_STOP);
   send(":mtest FR\n"); simRun(100); send(":confirm\n"); simRun(400);
   CHECK(wheelDir(W_FR) > 0);
@@ -1007,25 +676,6 @@ static void t_drive_test() {
   simRun(3000);
   CHECK(allWheelsStopped() && g_mtest.state == 0 && g_navState == NAV_IDLE);
   CHECK(outHas("drivetrain test finished"));
-}
-
-static void t_boot_no_channels() {
-  CHECK(fsInit());
-  Config c; cfgDefaults(c);
-  for (int i = 0; i < 16; i++) c.ch[i].enabled = 0;
-  CHECK(cfgSave(c));
-  setup();
-  CHECK(faultActive(F_IR_NO_CHANNELS) && g_cond == COND_SAFE_STOP);
-  CHECK(!g_autoEnabled && allWheelsStopped());
-  g_cfg.ch[0].enabled = 1;                                   // enabling a channel later must start the scan
-  simRun(1000);
-  CHECK(g_scan.cycleCount > 10);
-  CHECK(g_scan.enabledCount == 1);
-  for (int i = 1; i < 6; i++) g_cfg.ch[i].enabled = 1;
-  calibrateAll();
-  simRun(g_cfg.recoverVerifyMs + 2000);
-  CHECK(!faultActive(F_IR_NO_CHANNELS) && !faultActive(F_IR_TRUSTED_LOW) && g_cond != COND_SAFE_STOP);
-  CHECK(!g_autoEnabled);
 }
 
 static void t_fs_commands() {
@@ -1060,269 +710,22 @@ static void t_fs_commands() {
   { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); CHECK(n >= 1 && n < before + 1); }
 }
 
-static void t_ir_spare_channels() {
-  bootCal();
-  for (int i = 12; i < 16; i++) g_simMode[i] = SIM_BALL;      // a "ball" on mux inputs that have no receiver installed
-  simRun(3000);
-  CHECK(!g_ball.valid && !g_ball.anyDetect);
-  for (int i = 12; i < 16; i++) { CHECK(g_ir[i].windows == 0 && g_ir[i].detCount == 0 && !g_ir[i].active); CHECK(irChStatus(g_cfg, i) == CH_DISABLED); CHECK(!irTrusted(g_cfg, i)); }
-  CHECK(g_scan.enabledCount == 12);
-  uint8_t nT, nU; irCoverageGap(g_cfg, &nT, &nU);
-  CHECK(nT == 12);                                             // spare channels are not counted as coverage
-  CHECK(!faultActive(F_IR_CHANNEL));                           // and are never reported as failed
-  CHECK(outHas("reserved for future receivers: disabled"));
-  // defaults agree with the physical count and the angle range
-  Config d; cfgDefaults(d);
-  int en = 0; for (int i = 0; i < 16; i++) { en += d.ch[i].enabled; CHECK(d.ch[i].bearingDeg >= 0 && d.ch[i].bearingDeg < 360 && d.ch[i].tiltDownDeg == 22.0f && !d.ch[i].bearingCal); }
-  CHECK(en == IR_PLANNED_CHANNELS && en == 12);
-}
-
-static void t_ir_period_gate() {
-  bootCal();
-  simRun(500);
-  // before any measurement: 'auto' is refused and the gate is reported OFF
-  send(":irgate auto\n"); send("h"); simRun(1500);
-  CHECK(outHas("needs a measurement"));
-  CHECK(outHas("pulse-period gate OFF"));
-  // An unrelated modulated source with a ball-like rhythm (2.5 kHz envelope) on channel 3.
-  g_simMode[3] = SIM_BALL; g_simChPeriod[3] = 400;
-  simRun(1500);
-  CHECK(g_ir[3].active);                                       // WITHOUT a gate it is indistinguishable from a ball (documented limitation)
-  CHECK(g_ir[3].offband == 0);
-  // Measure the real ball (833 us) on channel 7 and gate on it.
-  g_simMode[3] = SIM_IDLE; g_simChPeriod[3] = 0;
-  g_simMode[7] = SIM_BALL;
-  send(":verify 7\n"); simRun(5000);
-  CHECK(g_lastPeriod.n >= 8 && g_lastPeriod.mean > 700 && g_lastPeriod.mean < 950);
-  CHECK(outHas("measured pulse period of this source"));
-  send(":irgate auto\n"); simRun(100);
-  CHECK(g_cfg.irPeriodMaxUs > 0 && g_cfg.irPeriodMinUs < 833 && g_cfg.irPeriodMaxUs > 833);
-  CHECK(g_cfg.irPeriodMinUs >= 100 && g_cfg.irPeriodMaxUs <= 20000);
-  // Now the same unrelated source is rejected, the real ball still detects.
-  g_simMode[7] = SIM_IDLE; clearBall();
-  simRun(1500);
-  g_simMode[3] = SIM_BALL; g_simChPeriod[3] = 400;
-  simRun(2000);
-  CHECK(!g_ir[3].active && g_ir[3].offband > 5);
-  CHECK(!g_ball.anyDetect && !g_ball.valid);
-  CHECK(!faultActive(F_IR_CHANNEL) && g_cond == COND_NORMAL);   // an off-band source is not a hardware fault
-  g_simMode[3] = SIM_IDLE; g_simChPeriod[3] = 0;
-  g_simMode[7] = SIM_BALL;
-  simRun(2000);
-  CHECK(g_ir[7].active && g_ball.valid);
-  // validation: lone limits and nonsense are refused; off works
-  send(":irgate off\n"); simRun(50);
-  Serial.out.clear();
-  send(":set irperlo 500\n"); simRun(50);
-  CHECK(outHas("rejected") && g_cfg.irPeriodMinUs == 0);
-  Serial.out.clear();
-  send(":irgate 50 900\n"); simRun(50);
-  CHECK(outHas("usage"));
-  send(":irgate 500 400\n"); simRun(50);
-  CHECK(outHas("usage"));
-  send(":irgate 300 1500\n"); simRun(50);
-  CHECK(g_cfg.irPeriodMinUs == 300 && g_cfg.irPeriodMaxUs == 1500);
-  send(":irgate off\n"); simRun(50);
-  CHECK(g_cfg.irPeriodMinUs == 0 && g_cfg.irPeriodMaxUs == 0);
-}
-
-static void t_latency() {
-  // Measured in simulation (control-loop quantisation 50 us): how long from the ball appearing until
-  // the firmware would act on it, and from disappearing until it is declared lost.
-  bootCal();
-  simRun(1000);
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  ballAt(90, 10);                                              // single verified receiver
-  uint64_t t0 = g_mockUs;
-  while (!g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
-  double acq1 = (double)(g_mockUs - t0) / 1000.0;
-  clearBall();
-  simRun(1500);
-  ballAt(75, 20);                                              // two neighbouring receivers
-  t0 = g_mockUs;
-  while (!g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
-  double acq2 = (double)(g_mockUs - t0) / 1000.0;
-  clearBall();                                                 // removed right after acquisition: a young track
-  t0 = g_mockUs;
-  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
-  double lostYoung = (double)(g_mockUs - t0) / 1000.0;
-  simRun(1500);
-  ballAt(75, 20);                                              // established track: two seconds of steady signal
-  simRun(2000);
-  CHECK(g_ball.valid);
-  clearBall();
-  t0 = g_mockUs;
-  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
-  double lost = (double)(g_mockUs - t0) / 1000.0;
-  printf("  latency: acquire(1 verified channel)=%.0f ms, acquire(2 channels)=%.0f ms, loss(young track)=%.0f ms, loss(steady track)=%.0f ms (scan cycle %.1f ms)\n", acq1, acq2, lostYoung, lost, g_scan.cycleUs / 1000.0);
-  CHECK(acq1 < 200);                                           // bound well under the legacy 240 ms
-  CHECK(acq2 < 120);
-  CHECK(lost < g_cfg.lostHoldMs + 25);                         // steady track: the minimum grace period
-  CHECK(lostYoung <= g_cfg.lostHoldMaxMs + 25);                // young track: longer grace, never beyond the configured maximum
-  CHECK(acq1 > g_scan.cycleUs / 1000.0);                       // can never be faster than one scan
-}
-
-static bool benchBurstAcquires(uint32_t durMs, uint32_t phaseUs, int ch);
-static bool benchBroadbandAcquires(uint32_t durMs, uint32_t phaseUs, bool coherent);
-
-static void t_fast_engine_rejection() {
-  // The fast engine must not trade away rejection of ball-like bursts: with the default settings a burst shorter than the
-  // immunity time must never be acquired, whatever its phase relative to the scan (simulation only).
-  bootCal();
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  const uint32_t span = (uint32_t)(g_scan.cycleUs * 2);
-  for (uint32_t d : {20u, 60u, 90u})
-    for (int k = 0; k < 12; k++) CHECK(!benchBurstAcquires(d, (uint32_t)((uint64_t)span * k / 12), 5 + (k % 3)));
-  for (uint32_t d : {40u, 100u, 250u})
-    for (int k = 0; k < 12; k++) { CHECK(!benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 12), true)); CHECK(!benchBroadbandAcquires(d, (uint32_t)((uint64_t)span * k / 12), false)); }
-  CHECK(g_cfg.lostHoldMs <= g_cfg.lostHoldMaxMs);
-}
-
-static void t_side_zone_note() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(90, 10);
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);
-  Serial.out.clear();
-  clearBall();
-  simRun(g_cfg.lostHoldMs + 500);
-  CHECK(outHas("possible entry into the ~40 mm side blind zone"));
-  // a loss straight ahead does not carry that hint
-  startAuto();
-  ballAt(0, 10); simRun(2500);
-  Serial.out.clear(); clearBall(); simRun(g_cfg.lostHoldMs + 500);
-  CHECK(!outHas("side blind zone"));
-  // the health report never implies continuous coverage
-  send("h"); simRun(1500);
-  CHECK(outHas("does NOT mean continuous coverage"));
-  CHECK(outHas("stack headroom"));
-}
-
-static void t_nav_all_directions() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  for (int deg = 0; deg < 360; deg += 30) {
-    ballAt((float)deg, 10);                                    // exactly one receiver sees the ball
-    simRun(3000);
-    char msg[64]; snprintf(msg, sizeof(msg), "bearing %d", deg);
-    if (g_navState != NAV_APPROACH || !g_ball.valid) { printf("  not approaching at %s\n", msg); }
-    CHECK(g_navState == NAV_APPROACH && g_ball.valid);
-    CHECK_NEAR(fabsf(angDiffDeg(g_ball.bearingDeg, (float)deg)), 0, 2.0);
-    // requested direction must point toward the ball (centre band softens the sideways part)
-    float reqAng = atan2f(g_reqVx, g_reqVy) * RAD2DEG;
-    float tol = (deg == 0) ? 1.0f : (deg == 30 || deg == 330 ? 25.0f : 8.0f);
-    CHECK_NEAR(fabsf(angDiffDeg(reqAng, (float)deg)), 0, tol);
-    // wheels follow the mecanum mixing of that request
-    float u[4]; mecanumMix(g_reqVx, g_reqVy, g_reqW, g_cfg.rollerO != 0, u);
-    for (int i = 0; i < 4; i++) if (fabsf(u[i]) > 0.15f) CHECK((wheelDir(i) > 0) == (u[i] > 0) && wheelDir(i) != 0);
-  }
-}
-
-static void t_nav_sweep_and_multi() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0, 20); simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);
-  // ball circles the robot at 60 deg/s: the estimate must follow it continuously across every sector boundary
-  float prev = g_ball.bearingDeg; float worstJump = 0; int lostSamples = 0;
-  for (int step = 0; step < 120; step++) {                    // 6 s = 360 deg
-    ballAt(fmodf(step * 3.0f, 360.0f), 20);
-    simRun(50);
-    if (!g_ball.valid) lostSamples++;
-    float d = fabsf(angDiffDeg(g_ball.bearingDeg, prev)); if (d > worstJump) worstJump = d; prev = g_ball.bearingDeg;
-  }
-  printf("  sweep: worst bearing jump between 50 ms samples = %.1f deg, samples without a valid ball = %d\n", worstJump, lostSamples);
-  CHECK(worstJump < 40.0f);
-  CHECK(lostSamples == 0);
-  CHECK(g_stats.ballLossEvents == 0);
-  // several receivers at once
-  ballAt(45, 25); simRun(2000);
-  CHECK(g_ball.nActive == 2 && fabsf(g_ball.bearingDeg - 45) < 4);
-  ballAt(90, 35); simRun(2000);
-  CHECK(g_ball.nActive == 3 && fabsf(g_ball.bearingDeg - 90) < 3);
-  ballAt(0, 65); simRun(2000);                                // five receivers: front arc
-  CHECK(g_ball.nActive >= 4 && fabsf(g_ball.bearingDeg) < 3);
-  CHECK_NEAR(g_ball.rInst, 0.746, 0.03);                       // geometry of five receivers across 120 deg
-}
-
-static void t_imu_frozen_in_approach() {
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0, 10);
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH && !isnan(g_hdgErr));
-  for (int mode : {2, 4, 3}) {                                // frozen, saturated, all-zero
-    g_mpu.mode = mode;
-    g_mpu.gz = 0;
-    simRun(2500);
-    CHECK(!imuHeadingUsable(g_cfg, millis()));
-    CHECK(isnan(g_hdgErr));
-    CHECK(g_navState == NAV_APPROACH);
-    CHECK(fabsf(g_reqW) <= g_cfg.hdgMaxRot + 1e-6f);          // bounded, and ball is dead ahead: no turning
-    CHECK(fabsf(g_reqW) < 0.05f);
-    CHECK(wheelDir(0) > 0 && wheelDir(1) > 0 && wheelDir(2) > 0 && wheelDir(3) > 0);   // drives straight, no spin
-    g_mpu.mode = 0;
-    simRun(g_cfg.recoverVerifyMs + 2500);
-    CHECK(g_imu.ok);
-  }
-  // ball off to one side + no usable heading: fallback turn is bounded and toward the ball
-  g_mpu.mode = 1;
-  ballAt(60, 10);
-  simRun(2500);
-  CHECK(g_reqW > 0 && g_reqW <= g_cfg.hdgMaxRot + 1e-6f);
-}
-
 static void t_gpio_tamper() {
   bootCal();
   simRun(300);
   anyWheelEverMoved = false;
   const char* cmds[] = {":set gpio 3\n", ":set pin 5\n", ":set in1 4\n", ":set pwmpin 3\n", ":set en 12\n", ":set muxsig 35\n",
-                        ":ch 3 pin 4\n", ":ch 3 gpio 4\n", ":rev ZZ 1\n", ":mtest XX\n", ":set pwmfreq 99999999\n", ":set maxauto -5\n",
-                        ":set maxauto 1e99\n", ":set maxauto 0x20\n", ":ch -1 en 1\n", ":ch 16 en 1\n", ":ch 3 bear nan\n", ":ch 3 bear inf\n"};
+                        ":rev ZZ 1\n", ":mtest XX\n", ":set pwmfreq 99999999\n", ":set maxauto -5\n",
+                        ":set maxauto 1e99\n", ":set maxauto 0x20\n", ":ir cal clear 9\n", ":ir mode 0 nan\n", ":set irclear0 nan\n", ":set irclear0 inf\n"};
   for (const char* c : cmds) { send(c); simRunTracking(60); }
   CHECK(!anyWheelEverMoved);
-  CHECK(outCount("unknown") + outCount("usage") + outCount("rejected") + outCount("must be a number") + outCount("bearing 0..359.9") >= 14);
+  CHECK(outCount("unknown") + outCount("usage") + outCount("rejected") + outCount("must be a number") >= 12);
   struct { int a, b, e; } spec[4] = {{18, 19, 23}, {25, 26, 33}, {21, 22, 5}, {27, 14, 32}};
   for (int i = 0; i < 4; i++) CHECK(WHEEL_PINS[i].in1 == spec[i].a && WHEEL_PINS[i].in2 == spec[i].b && WHEEL_PINS[i].en == spec[i].e);
   CHECK(g_cfg.maxAuto == 170 && g_cfg.pwmFreq == 5000);
-  CHECK(g_cfg.ch[3].bearingDeg == 90);
+  CHECK(g_cfg.irClear0 == CLR);
   // the persisted blob cannot carry pins either: sizes/offsets of the pin tables are not part of Config
   CHECK(sizeof(Config) < 700);
-}
-
-static void t_ch_inspect() {
-  bootCal();
-  simRun(1500);
-  g_simMode[3] = SIM_BALL; simRun(1200);
-  Serial.out.clear();
-  send(":ch 3\n"); send(":ch 13\n"); send(":ch 99\n"); simRun(200);
-  CHECK(outHas("C3: ENABLED | active-LOW"));
-  CHECK(outHas("status UNVERIFIED"));
-  CHECK(outHas("state=DETECT") || outHas("state=none"));
-  CHECK(outHas("detections="));
-  CHECK(outHas("C13 is not scanned"));
-  CHECK(outHas("usage: :ch"));
-  // the snapshot shows every enabled channel individually, and only those
-  Serial.out.clear();
-  send("i"); simRun(300);
-  int rows = 0; for (int i = 0; i < 16; i++) { char tag[16]; snprintf(tag, sizeof(tag), " C%-2d ", i); if (outHas(tag)) rows++; }
-  CHECK(rows == 12);
-  CHECK(!outHas(" C12 ") && !outHas(" C15 "));
-}
-
-static void t_ir_slow_interferer() {
-  bootCal();
-  simRun(500);
-  g_simMode[4] = SIM_BALL; g_simChPeriod[4] = 10000;           // 100 Hz envelope (mains-lamp-like), 4.2 ms active
-  simRun(4000);
-  CHECK(g_ir[4].windows > 20);
-  CHECK(g_ir[4].detCount == 0 && !g_ir[4].active);              // at most one pulse fits in a 3 ms window
-  CHECK(!g_ball.anyDetect && !faultActive(F_IR_CHANNEL));
 }
 
 static void t_cfg_boot_corrupt() {
@@ -1364,27 +767,25 @@ static void t_cfg_set() {
   CHECK(g_cfg.maxAuto == 150 && outHas("rejected"));
   send(":set minpwm 119\n"); simRun(50);                    // would exceed the speed limits: cross-field
   CHECK(g_cfg.minPwm == 40);
-  send(":set acqconf nan\n"); simRun(50);
-  CHECK(g_cfg.acqConf == 0.45f);
+  send(":set irseen nan\n"); simRun(50);
+  CHECK(g_cfg.irSeenPct == 15);
   send(":set nonsense 3\n"); simRun(50);
   send(":rev FR 1\n"); simRun(50);
   CHECK(g_cfg.reverse[1] == 1);
   send(":roller O\n"); simRun(50);
   CHECK(g_cfg.rollerO == 1);
-  send(":ch 3 bear 400\n"); simRun(50);
-  CHECK(g_cfg.ch[3].bearingDeg == 90);                      // rejected
-  send(":ch 3 bear 85\n"); simRun(50);
-  CHECK(g_cfg.ch[3].bearingDeg == 85 && g_cfg.ch[3].bearingCal);
+  send(":set irclear0 5000\n"); simRun(50);
+  CHECK(g_cfg.irClear0 == CLR);                             // rejected (range 0..4095)
+  send(":set irclear0 700\n"); simRun(50);
+  CHECK(g_cfg.irClear0 == 700);
   send(":save\n"); simRun(100);
   CHECK(outHas("configuration saved"));
   send(":defaults\n"); simRun(50);
   CHECK(g_cfg.maxAuto == 170 && g_cfg.reverse[1] == 0);
   send(":load\n"); simRun(50);
-  CHECK(g_cfg.maxAuto == 150 && g_cfg.reverse[1] == 1 && g_cfg.rollerO == 1 && g_cfg.ch[3].bearingDeg == 85);
+  CHECK(g_cfg.maxAuto == 150 && g_cfg.reverse[1] == 1 && g_cfg.rollerO == 1 && g_cfg.irClear0 == 700);
 }
 
-// ================================================================================================
-// storage / logging
 static void t_fs_missing() {
   freshFs("fsmissing");
   mkdir(g_fsDir.c_str(), 0755);
@@ -1538,28 +939,6 @@ static void t_flight_recorder() {
   CHECK(g_frCaptures == cap0 + 1);
 }
 
-static uint32_t parseExportAndCrc(const std::string& out, const char* beginTag, bool* ok, int* lines) {
-  *ok = false; *lines = 0;
-  size_t b = out.find(beginTag);
-  if (b == std::string::npos) return 0;
-  size_t s = out.find('\n', b) + 1;
-  size_t e = out.find("#END-EXPORT", s);
-  if (e == std::string::npos) return 0;
-  uint32_t crc = 0; int n = 0;
-  size_t p = s;
-  while (p < e) {
-    size_t nl = out.find('\n', p);
-    std::string line = out.substr(p, nl - p + 1);
-    if (line[0] != '[') { crc = crc32Update(crc, (const uint8_t*)line.data(), line.size()); n++; }
-    p = nl + 1;
-  }
-  unsigned want = 0; int wl = 0;
-  sscanf(out.c_str() + e, "#END-EXPORT lines=%d crc32=%x", &wl, &want);
-  *ok = (want == crc) && wl == n;
-  *lines = n;
-  return crc;
-}
-
 static void t_export() {
   freshFs("export");
   bootCal();
@@ -1617,10 +996,10 @@ static void t_nonblocking() {
       mockAdvance(50);
     }
   }
-  CHECK(worst < 300);                                       // only the 10 us mux settle delays, never a wait on Serial
+  CHECK(worst < 300);                                       // never a wait on Serial
   CHECK(g_outDropped > 0 || outUsed() > 0);                 // back-pressure shows up as drops/queueing, not blocking
   CHECK(g_navState == NAV_APPROACH);
-  CHECK(g_scan.cycleCount > 20);
+  CHECK(g_irs[0].samples > 20);
   // the writer can be arbitrarily slow without delaying the control loop: it lives outside loop()
   freshFs("nb");
   g_hostWriterInline = false;
@@ -1632,13 +1011,11 @@ static void t_nonblocking() {
   g_hostWriterInline = true;
 }
 
-// ================================================================================================
-// persistence across "reboots" (re-run as two processes)
 static void t_reboot_phase1() {
   freshFs("reboot");
   bootCal();
   simRun(300);
-  for (int i = 0; i < 12; i++) { char b[48]; snprintf(b, sizeof(b), ":ch %d bear %d\n", i, i * 30); send(b); }
+  send(":set irclear0 600\n");
   send(":set maxauto 133\n"); send(":rev BL 1\n"); send(":mok FL\n"); send(":save\n");
   simRun(300);
   startAuto();
@@ -1654,11 +1031,12 @@ static void t_reboot_phase1() {
 
 static void t_reboot_phase2() {
   g_fsDir = "/tmp/mockfs_reboot";
+  ballGone();
   setup();
   CHECK(!g_autoEnabled);                                    // reboot never resumes aggressive movement
   CHECK(g_navState == NAV_IDLE && allWheelsStopped());
   CHECK(g_cfg.maxAuto == 133 && g_cfg.reverse[2] == 1 && (g_cfg.motorVerified & 1));
-  CHECK(g_cfg.ch[3].bearingCal == 1 && g_cfg.ch[3].bearingDeg == 90);
+  CHECK(g_cfg.irClear0 == 600 && g_cfg.irNear0 == NEAR);                // the sensor calibration survived the reboot
   CHECK(g_session == 2);
   LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf);
   bool hasSession1 = false;
@@ -1673,12 +1051,12 @@ static void t_reboot_phase2() {
 }
 
 static void t_cal_startup_defaults() {
-  setup();
-  CHECK(navCalibratedTrusted(g_cfg) == 0);
+  ballGone(); setup();
+  CHECK(!irCalibrated(g_cfg, 0) && !irCalibrated(g_cfg, 1) && g_cfg.irOffsetSide == 0);
   Serial.out.clear();
   send("a"); simRun(50);
-  CHECK(!g_autoEnabled);                                    // placeholder bearings are never trusted for autonomy
-  CHECK(outHas("calibrated bearing"));
+  CHECK(!g_autoEnabled);                                    // an uncalibrated sensor is never trusted for autonomy
+  CHECK(outHas("not calibrated"));
 }
 
 static void t_health_report_text() {
@@ -1689,9 +1067,9 @@ static void t_health_report_text() {
   CHECK(outHas("NOT MEASURABLE (no voltage monitor installed)"));
   CHECK(outHas("NOT MEASURABLE (no encoders, no current sensing)"));
   CHECK(outHas("NOT TESTED"));
-  CHECK(outHas("TSOP1738 vs 40 kHz ball compatibility: NOT TESTED"));
-  CHECK(outHas("reserved for future receivers: disabled"));
-  CHECK(outHas("(UNCALIBRATED)") == false);                // bootCal calibrated them
+  CHECK(outHas("[IR] sensor 0 GPIO35") && outHas("[IR] sensor 1 GPIO36"));
+  CHECK(outHas("physical operation with the real ball"));
+  CHECK(outHas("NOT TESTED (not calibrated)") == false);    // bootCal calibrated them
   CHECK(outHas("MPU6050 @0x68 who=0x68: PASS"));
   CHECK(outHas("PWM shown is COMMANDED"));
   CHECK(outHas("reset reason"));
@@ -1700,719 +1078,329 @@ static void t_health_report_text() {
   CHECK(!outHas("PASS (operator-confirmed") );             // nothing is claimed verified
 }
 
-// ================================================================================================
-
-// ================================================================================================
-// IR response evaluation (not a pass/fail test): sweeps the filter parameters over explicit scenarios.
-//   ./rs26 --eval-ir <irFullHits> <acqCycles> <lostHoldMs> [verified 0|1]
-// All scenarios use the simulated 1.2 kHz ball (833 us period) and the real firmware code.
-static void runMsCb(uint32_t ms, const std::function<void(uint32_t)>& each) {
-  for (uint32_t t = 0; t < ms; t++) {
-    uint64_t end = g_mockUs + 1000ULL;
-    while (g_mockUs < end) { loop(); mockAdvance(50); }
-    each(t);
-  }
-}
-static void evalClearHistory() {
-  clearBall();
-  runMsCb(900, [](uint32_t) {});
-  for (int guard = 0; guard < 20 && g_ball.valid; guard++) runMsCb(100, [](uint32_t) {});
-}
-// ms (with 0.05 ms resolution) from the moment two receivers start seeing the ball until g_ball.valid
-static double evalAcq(int channelsOn, uint32_t phaseMs, double* cmdMs = nullptr, double* moveMs = nullptr) {
-  evalClearHistory();
-  runMsCb(phaseMs, [](uint32_t) {});
-  if (channelsOn == 1) ballAt(90, 10); else ballAt(75, 20);
-  uint64_t t0 = g_mockUs; double tv = -1, tc = -1, tm = -1;
-  while (g_mockUs - t0 < 1500000ULL) {
-    loop(); mockAdvance(50);
-    if (tv < 0 && g_ball.valid) tv = (double)(g_mockUs - t0) / 1000.0;
-    if (tc < 0 && g_autoEnabled && g_navState == NAV_APPROACH && (g_wheelTgt[0] != 0 || g_wheelTgt[1] != 0)) tc = (double)(g_mockUs - t0) / 1000.0;
-    if (tm < 0 && (g_wheelOut[0] != 0 || g_wheelOut[1] != 0 || g_wheelOut[2] != 0 || g_wheelOut[3] != 0)) tm = (double)(g_mockUs - t0) / 1000.0;
-    if (tv >= 0 && (!g_autoEnabled || tm >= 0)) break;
-  }
-  if (cmdMs) *cmdMs = tc;
-  if (moveMs) *moveMs = tm;
-  return tv;
-}
-static bool evalBurstAcquires(uint32_t durMs, uint32_t phaseMs, int ch) {
-  evalClearHistory();
-  runMsCb(phaseMs, [](uint32_t) {});
-  bool got = false;
-  g_simMode[ch] = SIM_BALL;
-  runMsCb(durMs, [&](uint32_t) { if (g_ball.valid) got = true; });
-  g_simMode[ch] = SIM_IDLE;
-  runMsCb(700, [&](uint32_t) { if (g_ball.valid) got = true; });
-  return got;
-}
-static bool evalGapLoses(uint32_t gapMs) {
-  evalClearHistory();
-  ballAt(75, 20);
-  runMsCb(700, [](uint32_t) {});
-  bool lost = false;
-  clearBall();
-  runMsCb(gapMs, [&](uint32_t) { if (!g_ball.valid) lost = true; });
-  ballAt(75, 20);
-  runMsCb(400, [&](uint32_t) { if (!g_ball.valid) lost = true; });
-  return lost;
-}
-static double evalLossLatency() {
-  evalClearHistory();
-  ballAt(75, 20);
-  runMsCb(900, [](uint32_t) {});
-  clearBall();
-  uint64_t t0 = g_mockUs;
-  while (g_ball.valid && g_mockUs - t0 < 3000000ULL) { loop(); mockAdvance(50); }
-  return (double)(g_mockUs - t0) / 1000.0;
-}
-static int evalMissLosses(double startPerSec, uint32_t seconds) {
-  evalClearHistory();
-  srand(11);
-  ballAt(75, 20);
-  runMsCb(800, [](uint32_t) {});
-  int losses = 0; bool wasValid = g_ball.valid; uint32_t offUntil = 0;
-  runMsCb(seconds * 1000, [&](uint32_t t) {
-    if (t >= offUntil && (rand() % 100000) < (int)(startPerSec * 100.0)) { clearBall(); offUntil = t + 5 + (uint32_t)(rand() % 11); }
-    else if (offUntil && t >= offUntil) { ballAt(75, 20); offUntil = 0; }
-    if (wasValid && !g_ball.valid) losses++;
-    wasValid = g_ball.valid;
-  });
-  return losses;
-}
-static int evalFalseAcquisitions(double burstsPerSec, uint32_t seconds) {
-  evalClearHistory();
-  srand(5);
-  int acq = 0; bool wasValid = false; uint32_t until = 0; int ch = 0;
-  runMsCb(seconds * 1000, [&](uint32_t t) {
-    if (!until && (rand() % 100000) < (int)(burstsPerSec * 100.0)) { ch = rand() % 12; g_simMode[ch] = SIM_BALL; until = t + 10 + (uint32_t)(rand() % 111); }
-    else if (until && t >= until) { g_simMode[ch] = SIM_IDLE; until = 0; }
-    if (!wasValid && g_ball.valid) acq++;
-    wasValid = g_ball.valid;
-  });
-  clearBall();
-  return acq;
-}
-static void evalSweep(double degPerSec, double* meanErr, double* maxErr, int* losses) {
-  evalClearHistory();
-  double sum = 0, mx = 0; int n = 0; int lost = 0; bool wasValid = false;
-  uint32_t total = (uint32_t)(360.0 / degPerSec * 1000.0);
-  runMsCb(total, [&](uint32_t t) {
-    double th = fmod(degPerSec * (double)t / 1000.0, 360.0);
-    if (t % 10 == 0) ballAt((float)th, 20);
-    if (wasValid && !g_ball.valid) lost++;
-    wasValid = g_ball.valid;
-    if (g_ball.valid && t % 20 == 0) { double e = fabsf(angDiffDeg(g_ball.bearingDeg, (float)th)); sum += e; if (e > mx) mx = e; n++; }
-  });
-  *meanErr = n ? sum / n : -1; *maxErr = mx; *losses = lost;
-}
-static double evalBoundaryJitter() {
-  evalClearHistory();
-  srand(3);
-  uint32_t off0 = 0, off1 = 0; double sum = 0, sum2 = 0; int n = 0;
-  ballAt(15, 20);                                    // between receivers C0 (0 deg) and C1 (30 deg)
-  runMsCb(10000, [&](uint32_t t) {
-    if (!off0 && (rand() % 1000) < 15) { g_simMode[0] = SIM_IDLE; off0 = t + 3 + (uint32_t)(rand() % 4); }
-    else if (off0 && t >= off0) { g_simMode[0] = SIM_BALL; off0 = 0; }
-    if (!off1 && (rand() % 1000) < 15) { g_simMode[1] = SIM_IDLE; off1 = t + 3 + (uint32_t)(rand() % 4); }
-    else if (off1 && t >= off1) { g_simMode[1] = SIM_BALL; off1 = 0; }
-    if (t > 1500 && t % 20 == 0 && g_ball.valid) { double b = g_ball.bearingDeg; sum += b; sum2 += b * b; n++; }
-  });
-  if (n < 10) return -1;
-  double m = sum / n; return sqrt(fmax(0.0, sum2 / n - m * m));
-}
-static int evalMain(int argc, char** argv) {
-  uint8_t full = (uint8_t)atoi(argv[2]), acqc = (uint8_t)atoi(argv[3]); uint16_t hold = (uint16_t)atoi(argv[4]);
-  bool verified = argc > 5 ? atoi(argv[5]) != 0 : false;
-  setup(); calibrateAll();
-  g_cfg.irFullHits = full; g_cfg.acqCycles = acqc; g_cfg.lostHoldMs = hold;
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = verified ? 1 : 0;
-  runMsCb(1500, [](uint32_t) {});
-  auto stats = [&](int chans, double* mean, double* mx) {
-    double s = 0, m = 0; int n = 0;
-    for (uint32_t ph = 0; ph < 36; ph += 3) { double v = evalAcq(chans, ph); if (v < 0) { *mean = -1; *mx = -1; return; } s += v; if (v > m) m = v; n++; }
-    *mean = s / n; *mx = m;
-  };
-  double a1m, a1x, a2m, a2x; stats(1, &a1m, &a1x); stats(2, &a2m, &a2x);
-  int minBurst = -1; double burst100 = 0;
-  for (uint32_t d : {20u, 40u, 60u, 80u, 100u, 120u, 150u, 200u}) {
-    int hit = 0, tot = 0;
-    for (uint32_t ph = 0; ph < 36; ph += 6) { hit += evalBurstAcquires(d, ph, 5) ? 1 : 0; tot++; }
-    double frac = (double)hit / tot;
-    if (minBurst < 0 && frac >= 0.5) minBurst = (int)d;
-    if (d == 100) burst100 = frac;
-  }
-  int maxGap = 0; for (uint32_t g : {50u, 100u, 150u, 200u, 250u, 300u, 400u, 500u}) { if (!evalGapLoses(g)) maxGap = (int)g; else break; }
-  double loss = evalLossLatency();
-  int miss5 = evalMissLosses(5, 60), miss20 = evalMissLosses(20, 60);
-  int falseAcq = evalFalseAcquisitions(2.0, 120);
-  double m60, x60, m180, x180; int l60, l180; evalSweep(60, &m60, &x60, &l60); evalSweep(180, &m180, &x180, &l180);
-  double jit = evalBoundaryJitter();
-  printf("full=%u acq=%u hold=%4u ver=%d | acq1ch mean/max=%6.1f/%6.1f ms | acq2ch %6.1f/%6.1f | burstAcceptMin=%4d ms (frac@100=%.2f) | gapToleratedUpTo=%3d ms | loss=%5.1f ms | missLosses(5Hz,20Hz)=%d,%d | falseAcq/120s@2Hz=%d | sweep60 err mean/max=%.1f/%.1f loss=%d | sweep180 %.1f/%.1f loss=%d | jitterStd=%.2f deg\n",
-         full, acqc, hold, verified, a1m, a1x, a2m, a2x, minBurst, burst100, maxGap, loss, miss5, miss20, falseAcq, m60, x60, l60, m180, x180, l180, jit);
-  return 0;
-}
-
-#include "bench.h"
-
-
-// ================================================================================================
-// engine 2 (leaky evidence, focused revisits, visit-statistics loss) - regression tests, simulation only
-static void e2Boot() { bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1; g_cfg.engine = 2; irRestartSchedule(); bwClear(); simRun(500); }
-static bool e2Acquire(float deg, float fov, double miss, uint32_t withinMs) {
-  bwBall(deg, fov, miss);
-  uint64_t t0 = g_mockUs;
-  while (!g_ball.valid && g_mockUs - t0 < (uint64_t)withinMs * 1000ULL) benchStep();
-  return g_ball.valid;
-}
-
-static void t_e2_broadband_tail() {
-  // After a broadband burst the receivers hit first age out first; the arc that is left must not be accepted as a ball.
-  e2Boot();
-  for (uint32_t d : {60u, 120u, 250u}) {
-    for (int coherent = 0; coherent < 2; coherent++) {
-      bool got = false;
-      for (int i = 0; i < 12; i++) { bwSet(i, SIM_BALL); g_simPhase[i] = coherent ? 0 : (uint64_t)(rand() % 833); }
-      uint64_t t0 = g_mockUs; while (g_mockUs - t0 < (uint64_t)d * 1000ULL) { benchStep(); got |= g_ball.valid; }
-      bwClear(); t0 = g_mockUs; while (g_mockUs - t0 < 700000ULL) { benchStep(); got |= g_ball.valid; }
-      CHECK(!got);
-    }
-  }
-}
-
-static void t_e2_stall_is_not_absence() {
-  // A stalled control loop produces no evidence either way: it must not end a track.
-  e2Boot();
-  CHECK(e2Acquire(75, 20, 0.0, 400));
-  benchRun(1500);
-  for (uint32_t stall : {50u, 120u, 250u}) {
-    benchStall(stall);
-    benchRun(60);
-    CHECK(g_ball.valid);
-    benchRun(200);
-  }
-  CHECK(g_scan.winOverrunMaxUs >= 240000u);                  // the lateness was measured, not hidden
-  uint32_t mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
-  CHECK(mx >= 240000u);                                       // ... and so was the longest wait of a receiver
-}
-
-static void t_e2_focus_scheduling() {
-  // A strong track needs no extra windows (the ring revisit interval stays one cycle); a flickering one gets them,
-  // but every receiver is still visited within about two ring cycles.
-  e2Boot();
-  CHECK(e2Acquire(90, 10, 0.0, 400));
-  benchRun(2500);
-  irRestartSchedule();
-  benchRun(3000);
-  CHECK(g_scan.focusWindows == 0);
-  uint32_t mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
-  CHECK(mx < g_scan.cycleUs + 2000);
-  bwClear(); benchRun(1500);
-  CHECK(!g_ball.valid);
-  CHECK(e2Acquire(90, 10, 0.5, 3000));
-  irRestartSchedule();
-  benchRun(4000);
-  CHECK(g_ball.valid);
-  CHECK(g_scan.focusWindows > 100);
-  mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
-  CHECK(mx < 2 * g_scan.cycleUs + 4000);                      // no receiver starved
-  bwClear();
-}
-
-static void t_e2_grace_period_bounds() {
-  // Steady signal: short grace. Flickering signal: long grace. Never unbounded.
-  e2Boot();
-  CHECK(e2Acquire(75, 20, 0.0, 400)); benchRun(2500);
-  uint64_t t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
-  double steady = (double)(g_mockUs - t0) / 1000.0;
-  CHECK(steady <= g_cfg.lostHoldMs + 5);                     // measured from removal, the last evidence is older than that
-  benchRun(1500);
-  CHECK(e2Acquire(90, 10, 0.4, 3000)); benchRun(3000);
-  CHECK(g_ball.valid);
-  t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
-  double flick = (double)(g_mockUs - t0) / 1000.0;
-  CHECK(flick > g_cfg.lostHoldMs + 40);                       // the flickering track was given more time ...
-  CHECK(flick <= g_cfg.lostHoldMaxMs + 5);                    // ... but never more than the configured maximum
-  benchRun(1500);
-  CHECK(e2Acquire(90, 10, 0.7, 6000)); benchRun(4000);        // very weak signal: still bounded
-  t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
-  CHECK(!g_ball.valid);
-  CHECK((double)(g_mockUs - t0) / 1000.0 <= g_cfg.lostHoldMaxMs + 5);
-}
-
-static void t_e2_dropout_survival() {
-  e2Boot();
-  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500);
-  int m = bwMask(); bwOff(); benchRun(100); bwBallMask(m); benchRun(300);
-  CHECK(g_ball.valid && g_stats.ballLossEvents == 0);        // 100 ms gap in a steady signal: survived
-  benchRun(1000);
-  bwOff(); benchRun(300); CHECK(!g_ball.valid);              // 300 ms: beyond the grace period of a steady signal
-  benchRun(1000);
-  CHECK(e2Acquire(90, 10, 0.4, 3000)); benchRun(4000);
-  m = bwMask(); bwOff(); benchRun(200); bwBallMask(m, 0.4); benchRun(300);
-  CHECK(g_ball.valid);                                        // 200 ms gap in a flickering signal: survived
-}
-
-static void t_e2_reacquisition() {
-  e2Boot();
-  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500);
-  bwClear(); benchRun(190); CHECK(!g_ball.valid);
-  uint64_t t0 = g_mockUs; bwBall(90, 10);                     // same place, shortly after the loss: fast path
-  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
-  double fast = (double)(g_mockUs - t0) / 1000.0;
-  printf("  re-acquisition after a loss: %.0f ms\n", fast);
-  CHECK(fast < 90);
-  bwClear(); benchRun(1500); CHECK(!g_ball.valid);
-  t0 = g_mockUs; bwBall(90, 10);                              // long after: ordinary acquisition rules
-  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
-  CHECK((double)(g_mockUs - t0) / 1000.0 > fast + 20);
-  bwClear(); benchRun(1500);
-  CHECK(e2Acquire(90, 10, 0.0, 400)); benchRun(2500); bwClear(); benchRun(190);
-  t0 = g_mockUs; bwBall(270, 10);                             // shortly after the loss but on the opposite side: not accelerated
-  while (!g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
-  CHECK((double)(g_mockUs - t0) / 1000.0 > 100);
-  bwClear();
-}
-
-static void t_e2_stop_after_loss() {
-  // After a loss the wheels are brought to rest before the search rotation starts: no immediate strafe -> spin reversal.
-  e2Boot();
-  startAuto();
-  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(2000);
-  CHECK(g_navState == NAV_APPROACH);
-  bwClear();
-  uint64_t t0 = g_mockUs; double firstSpin = -1; bool reversed = false; int prevDir[4];
-  for (int i = 0; i < 4; i++) prevDir[i] = wheelDir(i);
-  while (g_mockUs - t0 < 700000ULL) {
-    benchStep();
-    if (g_navState == NAV_SEARCH && g_reqW != 0 && firstSpin < 0) firstSpin = msSince(t0);
-    if (g_navState == NAV_SEARCH && firstSpin < 0) {
-      CHECK(g_reqW == 0 && g_reqVx == 0 && g_reqVy == 0);       // braking: nothing requested
-      for (int i = 0; i < 4; i++) { int d = wheelDir(i); if (prevDir[i] != 0 && d != 0 && d != prevDir[i]) reversed = true; }
-    }
-    for (int i = 0; i < 4; i++) { int d = wheelDir(i); if (d != 0) prevDir[i] = d; }
-  }
-  CHECK(!reversed);
-  CHECK(firstSpin > 0);                                          // the search rotation does start
-  CHECK(!anyWheelEverMoved || true);
-  send("s"); simRun(100);
-  CHECK(allWheelsStopped());
-}
-
-static void t_legacy_fallback() {
-  // The legacy estimator stays selectable and keeps its old characteristics.
-  bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  g_cfg.engine = 0; g_cfg.lostHoldMs = 500; g_cfg.lostHoldMaxMs = 500; g_cfg.flickerHoldMs = 500; irRestartSchedule(); bwClear(); simRun(500);
-  CHECK(e2Acquire(90, 10, 0.0, 1000));
-  benchRun(2000);
-  uint64_t t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 2000000ULL) benchStep();
-  double lost = (double)(g_mockUs - t0) / 1000.0;
-  CHECK(lost > 480 && lost < 620);
-  send(":set engine 1\n"); simRun(20);                       // the removed intermediate estimator cannot be selected
-  CHECK(g_cfg.engine == 0);
-}
-
-static void t_e2_config_params() {
+static void t_imu_frozen_in_approach() {
   bootCal();
-  send(":set engine 2\n"); simRun(20);
-  send(":set acqspan1 120\n"); simRun(20); CHECK(g_cfg.acqSpan1Ms == 120);
-  send(":set flickerhold 280\n"); simRun(20); CHECK(g_cfg.flickerHoldMs == 280);
-  send(":set focus 0\n"); simRun(20); CHECK(g_cfg.focusOn == 0);
-  send(":set losseps 20\n"); simRun(20); CHECK(g_cfg.lossEpsExp != 20);        // out of range: rejected
-  send(":set engine 3\n"); simRun(20); CHECK(g_cfg.engine == 2);
-  send(":set engine 1\n"); simRun(20); CHECK(g_cfg.engine == 2);
-  // cross-field rule: flickerhold must lie between losthold and losthold_max
-  g_cfg.flickerHoldMs = 600; char rep[96]; int bad = cfgValidate(g_cfg, rep, sizeof(rep));
-  CHECK(bad >= 1 && g_cfg.flickerHoldMs <= g_cfg.lostHoldMaxMs && g_cfg.flickerHoldMs >= g_cfg.lostHoldMs);
-  Config d; cfgDefaults(d);
-  CHECK(d.engine == 2 && d.lostHoldMs == 150 && d.lostHoldMaxMs == 300);
-}
-
-static void t_scan_revisit_metrics() {
-  // The reported "scan cycle" is the ring sweep; the per-receiver revisit interval is measured separately.
-  e2Boot();
-  irRestartSchedule();
-  benchRun(2000);
-  CHECK_NEAR(g_scan.cycleUs, 12 * (g_cfg.irWindowUs + g_cfg.irSettleUs), 200);
-  uint32_t mn = 0xFFFFFFFFu, mx = 0; for (int i = 0; i < 12; i++) { if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i]; if (g_scan.revisitMaxUs[i] < mn) mn = g_scan.revisitMaxUs[i]; }
-  CHECK(mn > 0 && mx < g_scan.cycleUs + 300);                  // idle: every receiver waits exactly one ring cycle
-  benchStall(90);
-  benchRun(100);
-  mx = 0; for (int i = 0; i < 12; i++) if (g_scan.revisitMaxUs[i] > mx) mx = g_scan.revisitMaxUs[i];
-  CHECK(mx > 90000u);                                          // a stall shows up as a long revisit interval
-  CHECK(g_scan.winOverrunMaxUs > 80000u);
-}
-
-
-static void t_startup_schedule() {
-  // Right after setup() the first scan cycles must be regular (boot-time blocking work must not leak into the schedule),
-  // nothing may move, and a ball that is already there is found within the normal acquisition time.
-  setup(); calibrateAll();
-  for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  bwClear();
-  benchRun(800);                                               // idle ring only
-  CHECK(g_scan.cycleCount >= 15);
-  CHECK(g_scan.cycleMaxUs < 12u * (g_cfg.irWindowUs + g_cfg.irSettleUs) + 1000u);
-  CHECK(g_scan.cycleMinUs > 12u * (g_cfg.irWindowUs + g_cfg.irSettleUs) - 1000u);
-  CHECK(g_scan.winOverrunMaxUs < 1500);
-  bwBall(75, 20);                                              // now a ball appears
-  uint64_t t0 = g_mockUs; double acq = -1;
-  while (g_mockUs - t0 < 600000ULL) { benchStep(); if (acq < 0 && g_ball.valid) acq = msSince(t0); trackWheelMotion(); }
-  CHECK(acq > 0 && acq < 130);
-  CHECK(!anyWheelEverMoved);                                   // autonomy is off: sensing alone moves nothing
-  bwClear();
-}
-
-static void t_e2_view_transitions() {
-  // A ball that moves between "seen by one receiver" and "seen by two" (and back) must not be dropped.
-  for (double miss : {0.0, 0.3}) {
-    e2Boot(); g_cfg.engine = 2;
-    CHECK(e2Acquire(90, 10, miss, 3000)); benchRun(500);
-    int loss0 = (int)g_stats.ballLossEvents; bool wasValid = g_ball.valid; int losses = 0;
-    static const float POS[6] = {90, 80, 75, 70, 60, 75};
-    uint64_t end = g_mockUs + 40000000ULL; int idx = 0; uint64_t nextMove = g_mockUs;
-    while (g_mockUs < end) {
-      if (g_mockUs >= nextMove) { nextMove += 700000ULL; float p = POS[idx++ % 6]; bwBall(p, p == 90 || p == 60 ? 10.0f : 20.0f, miss); }
-      benchStep();
-      if (wasValid && !g_ball.valid) losses++;
-      wasValid = g_ball.valid;
-    }
-    (void)loss0;
-    CHECK(losses == 0);
-    bwClear();
-  }
-}
-
-static void t_e2_stale_not_followed() {
-  // Once the evidence stops, the direction must not move and the navigation speed must already be reduced before the
-  // ball is declared lost.
-  e2Boot();
+  simRun(500);
   startAuto();
-  CHECK(e2Acquire(90, 10, 0.0, 600)); benchRun(2500);
-  CHECK(g_navState == NAV_APPROACH);
-  double steadySpeed = sqrt((double)g_reqVx * g_reqVx + (double)g_reqVy * g_reqVy);
-  float bearing = g_ball.bearingDeg;
-  bwClear();
-  uint64_t t0 = g_mockUs; bool slowedBeforeLoss = false; float maxDrift = 0;
-  while (g_ball.valid && g_mockUs - t0 < 1000000ULL) {
-    benchStep();
-    maxDrift = fmaxf(maxDrift, fabsf(angDiffDeg(g_ball.bearingDeg, bearing)));
-    if (g_ball.valid && sqrt((double)g_reqVx * g_reqVx + (double)g_reqVy * g_reqVy) < 0.5 * steadySpeed) slowedBeforeLoss = true;
+  ballAt(0, 10);
+  simRun(2500);
+  CHECK(g_navState == NAV_APPROACH && !isnan(g_hdgErr));
+  for (int mode : {2, 4, 3}) {                                // frozen, saturated, all-zero
+    g_mpu.mode = mode;
+    g_mpu.gz = 0;
+    simRun(2500);
+    CHECK(!imuHeadingUsable(g_cfg, millis()));
+    CHECK(isnan(g_hdgErr));
+    CHECK(g_navState == NAV_APPROACH);
+    CHECK(fabsf(g_reqW) <= g_cfg.hdgMaxRot + 1e-6f);          // bounded, and ball is dead ahead: no turning
+    CHECK(fabsf(g_reqW) < 0.05f);
+    CHECK(wheelDir(0) > 0 && wheelDir(1) > 0 && wheelDir(2) > 0 && wheelDir(3) > 0);   // drives straight, no spin
+    g_mpu.mode = 0;
+    simRun(g_cfg.recoverVerifyMs + 2500);
+    CHECK(g_imu.ok);
   }
-  CHECK(maxDrift < 1.0f);
-  CHECK(slowedBeforeLoss);
-  send("s"); simRun(100);
+  // ball off to one side + no usable heading: fallback turn is bounded and toward the ball
+  g_mpu.mode = 1;
+  ballAt(60, 10);
+  simRun(2500);
+  CHECK(g_reqW > 0 && g_reqW <= g_cfg.hdgMaxRot + 1e-6f);
 }
 
 
-static void t_irprofile() {
-  bootCal();
-  CHECK(g_cfg.acqSpan1Ms == 140 && g_cfg.acqSpan2Ms == 70);     // default = balanced
-  send(":irprofile fast\n"); simRun(20);
-  CHECK(g_cfg.acqSpan1Ms == 96 && g_cfg.acqSpan2Ms == 30);
-  send(":irprofile safe\n"); simRun(20);
-  CHECK(g_cfg.acqSpan1Ms == 180 && g_cfg.acqSpan2Ms == 100);
-  send(":irprofile balanced\n"); simRun(20);
-  CHECK(g_cfg.acqSpan1Ms == 140 && g_cfg.acqSpan2Ms == 70);
-  send(":irprofile bogus\n"); simRun(20);                       // unknown name: nothing changes, usage is printed
-  CHECK(g_cfg.acqSpan1Ms == 140 && outHas("Usage: :irprofile"));
-}
-
-
-static void e2WrapScenario(double miss) {
-  // micros() wraps every 71.6 minutes: acquisition, tracking, flicker statistics and loss must survive the wrap.
-  // Boot consumes about 3.7 s of virtual time, so start the clock 5 s before the wrap.
-  g_mockUs = 4294967296ULL - 5000000ULL;
-  e2Boot();
-  uint32_t untilWrap = (uint32_t)(0u - (uint32_t)g_mockUs);      // microseconds left before micros() returns to zero
-  CHECK(untilWrap > 500000u && untilWrap < 3000000u);
-  CHECK(e2Acquire(75, 20, miss, 3000));
-  benchRun(1000);
-  uint64_t end = g_mockUs + 4000000ULL; int losses = 0; bool was = g_ball.valid, wrapped = false;
-  while (g_mockUs < end) { benchStep(); if (was && !g_ball.valid) losses++; was = g_ball.valid; if ((uint32_t)g_mockUs < 1000000u) wrapped = true; }
-  CHECK(wrapped);
-  CHECK(losses == 0 && g_ball.valid);
-  uint64_t t0 = g_mockUs; bwClear();
-  while (g_ball.valid && g_mockUs - t0 < 1000000ULL) benchStep();
-  CHECK(!g_ball.valid);
-  CHECK((double)(g_mockUs - t0) / 1000.0 <= (miss > 0 ? g_cfg.lostHoldMaxMs : g_cfg.lostHoldMs) + 25);
-}
-static void t_e2_micros_wrap_steady() { e2WrapScenario(0.0); }
-static void t_e2_micros_wrap_flicker() { e2WrapScenario(0.4); }
-
-static void t_engine_switch_at_run_time() {
-  // Changing the estimator while a ball is tracked must leave a consistent state (no crash, no stuck ball, no motion).
-  e2Boot();
-  CHECK(e2Acquire(75, 20, 0.0, 600)); benchRun(1000);
-  send(":set engine 0\n"); simRun(20);
-  CHECK(g_cfg.engine == 0);
-  benchRun(1500);
-  CHECK(g_ball.valid || true);                                  // the legacy engine takes over (it may need a moment)
-  bwClear(); benchRun(1500);
-  CHECK(!g_ball.valid);                                         // ... and still ends the track
-  send(":set engine 2\n"); simRun(20);
-  CHECK(e2Acquire(75, 20, 0.0, 800));
-  benchRun(1000);
-  bwClear(); benchRun(600);
-  CHECK(!g_ball.valid);
-  CHECK(allWheelsStopped());
-}
-
-
-// ---- ":irchar": pulse characterisation and shadow gates -------------------------------------------------------
-static bool outLineAfter(const char* key, std::string* line) {
-  size_t p = Serial.out.rfind(key);
-  if (p == std::string::npos) return false;
-  size_t e = Serial.out.find('\n', p);
-  *line = Serial.out.substr(p, e == std::string::npos ? std::string::npos : e - p);
-  return true;
-}
-static void irCharRun(const char* cmd, uint32_t ms) {
-  Serial.out.clear();
-  send(cmd); simRun(ms);
-}
-static void t_irchar_gate_functions() {
-  // Ball documentation: bursts start every 833 us. A window that lost one burst has the intervals 833 and 1666.
-  const uint32_t ok[4] = {0, 833, 1666, 2499}, lost[3] = {0, 833, 2499}, rhythm[4] = {0, 1250, 2500, 3750}, fast[4] = {0, 300, 600, 900};
-  CHECK(irCombGatePass(ok, 4, 833, 10));
-  CHECK(irCombGatePass(lost, 3, 833, 10));                    // one missed burst is a 2x interval: tolerated
-  CHECK(!irCombGatePass(rhythm, 4, 833, 20));                 // 1250 us spacing is half way between 1x and 2x of 833
-  CHECK(!irCombGatePass(fast, 4, 833, 35));                   // too fast
-  CHECK(!irCombGatePass(ok, 1, 833, 35));                     // one pulse has no interval
-  // the mean-interval gate of ":irgate auto" (+-35 %) calls the same window with the missed burst foreign:
-  CHECK(irMeanGatePass(833, 833, 10) && irMeanGatePass(1100, 833, 35));
-  CHECK(!irMeanGatePass((2499 - 0) / 2, 833, 35));            // mean of {833, 1666} = 1249 us: 50 % off
+// ================================================================================================
+// IR sensors (two, front)
+static void t_ir_pure_rules() {
+  // strength: 0 at clear, 1 at near, either polarity
+  CHECK_NEAR(irStrength(500, 500, 3000), 0.0, 1e-4);
+  CHECK_NEAR(irStrength(3000, 500, 3000), 1.0, 1e-4);
+  CHECK_NEAR(irStrength(1750, 500, 3000), 0.5, 1e-4);
+  CHECK_NEAR(irStrength(3000, 3500, 500), 0.1667, 1e-3);    // falling polarity: near = LOW raw
+  CHECK_NEAR(irStrength(500, 3500, 500), 1.0, 1e-4);
+  CHECK_NEAR(irStrength(900, 100, 130), 0.0, 1e-4);         // span below 50: not calibrated, strength 0
+  // hysteresis: on at the threshold, off only below 60 % of it
+  CHECK(!irHyst(false, 0.14f, 15, 0.6f) && irHyst(false, 0.15f, 15, 0.6f));
+  CHECK(irHyst(true, 0.10f, 15, 0.6f) && !irHyst(true, 0.08f, 15, 0.6f));
+  // sideways position, sensor 1 on the right (+1)
+  float o = 9;
+  CHECK(!irOffsetFrom(false, false, 0, 0, 1, &o));                         // nothing seen
+  CHECK(!irOffsetFrom(true, true, 0.5f, 0.5f, 0, &o));                     // side not set
+  CHECK(irOffsetFrom(true, true, 0.5f, 0.5f, 1, &o) && absf(o) < 1e-4);    // equal: centred
+  CHECK(irOffsetFrom(true, true, 0.2f, 0.6f, 1, &o) && o > 0.4f);          // sensor 1 (right) stronger: ball to the right
+  CHECK(irOffsetFrom(true, true, 0.6f, 0.2f, 1, &o) && o < -0.4f);
+  CHECK(irOffsetFrom(false, true, 0, 0.5f, 1, &o) && o == 1.0f);           // only sensor 1: its side
+  CHECK(irOffsetFrom(true, false, 0.5f, 0, 1, &o) && o == -1.0f);          // only sensor 0: the other side
+  CHECK(irOffsetFrom(false, true, 0, 0.5f, -1, &o) && o == -1.0f);         // sensor 1 mounted left: mirrored
+  // configuration: a calibration with no usable span is stored as "not calibrated"
   Config c; cfgDefaults(c);
-  c.irPeriodMinUs = (uint16_t)(833 * 0.65f); c.irPeriodMaxUs = (uint16_t)(833 * 1.35f);
-  CHECK(irClassifyWindow(c, 4, 800, 3000, false, false, 833) == WS_DETECT);
-  CHECK(irClassifyWindow(c, 3, 600, 3000, false, false, 1249) == WS_OFFBAND);   // today's gate rejects the window that lost one burst
+  c.irClear0 = 1000; c.irNear0 = 1020;
+  char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.irClear0 == 0 && c.irNear0 == 0);
+  cfgDefaults(c); c.irSeenPct = 80; c.irNearPct = 50;
+  CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.irSeenPct == 15 && c.irNearPct == 70);
 }
-static void t_irchar_ball_like() {
+
+static void t_ir_states_and_debounce() {
   bootCal();
-  g_simPeriodUs = 833; g_simActiveUs = 190;                   // documented ball: 8 carrier cycles every 833 us (output width is a simulation assumption)
-  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
-  g_simMode[3] = SIM_BALL;
-  uint32_t cyclesBefore = g_scan.cycleCount, chWindows = g_ir[3].windows;
-  irCharRun(":irchar 3 2\n", 2600);
-  CHECK(g_ir[3].windows - chWindows < 40);                    // the capture's ~665 windows were not counted as channel windows (a few ring windows come after it)
-  CHECK(outHas("irchar C3 "));
-  CHECK(g_probe.mode == 0);                                   // finished by itself
-  std::string l;
-  CHECK(outLineAfter("irchar pulse width us", &l));
-  int n = 0, mn = 0, mean = 0, mx = 0;
-  CHECK(sscanf(l.c_str(), "irchar pulse width us (output at active level): n=%d min=%d mean=%d max=%d", &n, &mn, &mean, &mx) == 4);
-  CHECK(n > 100); CHECK(mn >= 170 && mx <= 210); CHECK_NEAR(mean, 190, 15);
-  CHECK(outLineAfter("irchar pulse intervals", &l));
-  int ivN = 0, modeUs = 0;
-  CHECK(sscanf(l.c_str(), "irchar pulse intervals (start to start inside windows): n=%d, most common ~%d us", &ivN, &modeUs) == 2);
-  CHECK(ivN > 100); CHECK_NEAR(modeUs, 833, 30);
-  CHECK(outLineAfter("irchar gate SHADOW", &l));
-  int shN = 0, m10 = 0, m20 = 0, m35 = 0, k10 = 0, k20 = 0, k35 = 0;
-  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
-               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
-  CHECK(shN > 30); CHECK(k35 == shN && m35 == shN);           // a clean periodic source passes both gates
-  CHECK(outHas("NOMINAL 833 us"));
-  // the ring sweep resumes and the probe did not leave a ball track or channel health changes behind
   simRun(200);
-  CHECK(g_scan.cycleCount > cyclesBefore);
-}
-static void t_irchar_interferer() {
-  bootCal();
-  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
-  g_simMode[2] = SIM_BALL; g_simChPeriod[2] = 1500;           // an unrelated source with a 1500 us rhythm
-  irCharRun(":irchar 2 2 833\n", 2600);
-  CHECK(outHas("reference 833 us (given)"));
-  std::string l;
-  CHECK(outLineAfter("irchar gate SHADOW", &l));
-  int shN = 0, m10 = 0, m20 = 0, m35 = 0, k10 = 0, k20 = 0, k35 = 0;
-  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
-               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
-  CHECK(shN > 20); CHECK(m10 == 0 && m20 == 0 && m35 == 0 && k10 == 0);   // (the +-20 % multiple gate still passes 1500 us: 1500 is 20 % from 2x)
-  // a source whose every second burst is missing (1666 us): the mean-interval gate loses it, the multiple gate keeps it
-  g_simChPeriod[2] = 1666;
-  irCharRun(":irchar 2 2 833\n", 2600);
-  CHECK(outLineAfter("irchar gate SHADOW", &l));
-  CHECK(sscanf(l.c_str(), "irchar gate SHADOW (reference 833 us, %d pre-gate detections with >=2 pulses): mean-interval gate (today's :irgate) passes %d/%d/%d at +-10/20/35%% | every-interval-near-a-multiple gate (candidate) passes %d/%d/%d",
-               &shN, &m10, &m20, &m35, &k10, &k20, &k35) == 7);
-  CHECK(shN > 10 && m35 == 0 && k10 == shN);
-  // bad arguments and the autonomy interlock
-  irCharRun(":irchar 99\n", 50); CHECK(outHas("usage: :irchar"));
-  irCharRun(":irchar 2 100\n", 50); CHECK(outHas("usage: :irchar"));
-  g_autoEnabled = true;                                       // interlock: no capture while autonomy is on
-  irCharRun(":irchar 2 1\n", 50);
-  CHECK(outHas("autonomy must be off") && g_probe.mode == 0);
-  g_autoEnabled = false;
-}
-static void t_irgate_auto_warnings() {
-  bootCal();
-  for (int i = 0; i < 16; i++) g_simMode[i] = SIM_IDLE;
-  g_simMode[4] = SIM_BALL; g_simChPeriod[4] = 1200;           // 3 pulses per window, 44 % from 833 us
-  irCharRun(":irchar 4 2\n", 2600);
-  Serial.out.clear(); send(":irgate auto\n"); simRun(50);
-  CHECK(outHas("more than 25% from the ball documentation"));
-  CHECK(outHas("pulse-period gate ON"));                      // a warning, not a refusal
-  g_simChPeriod[4] = 0; g_simPeriodUs = 833; g_simActiveUs = 190;
-  irCharRun(":irchar 4 2\n", 2600);
-  Serial.out.clear(); send(":irgate auto\n"); simRun(50);
-  CHECK(!outHas("more than 25%") && !outHas("missed bursts are in the sample"));
+  CHECK(!g_irs[0].seen && !g_ball.valid);
+  sensors(0.5f, 0.0f); simRun(100);
+  CHECK(g_irs[0].seen && !g_irs[0].near && !g_irs[1].seen);
+  CHECK(g_ball.valid && g_ball.seenMask == 1);
+  sensors(0.9f, 0.0f); simRun(100);
+  CHECK(g_irs[0].near && g_ball.nearMask == 1);
+  sensors(0.0f, 0.0f); simRun(100);
+  CHECK(!g_irs[0].seen && !g_irs[0].near);
+  // a 4 ms glitch (shorter than the 3-sample debounce) is ignored
+  sensors(0.9f, 0.0f); simRun(4); sensors(0.0f, 0.0f); simRun(100);
+  CHECK(!g_irs[0].seen);
+  // the ball stays "valid" for lostHoldMs after it was last seen, then a loss event is raised
+  sensors(0.5f, 0.0f); simRun(100); sensors(0.0f, 0.0f); simRun(100);
+  CHECK(g_ball.valid);
+  simRun(g_cfg.lostHoldMs + 100);
+  CHECK(!g_ball.valid);
 }
 
-static void t_aux_inputs() {
+static void t_ir_polarity_and_digital() {
   bootCal();
-  CHECK(!g_aux.on && g_isrFn36 == nullptr);                   // off after every boot: no interrupt, no ADC reads
-  send(":aux\n"); simRun(20);
-  CHECK(outHas("aux inputs are OFF"));
-  CHECK(auxWindowActive(3) && !auxWindowActive(2) && !auxWindowActive(0));
-  g_sim36PeriodUs = 833; g_sim36ActiveUs = 190; g_mockAnalog[35] = 1234;
-  send(":aux on\n"); simRun(600);
-  CHECK(g_aux.on && g_isrFn36 != nullptr);
-  Serial.out.clear(); send(":aux\n"); simRun(20);
-  CHECK(outHas("raw now 1234"));
-  CHECK(g_aux.windows >= 20 && g_aux.activeWindows >= g_aux.windows - 2);
-  CHECK_NEAR((double)g_aux.perSum / (double)g_aux.perN, 833.0, 15.0);
-  CHECK_NEAR((double)g_aux.pulseSum / (double)g_aux.windows, 24.0, 2.0);   // about 24 pulses per 20 ms window
-  g_sim36PeriodUs = 0;                                        // source removed
-  send(":aux reset\n"); simRun(200);
-  CHECK(g_aux.windows >= 5 && g_aux.activeWindows == 0);
-  send(":aux off\n"); simRun(20);
-  CHECK(!g_aux.on && g_isrFn36 == nullptr);
-  send(":aux bogus\n"); simRun(20);
-  CHECK(outHas("usage: :aux"));
-  CHECK(g_noIrq == 0);                                        // interrupts re-enabled after every snapshot
+  // falling polarity: the ball LOWERS the reading (clear 3000, near 500)
+  g_cfg.irClear0 = 3000; g_cfg.irNear0 = 500;
+  g_mockAnalog[PIN_IR[0]] = 3000; simRun(100);
+  CHECK(!g_irs[0].seen);
+  g_mockAnalog[PIN_IR[0]] = 1200; simRun(100);                                // (3000-1200)/2500 = 0.72: near
+  CHECK(g_irs[0].seen && g_irs[0].near);
+  // a digital sensor: nothing assumed about the level. Calibrate it with the ball absent / present.
+  g_mockAnalog[PIN_IR[0]] = 0;                                                // idles LOW
+  send(":ir mode 0 digital\n"); simRun(50);
+  CHECK(g_cfg.irMode0 == 1 && g_cfg.irClear0 == 0 && g_cfg.irNear0 == 0);    // calibration cleared by the mode change
+  simRun(100);
+  send(":ir cal clear 0\n"); simRun(20);
+  g_mockAnalog[PIN_IR[0]] = 4000; simRun(100);                                // ball present: output goes HIGH
+  send(":ir cal near 0\n"); simRun(20);
+  CHECK(irCalibrated(g_cfg, 0) && g_cfg.irClear0 == 0 && g_cfg.irNear0 == 4095);
+  g_mockAnalog[PIN_IR[0]] = 0; simRun(100);
+  CHECK(!g_irs[0].seen);
+  g_mockAnalog[PIN_IR[0]] = 4000; simRun(100);
+  CHECK(g_irs[0].seen && g_irs[0].near);                                      // a digital sensor: seen and near coincide
+  // the opposite digital polarity (active LOW) works the same way after its own calibration
+  g_cfg.irClear0 = 4095; g_cfg.irNear0 = 0;
+  g_mockAnalog[PIN_IR[0]] = 4000; simRun(100); CHECK(!g_irs[0].seen);
+  g_mockAnalog[PIN_IR[0]] = 0; simRun(100); CHECK(g_irs[0].seen && g_irs[0].near);
 }
 
-// ---- obstacle avoidance and the shot ---------------------------------------------------------------------------
-static int maxWheelDuty() { int m = 0; for (int i = 0; i < 4; i++) m = std::max(m, (int)g_pwmDuty[WHEEL_PINS[i].en]); return m; }
-static void t_avoid_functions() {
-  // level rule, rising raw = closer (slow 1500, stop 2500) and falling raw = closer (slow 2500, stop 1500)
-  CHECK(avoidLevel(1000, 1500, 2500, 0) == 0 && avoidLevel(1600, 1500, 2500, 0) == 1 && avoidLevel(2600, 1500, 2500, 0) == 2);
-  CHECK(avoidLevel(3000, 2500, 1500, 0) == 0 && avoidLevel(2400, 2500, 1500, 0) == 1 && avoidLevel(1400, 2500, 1500, 0) == 2);
-  CHECK(avoidLevel(2450, 1500, 2500, 2) == 2 && avoidLevel(2300, 1500, 2500, 2) == 1);     // hysteresis of 10 % of the span (100) on the way out
-  CHECK(avoidLevel(1450, 1500, 2500, 1) == 1 && avoidLevel(1350, 1500, 2500, 1) == 0);
-  CHECK(avoidLevel(5000, 1500, 1520, 0) == 0);                                              // not calibrated (span < 50): never reports an obstacle
-  Config c; cfgDefaults(c);
-  c.avoidMask = 3; c.avoid0Deg = 0; c.avoid1Deg = 180;
-  uint8_t clear[2] = {0, 0}, near0[2] = {1, 0}, stop0[2] = {2, 0}, stop1[2] = {0, 2};
-  float vx = 0, vy = 1;
-  avoidApply(c, c.avoidMask, clear, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
-  vx = 0; vy = 1; avoidApply(c, c.avoidMask, near0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.40, 1e-4);          // slow: 40 %
-  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);          // stop zone, ball unknown: no forward motion
-  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, 20.0f, &vx, &vy); CHECK_NEAR(vy, 0.25, 1e-4);       // ball within 45 deg of the sensor: cautious creep (25 %)
-  vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, 90.0f, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);        // ball off to the side: not exempt
-  vx = 0.6f; vy = 0.8f; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vx, 0.6, 1e-4); CHECK_NEAR(vy, 0.0, 1e-4);   // the sideways part survives: slide along it
-  vx = 0; vy = -1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, -1.0, 1e-4);        // backing away from a front obstacle is free
-  vx = 0; vy = -1; avoidApply(c, c.avoidMask, stop1, NAN, &vx, &vy); CHECK_NEAR(vy, 0.0, 1e-4);         // rear sensor limits reversing
-  c.avoidMask = 0; vx = 0; vy = 1; avoidApply(c, c.avoidMask, stop0, NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);   // sensor not in use: ignored
-  CHECK(cfgValidate(c, nullptr, 0) == 0);
-  c.avoidMask = 1; c.avoid0Slow = 100; c.avoid0Stop = 120;                                  // threshold span below 50: avoidance is switched off by validation
-  char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.avoidMask == 0);
-}
-static int avoidRun(int bearing, uint16_t raw) {
-  e2Boot();
-  g_cfg.avoidMask = 1; g_cfg.avoid0Slow = 1500; g_cfg.avoid0Stop = 2500;
-  g_mockAnalog[35] = raw;
-  send(":aux on\n"); simRun(200);
-  ballAt((float)bearing, 12.0f);
-  startAuto(); simRun(1200);
-  int m = 0; uint64_t end = g_mockUs + 800000ULL;
-  while (g_mockUs < end) { loop(); mockAdvance(50); m = std::max(m, maxWheelDuty()); }
-  return m;
-}
-static void t_avoid_nav_ball_in_zone() {
-  int clear = avoidRun(0, 100);
-  CHECK(clear > 60);
-  CHECK(g_aux.level[0] == 0);
-}
-static void t_avoid_nav_blocked_ball_ahead() {            // obstacle in the stop zone, ball straight ahead: moves, but cautiously
-  int m = avoidRun(0, 3000);
-  CHECK(g_aux.level[0] == 2);
-  CHECK(m > 0 && m < 110);                                // creeps (25 % of full), does not stand still and does not drive at full speed
-}
-static void t_avoid_nav_blocked_ball_side() {              // obstacle ahead, ball at 90 deg: strafing is unaffected
-  int m = avoidRun(90, 3000);
-  CHECK(g_aux.level[0] == 2);
-  CHECK(m > 60);
-}
-static void t_avoid_cli() {
+static void t_ir_rail_fault_and_uncalibrated() {
   bootCal();
-  send(":avoid on 0\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.avoidMask == 0);
-  send(":avoid cal 0 slow\n"); simRun(20); CHECK(outHas("switch the inputs on first"));
-  g_mockAnalog[35] = 1500; send(":aux on\n"); simRun(200);
-  send(":avoid cal 0 slow\n"); simRun(20); CHECK(g_cfg.avoid0Slow == 1500);
-  g_mockAnalog[35] = 2500; simRun(300);
-  send(":avoid cal 0 stop\n"); simRun(20); CHECK(g_cfg.avoid0Stop == 2500);
-  send(":avoid on 0\n"); simRun(20); CHECK(g_cfg.avoidMask == 1);
-  Serial.out.clear(); send(":avoid\n"); simRun(20); CHECK(outHas("obstacle avoidance ON") && outHas("sensor 0 (GPIO35) IN USE"));
-  send(":aux off\n"); simRun(60); CHECK(!g_aux.on);          // manual off wins: avoidance then does nothing
-  float vx = 0, vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy); CHECK_NEAR(vy, 1.0, 1e-4);
-  send(":avoid on 1\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.avoidMask == 1);
-  send(":avoid bogus\n"); simRun(20); CHECK(outHas("usage: :avoid"));
+  simRun(300);
+  CHECK(!faultActive(F_IR_FRONT) && !faultActive(F_IR_ALIGN));
+  // sensor 1 shorted to ground: DEGRADED, sensor 1 excluded, robot keeps working
+  g_mockAnalog[PIN_IR[1]] = 0;
+  simRun(g_cfg.irRailMs + 600);
+  CHECK(faultActive(F_IR_ALIGN) && g_cond == COND_DEGRADED && !irUsable(g_cfg, 1) && irUsable(g_cfg, 0));
+  g_mockAnalog[PIN_IR[1]] = (uint16_t)(CLR + 500); simRun(g_cfg.recoverVerifyMs + 1500);
+  CHECK(!faultActive(F_IR_ALIGN) && g_cond == COND_NORMAL);
+  // the end stop on the "near" side is legitimate (a ball touching the sensor can saturate it): no fault, however long
+  g_mockAnalog[PIN_IR[0]] = 4095;
+  simRun(g_cfg.irRailMs + 600);
+  CHECK(!faultActive(F_IR_FRONT) && g_irs[0].near);          // held at the saturated end: still a ball, not a fault
+  // sensor 0 at the bottom stop (the clear side): CRITICAL, motors stop
+  g_mockAnalog[PIN_IR[0]] = 0;
+  simRun(g_cfg.irRailMs + 600);
+  CHECK(faultActive(F_IR_FRONT) && g_cond == COND_SAFE_STOP);
+  // an uncalibrated or disabled sensor is "not tested", never a fault
+  ballGone(); simRun(g_cfg.recoverVerifyMs + 1500);
+  CHECK(!faultActive(F_IR_FRONT));
+  g_cfg.irClear1 = g_cfg.irNear1 = 0; g_mockAnalog[PIN_IR[1]] = 0; simRun(g_cfg.irRailMs + 600);
+  CHECK(!faultActive(F_IR_ALIGN));
+  // a falling sensor (the ball lowers the reading): stuck at 4095 is the fault, 0 is legitimate; and a calibration at the end stop switches the check off
+  g_cfg.irEnable = 3; g_cfg.irClear1 = 3000; g_cfg.irNear1 = 800; g_mockAnalog[PIN_IR[1]] = 0; simRun(g_cfg.irRailMs + 600);
+  CHECK(!faultActive(F_IR_ALIGN));
+  g_mockAnalog[PIN_IR[1]] = 4095; simRun(g_cfg.irRailMs + 600);
+  CHECK(faultActive(F_IR_ALIGN));
+  g_cfg.irClear1 = 4090; g_cfg.irNear1 = 1000; simRun(g_cfg.irRailMs + 600 + g_cfg.recoverVerifyMs + 1500);
+  CHECK(!faultActive(F_IR_ALIGN));
 }
-static void holdSetup(bool armed = true) {
-  e2Boot();
-  g_cfg.holdEnable = armed ? 1 : 0; g_cfg.holdSensor = 0; g_cfg.holdClearRaw = 500; g_cfg.holdHeldRaw = 3000;
-  g_cfg.shootEnable = 1; g_cfg.shootBackMs = 250; g_cfg.shootDriveMs = 400; g_cfg.shootHoldMs = 200;
-  g_mockAnalog[35] = 500;
-  send(":aux on\n"); simRun(200);
+
+static void t_ir_uncalibrated_autonomy_refused() {
+  ballGone(); setup();                                      // factory configuration: no calibration at all
+  simRun(300);
+  CHECK(!irCalibrated(g_cfg, 0) && !irCalibrated(g_cfg, 1));
+  Serial.out.clear(); send("a"); simRun(100);
+  CHECK(!g_autoEnabled && outHas("REFUSED") && outHas("not calibrated"));
+  Serial.out.clear(); send("h"); simRun(300);
+  CHECK(outHas("NOT TESTED (not calibrated)") && outHas("[IR] sensor 0 GPIO35") && outHas("[IR] sensor 1 GPIO36"));
+  CHECK(!outHas("multiplexer") && !outHas("TSOP") && !outHas("C12"));
+  CHECK(g_cond == COND_NORMAL);                             // not calibrated is not a fault
+  calibrateAll(); g_cfg.irClear1 = g_cfg.irNear1 = 0;       // only sensor 0 calibrated: allowed, with a warning
+  Serial.out.clear(); send("a"); simRun(100);
+  CHECK(g_autoEnabled && outHas("sensor 1 is not calibrated"));
+}
+
+static void t_ir_cli() {
+  bootCal();
+  g_cfg.irClear0 = g_cfg.irNear0 = g_cfg.irClear1 = g_cfg.irNear1 = 0;
+  simRun(200);
+  Serial.out.clear(); send(":ir\n"); simRun(20);
+  CHECK(outHas("NOT CALIBRATED"));
+  ballGone(); simRun(100);
+  send(":ir cal clear 0\n"); simRun(20); CHECK(g_cfg.irClear0 == CLR);
+  sensors(1.0f, 0.0f); simRun(100);
+  send(":ir cal near 0\n"); simRun(20); CHECK(g_cfg.irNear0 == NEAR && outHas("a HIGHER raw means a closer ball"));
+  ballGone(); simRun(100);
+  send(":ir cal clear 1\n"); simRun(20);
+  sensors(0.0f, 1.0f); simRun(100);
+  send(":ir cal near 1\n"); simRun(20);
+  CHECK(irCalibrated(g_cfg, 0) && irCalibrated(g_cfg, 1));
+  send(":ir side left\n"); simRun(20); CHECK(g_cfg.irOffsetSide == -1);
+  send(":ir side right\n"); simRun(20); CHECK(g_cfg.irOffsetSide == 1);
+  send(":ir side none\n"); simRun(20); CHECK(g_cfg.irOffsetSide == 0);
+  send(":ir off 1\n"); simRun(20); CHECK(!irEnabled(g_cfg, 1));
+  send(":ir on 1\n"); simRun(20); CHECK(irEnabled(g_cfg, 1));
+  // identical readings (no usable difference) are reported, not accepted
+  g_cfg.irClear1 = g_cfg.irNear1 = 0; ballGone(); simRun(100);
+  send(":ir cal clear 1\n"); simRun(20); send(":ir cal near 1\n"); simRun(20);
+  CHECK(outHas("differ by less than 50"));
+  send(":ir cal near 7\n"); simRun(20); send(":ir mode 0 banana\n"); simRun(20); send(":ir bogus\n"); simRun(20);
+  CHECK(outCount("usage: :ir") >= 3);
+}
+
+static void t_ball_offset_and_shooting_position() {
+  bootCal();
+  simRun(200);
+  // sensor 1 is to the right (+1)
+  sensors(0.3f, 0.6f); simRun(150);
+  CHECK(g_ball.offsetKnown && g_ball.offset > 0.2f && !g_ball.held);
+  sensors(0.6f, 0.3f); simRun(300);
+  CHECK(g_ball.offset < -0.2f);
+  sensors(0.5f, 0.5f); simRun(300);
+  CHECK(absf(g_ball.offset) < 0.1f && g_ball.centered);
+  sensors(0.0f, 0.5f); simRun(100);                         // only sensor 1: the ball is on its side (right)
+  CHECK(g_ball.seenMask == 2 && g_ball.offset > 0.5f);
+  sensors(0.5f, 0.0f); simRun(300);
+  CHECK(g_ball.seenMask == 1 && g_ball.offset < -0.5f);
+  // shooting position: sensor 0 near, and (irNeedBoth) sensor 1 sees the ball, and centred
+  sensors(1.0f, 0.0f); simRun(300);
+  CHECK(g_irs[0].near && !g_ball.held && !g_ball.ready);    // sensor 1 does not see it: not the shooting position
+  sensors(1.0f, 0.9f); simRun(300);
+  CHECK(g_ball.held && g_ball.centered && g_ball.ready);
+  sensors(1.0f, 0.3f); simRun(300);
+  CHECK(g_ball.held && !g_ball.centered && !g_ball.ready);  // held, but off to the left
+  g_cfg.irNeedBoth = 0; sensors(1.0f, 0.0f); simRun(300);
+  CHECK(g_ball.held);
+  // without a mounting side nothing is claimed about left/right
+  g_cfg.irOffsetSide = 0; ballGone(); simRun(500); sensors(0.5f, 0.5f); simRun(100);
+  CHECK(!g_ball.offsetKnown && g_ball.centered);
+  // sensor 1 unusable: sensor 0 alone decides
+  g_cfg.irOffsetSide = 1; g_cfg.irNeedBoth = 1; g_cfg.irEnable = 1; ballGone(); simRun(100);
+  sensors(1.0f, 0.0f); simRun(300);
+  CHECK(g_ball.held && !g_ball.offsetKnown);
+}
+
+// ================================================================================================
+// navigation with two sensors
+static void t_nav_approach_and_stop() {
+  bootCal();
+  simRun(300);
+  startAuto();
+  CHECK(g_autoEnabled && g_navState == NAV_SEEK);
+  ballFar(); simRun(300);
+  CHECK(g_navState == NAV_APPROACH);
+  CHECK(g_reqVy > 0.2f && absf(g_reqVx) < 0.05f);           // centred, far: forward, no sideways motion
+  float vyFar = g_reqVy;
+  sensors(0.6f, 0.6f); simRun(300);
+  CHECK(g_reqVy < vyFar);                                   // slows as the signal strengthens
+  ballHeld(); simRun(400);
+  CHECK(g_ball.ready && g_reqVy == 0.0f && g_navState == NAV_APPROACH);   // shooting position: no forward motion
+  ballFar(); simRun(300);
+  CHECK(g_reqVy > 0.1f);                                    // ball moved away: approaches again
+}
+
+static void t_nav_single_sensor_alignment() {
+  bootCal();
+  simRun(300);
+  startAuto();
+  sensors(0.0f, 0.4f); simRun(300);                         // only sensor 1 (right) sees it: ball is to the right
+  CHECK(g_navState == NAV_APPROACH);
+  CHECK(g_reqVx > 0.05f && g_reqVx <= g_cfg.alignSpeed + 1e-3f);     // cautious sideways move to the right
+  CHECK(g_reqVy <= g_cfg.slowSpeed + 1e-3f);                         // and slow forward
+  sensors(0.4f, 0.0f); simRun(400);                         // only sensor 0: the ball is to the left
+  CHECK(g_reqVx < -0.05f && g_reqVy <= g_cfg.slowSpeed + 1e-3f);
+  // without a mounting side the robot makes no sideways guess
+  g_cfg.irOffsetSide = 0; ballGone(); simRun(500); startAuto(); sensors(0.0f, 0.4f); simRun(400);
+  CHECK(absf(g_reqVx) < 1e-4f);
+}
+
+static void t_nav_lost_search_reacquire() {
+  bootCal();
+  simRun(300);
+  startAuto();
+  sensors(0.0f, 0.5f); simRun(400);                         // seen on the right
+  CHECK(g_navState == NAV_APPROACH);
+  ballGone();
+  simRun(g_cfg.lostHoldMs + 400);
+  CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE);
+  CHECK(g_stats.ballLossEvents == 1);
+  simRun(800);
+  CHECK(g_navState == NAV_SEARCH && g_reqW > 0.1f);         // the ball was last seen on the right: turn clockwise first
+  ballFar(); simRun(400);
+  CHECK(g_navState == NAV_APPROACH && g_stats.reacquisitions == 1);
+  // nothing ever found: searches, pauses, waits, never spins forever
+  ballGone();
+  simRun(g_cfg.lostHoldMs + 200);
+  g_cfg.searchTimeoutMs = 2000; g_cfg.searchAttempts = 2; g_cfg.searchPauseMs = 500;
+  simRun(15000);
+  CHECK(g_navState == NAV_WAIT && allWheelsStopped());
+}
+
+static void t_nav_sensor_fault_safe() {
+  bootCal();
+  simRun(300);
+  startAuto();
+  ballFar(); simRun(500);
+  CHECK(!allWheelsStopped());
+  g_mockAnalog[PIN_IR[0]] = 0;                              // front sensor wiring fault
+  simRun(g_cfg.irRailMs + 800);
+  CHECK(faultActive(F_IR_FRONT) && !g_autoEnabled && allWheelsStopped() && g_cond == COND_SAFE_STOP);
+}
+
+// ================================================================================================
+// goal heading and shot
+static void shotSetup() {
+  bootCal();
+  g_cfg.shootEnable = 1; g_cfg.shootBackMs = 250; g_cfg.shootDriveMs = 400; g_cfg.shootHoldMs = 200; g_cfg.shootParallel = 0;
+  simRun(300);
 }
 // Emulates the robot turning toward the goal heading when the aim phase commands it (the mock has no physics).
 static void emulateAimRotation() {
   if (g_navState == NAV_SHOOT && g_shootPhase == 0) { float err = angDiffDeg(g_goalYaw, g_imu.yaw); g_mpu.gz = absf(err) < 0.5f ? 0.0f : (err < 0 ? 30.0f : -30.0f); }
   else g_mpu.gz = 0.0f;
 }
+// Rotation model for the timing comparison: ASSUMED 180 deg/s at full rotation command (the real value is unknown and must be measured).
+static void emulateRotationFromCommand() {
+  if (g_navState == NAV_SHOOT) g_mpu.gz = -180.0f * g_reqW; else g_mpu.gz = 0.0f;
+}
+
 static void t_goal_register_and_aim_window() {
   bootCal();
   simRun(200);
-  CHECK(g_goalRefSet);                                        // boot takes longer than goalregms: registered as soon as the gyro was usable
+  CHECK(goalValid());                                       // boot takes longer than goalregms: registered as soon as the gyro was usable
   Serial.out.clear(); send(":goal\n"); simRun(20);
   CHECK(outHas("goal heading") && outHas("aim window"));
   send(":goal clear\n"); simRun(20); CHECK(!g_goalRefSet);
   send(":goal set\n"); simRun(20); CHECK(g_goalRefSet);
   send(":goal bogus\n"); simRun(20); CHECK(outHas("usage: :goal"));
-  Config c; cfgDefaults(c);                                   // 450 mm goal, 43 mm ball, 1000 mm away
+  Config c; cfgDefaults(c);                                 // 450 mm goal, 43 mm ball, 1000 mm away
   CHECK_NEAR(shootAimTolDeg(c), 11.5, 0.2);
   c.goalWidthMm = 600; CHECK_NEAR(shootAimTolDeg(c), 15.5, 0.2);
   c.goalDistMm = 3000; CHECK_NEAR(shootAimTolDeg(c), 5.3, 0.2);
   c.goalDistMm = 200; CHECK_NEAR(shootAimTolDeg(c), 20.0, 1e-4);   // clamped
-  c.goalDistMm = 30000; CHECK(shootAimTolDeg(c) >= 2.0f);
 }
-static void t_hold_functions() {
-  CHECK(!holdState(600, 500, 3000, false) && holdState(2100, 500, 3000, false) && holdState(3000, 500, 3000, false));
-  CHECK(holdState(1700, 500, 3000, true) && !holdState(1500, 500, 3000, true));            // hysteresis around the midpoint 1750 (+-250)
-  CHECK(!holdState(1900, 500, 3000, false) && holdState(2100, 500, 3000, false));
-  CHECK(!holdState(2000, 3000, 500, false) && holdState(1000, 3000, 500, false));          // falling raw = ball held (other polarity)
-  CHECK(!holdState(4000, 1000, 1020, false));                                               // not calibrated
-  Config c; cfgDefaults(c); c.holdEnable = 1; c.holdClearRaw = 100; c.holdHeldRaw = 120;
-  char rep[64]; CHECK(cfgValidate(c, rep, sizeof(rep)) > 0 && c.holdEnable == 0);
-}
-static void t_hold_cli() {
-  bootCal();
-  send(":hold on\n"); simRun(20); CHECK(outHas("not calibrated") && g_cfg.holdEnable == 0);
-  send(":hold cal clear\n"); simRun(20); CHECK(outHas("':aux on' first"));
-  g_mockAnalog[35] = 600; send(":aux on\n"); simRun(300);
-  send(":hold cal clear\n"); simRun(20); CHECK(g_cfg.holdClearRaw == 600);
-  g_mockAnalog[35] = 3100; simRun(400);
-  send(":hold cal held\n"); simRun(20); CHECK(g_cfg.holdHeldRaw == 3100);
-  send(":hold on\n"); simRun(20); CHECK(g_cfg.holdEnable == 1);
-  simRun(200);
-  Serial.out.clear(); send(":hold\n"); simRun(20); CHECK(outHas("BALL HELD"));
-  CHECK(g_aux.held);
-  g_mockAnalog[35] = 600; simRun(400); CHECK(!g_aux.held);
-  send(":hold off\n"); simRun(20); CHECK(g_cfg.holdEnable == 0);
-  send(":hold bogus\n"); simRun(20); CHECK(outHas("usage: :hold"));
-}
+
 static void t_shoot_sequence() {
-  holdSetup();
-  ballAt(0, 12.0f);
+  shotSetup();
+  ballFar();
   startAuto(); simRun(1500);
-  CHECK(g_goalRefSet && g_stats.shots == 0);                  // ball not held: no shot
-  // knock the robot 40 degrees off the goal heading (clockwise), then hold the ball
-  g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);
+  CHECK(goalValid() && g_stats.shots == 0);                 // ball not in the shooting position: no shot
+  g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);   // knock the robot 40 degrees off the goal heading (clockwise)
   CHECK(absf(angDiffDeg(g_goalYaw, g_imu.yaw)) > 25.0f);
-  g_mockAnalog[35] = 3000;
+  ballHeld();
   bool aimed = false, sawBack = false, sawDrive = false; int rotA = 0, backDir = 0, driveDir = 0, maxDrive = 0;
   uint64_t end = g_mockUs + 6000000ULL;
   while (g_mockUs < end && g_stats.shots == 0) {
@@ -2425,95 +1413,78 @@ static void t_shoot_sequence() {
     }
   }
   g_mpu.gz = 0.0f;
-  CHECK(aimed && rotA < 0);                                   // aimed by rotating in place (FL and FR turn opposite ways)
+  CHECK(aimed && rotA < 0);                                 // aimed by rotating in place (FL and FR turn opposite ways)
   CHECK(sawBack && sawDrive);
-  CHECK(backDir == -driveDir && driveDir != 0);               // reverse, then the opposite direction
-  CHECK(maxDrive >= (int)(g_cfg.maxAuto * 0.9f));             // the drive phase reaches (nearly) full speed
+  CHECK(backDir == -driveDir && driveDir != 0);             // reverse, then the opposite direction
+  CHECK(maxDrive >= (int)(g_cfg.maxAuto * 0.9f));           // the drive phase reaches (nearly) full speed
   CHECK(g_stats.shots == 1 && g_navState != NAV_SHOOT);
   CHECK(absf(angDiffDeg(g_goalYaw, g_imu.yaw)) <= 0.5f * shootAimTolDeg(g_cfg) + 1.0f);   // fired inside the aim window
-  // cooldown: still holding the ball, no second shot right away
   simRun(1500);
-  CHECK(g_stats.shots == 1);
+  CHECK(g_stats.shots == 1);                                // cooldown / same ball: no second shot
 }
+
 static void t_shoot_preconditions() {
-  holdSetup();
-  g_mockAnalog[35] = 3000; simRun(300);
-  ballAt(0, 12.0f);
+  shotSetup();
+  g_cfg.shootEnable = 0;
+  ballHeld(); simRun(300);
   startAuto();
-  g_cfg.shootEnable = 0; simRun(1500);
-  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // shot switched off: holding the ball alone never shoots
+  simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);     // shot switched off: holding the ball alone never shoots
   g_cfg.shootEnable = 1; send(":goal clear\n"); simRun(1500);
-  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // no registered goal heading: no shot
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);     // no registered goal heading: no shot
+  sensors(1.0f, 0.3f); simRun(100);                         // (let the sensor states settle first)
+  send(":goal set\n"); simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);     // held but off-centre: the robot aligns, it does not shoot
+  sensors(1.0f, 0.0f); simRun(1500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);     // sensor 1 does not see the ball: not the shooting position
   send("s"); simRun(100);
   CHECK(!g_autoEnabled);
 }
+
 static void t_shoot_aim_timeout_and_ball_lost() {
-  holdSetup();
-  ballAt(0, 12.0f);
+  shotSetup();
+  ballFar();
   startAuto(); simRun(1200);
   g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);
-  g_mockAnalog[35] = 3000;                                    // held, but the emulated robot never turns: the aim must time out
+  ballHeld();                                               // held, but the emulated robot never turns: the aim must time out
   uint64_t end = g_mockUs + 6000000ULL; bool entered = false;
   while (g_mockUs < end && g_stats.shots == 0) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (entered && g_navState != NAV_SHOOT) break; }
   CHECK(entered && g_navState != NAV_SHOOT && g_stats.shots == 0);
-  // ball taken away during the aim: cancelled well before the timeout
   g_cfg.shootCooldownMs = 500; simRun(700);
-  g_mockAnalog[35] = 500; simRun(400);
-  g_mockAnalog[35] = 3000; simRun(400);                       // held again, aim starts
-  g_mockAnalog[35] = 500;
+  ballGone(); simRun(400);
+  ballHeld(); simRun(400);                                  // held again, aim starts
+  ballGone();                                               // ball taken away during the aim: cancelled well before the timeout
   uint64_t t0 = g_mockUs; bool inShot = false;
   while (g_mockUs < t0 + 2000000ULL) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) inShot = true; if (inShot && g_navState != NAV_SHOOT) break; }
   CHECK(g_navState != NAV_SHOOT);
 }
-static void t_shoot_blocked_behind() {
-  holdSetup();
-  g_cfg.avoidMask = 2; g_cfg.avoid1Slow = 1500; g_cfg.avoid1Stop = 2500;   // rear sensor (GPIO36) in use
-  g_mockAnalog[36] = 3000;                                    // something right behind the robot
-  simRun(300);
-  ballAt(0, 12.0f);
-  startAuto(); simRun(1200);
-  g_mockAnalog[35] = 3000;
-  bool backed = false, entered = false;
-  uint64_t end = g_mockUs + 1500000ULL;
-  while (g_mockUs < end) { loop(); mockAdvance(50); if (g_navState == NAV_SHOOT) entered = true; if (g_navState == NAV_SHOOT && g_shootPhase == 1 && wheelDir(W_FL) + wheelDir(W_FR) + wheelDir(W_BL) + wheelDir(W_BR) < 0 && maxWheelDuty() > 0) backed = true; }
-  CHECK(entered);
-  CHECK(!backed);                                             // the reverse phase did not move the robot into the obstacle
-}
-static void t_hold_sensor_is_not_an_obstacle() {
-  holdSetup();
-  g_cfg.avoidMask = 1; g_cfg.avoid0Slow = 1500; g_cfg.avoid0Stop = 2500;   // the same sensor, also configured for avoidance
-  g_mockAnalog[35] = 3000; simRun(300);
-  float vx = 0, vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy);
-  CHECK_NEAR(vy, 1.0, 1e-4);                                  // the ball-held sensor does not limit the motion
-  g_cfg.holdEnable = 0; vx = 0; vy = 1; avoidForNav(g_cfg, millis(), NAN, &vx, &vy);
-  CHECK(vy < 0.5f);                                           // without the hold role it would
-}
+
 static void t_goal_invalid_after_gyro_reset() {
-  holdSetup();
-  ballAt(0, 12.0f);
+  shotSetup();
+  ballFar();
   startAuto(); simRun(800);
   CHECK(goalValid());
-  g_mockAnalog[35] = 3000; simRun(100);
+  ballHeld(); simRun(100);
   send("s"); simRun(100);
-  send(":zero\n"); simRun(100);                               // the gyro reference is reset: the registered heading no longer means anything
+  send(":zero\n"); simRun(100);                             // the gyro reference is reset: the registered heading no longer means anything
   CHECK(g_goalRefSet && !goalValid());
   Serial.out.clear(); simRun(200); send(":goal\n"); simRun(20);
-  CHECK(outHas("INVALID") || outHas("goal heading INVALID"));
+  CHECK(outHas("INVALID"));
   startAuto(); simRun(1500);
-  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);       // no shot on a stale heading
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);     // no shot on a stale heading
   send(":goal set\n"); simRun(300);
   CHECK(goalValid());
-  // an IMU outage (the yaw is reset to 0 on recovery) invalidates it again
-  uint32_t ep = g_imu.yawEpoch;
+  uint32_t ep = g_imu.yawEpoch;                             // an IMU outage (the yaw is reset to 0 on recovery) invalidates it again
   g_mpu.mode = 1; simRun(800); g_mpu.mode = 0; simRun(3500);
   CHECK(g_imu.yawEpoch > ep && !goalValid());
 }
+
 static void t_shoot_launch_clock_and_one_shot_per_ball() {
-  holdSetup();
+  shotSetup();
   g_cfg.shootCooldownMs = 500;
-  ballAt(0, 12.0f);
+  ballFar();
   startAuto(); simRun(1200);
-  g_mockAnalog[35] = 3000;
+  ballHeld();
   uint64_t tLaunch = 0, tFull = 0, tEnd = 0; int shots0 = 0;
   uint64_t end = g_mockUs + 5000000ULL;
   while (g_mockUs < end && g_stats.shots == 0) {
@@ -2523,75 +1494,179 @@ static void t_shoot_launch_clock_and_one_shot_per_ball() {
   }
   tEnd = g_mockUs;
   CHECK(g_stats.shots == 1 && tLaunch && tFull);
-  CHECK(tFull - tLaunch < 120000ULL);                         // the ramp was lifted: (nearly) full speed within ~100 ms of the wheels turning forward
+  printf("  launch->full speed %.0f ms\n", (double)(tFull - tLaunch) / 1000.0);
+  CHECK(tFull - tLaunch < 120000ULL);                       // the ramp was lifted: (nearly) full speed within ~100 ms of the wheels turning forward
   CHECK_NEAR((double)(tEnd - tLaunch) / 1000.0, (double)g_cfg.shootDriveMs, 80.0);   // the drive lasts shootdrivems from the launch, not from the dwell
-  CHECK(!g_rampBoost);                                        // boost is released when the shot ends
-  // the ball is still on the sensor: no second shot however long we wait (after the cooldown too)
-  shots0 = (int)g_stats.shots; simRun(3000);
+  CHECK(!g_rampBoost);
+  shots0 = (int)g_stats.shots; simRun(3000);                // the ball is still there: no second shot however long we wait
   CHECK((int)g_stats.shots == shots0);
-  // the ball leaves and a new one is taken: the next shot is allowed
-  g_mockAnalog[35] = 500; simRun(400);
-  g_mockAnalog[35] = 3000;
+  ballGone(); simRun(400); ballHeld();                      // the ball leaves and a new one is taken: the next shot is allowed
   end = g_mockUs + 5000000ULL;
   while (g_mockUs < end && (int)g_stats.shots == shots0) { emulateAimRotation(); loop(); mockAdvance(50); }
   CHECK((int)g_stats.shots == shots0 + 1);
 }
-static void t_hold_sensor1_calibration() {
-  bootCal();
-  send(":set holdsensor 1\n"); simRun(20);
-  g_mockAnalog[36] = 700; send(":aux on\n"); simRun(300);
-  CHECK(!g_isrFn36);                                          // GPIO36 is analog now: no edge interrupts on it
-  send(":hold cal clear\n"); simRun(20); CHECK(g_cfg.holdClearRaw == 700);
-  g_mockAnalog[36] = 3300; simRun(400);
-  send(":hold cal held\n"); simRun(20); CHECK(g_cfg.holdHeldRaw == 3300);
-  send(":hold on\n"); simRun(300); CHECK(g_cfg.holdEnable == 1 && g_aux.held);
+
+struct ShotTiming { double toLaunchMs, totalMs; bool ok; };
+// Several scenarios in one process: setup() does not clear these (a real reboot does).
+static void resetShotState() {
+  g_stats.shots = 0; g_goalRefSet = false; g_goalAutoOff = false; g_goalWaitNoted = false; g_goalLostNoted = false;
+  g_shotDone = false; g_needRelease = false; g_shootLaunched = false; g_rampBoost = false; g_shootPhase = 0; g_mpu.gz = 0.0f;
+}
+static ShotTiming shotTiming(float offsetDeg, bool fast) {
+  resetShotState();
+  shotSetup();
+  if (!fast) { g_cfg.shootParallel = 0; g_cfg.shootHoldMs = 300; g_cfg.shootBackMs = 250; g_cfg.shootBackSpeed = 0.5f; g_cfg.aimSpeed = 0.3f; g_cfg.shootPwm = g_cfg.maxAuto; }
+  else { g_cfg.shootParallel = 1; g_cfg.shootHoldMs = 100; g_cfg.shootBackMs = 150; g_cfg.shootBackSpeed = 0.7f; g_cfg.aimSpeed = 0.5f; g_cfg.shootPwm = 255; }
+  ballFar();
+  startAuto(); simRun(1200);
+  if (offsetDeg != 0.0f) { g_mpu.gz = -offsetDeg; simRun(1000); g_mpu.gz = 0.0f; simRun(300); }
+  uint32_t t0 = millis();
+  ballHeld();
+  uint64_t end = g_mockUs + 8000000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) { emulateRotationFromCommand(); loop(); mockAdvance(50); }
+  g_mpu.gz = 0.0f;
+  ShotTiming r{0, 0, g_stats.shots == 1};
+  r.toLaunchMs = (double)(uint32_t)(g_shotLaunchMs - t0);
+  r.totalMs = (double)(uint32_t)(millis() - t0);
+  return r;
+}
+static void t_shot_speed_old_vs_new() {
+  ShotTiming o0 = shotTiming(0.0f, false), n0 = shotTiming(0.0f, true), o40 = shotTiming(40.0f, false), n40 = shotTiming(40.0f, true);
+  CHECK(o0.ok && n0.ok && o40.ok && n40.ok);
+  printf("  shot: sequential settings launch after %.0f ms (total %.0f) at 0 deg off, %.0f (%.0f) at 40 deg off; defaults %.0f (%.0f) and %.0f (%.0f) [simulation, assumed 180 deg/s at full rotation command]\n",
+         o0.toLaunchMs, o0.totalMs, o40.toLaunchMs, o40.totalMs, n0.toLaunchMs, n0.totalMs, n40.toLaunchMs, n40.totalMs);
+  CHECK(n0.toLaunchMs < o0.toLaunchMs && n40.toLaunchMs < o40.toLaunchMs);
+  CHECK(n0.totalMs < o0.totalMs && n40.totalMs < o40.totalMs);
+}
+static void t_shot_parallel_aims_while_reversing() {
+  shotSetup();
+  g_cfg.shootParallel = 1; g_cfg.shootBackMs = 150; g_cfg.shootBackSpeed = 0.7f; g_cfg.aimSpeed = 0.5f; g_cfg.shootPwm = 255;
+  ballFar();
+  startAuto(); simRun(1200);
+  g_mpu.gz = -40.0f; simRun(1000); g_mpu.gz = 0.0f; simRun(300);
+  ballHeld();
+  bool both = false, seqPhase1 = false; int maxDrive = 0;
+  uint64_t end = g_mockUs + 6000000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) {
+    emulateRotationFromCommand(); loop(); mockAdvance(50);
+    if (g_navState == NAV_SHOOT) {
+      if (g_shootPhase == 0 && g_reqVy < -0.1f && absf(g_reqW) > 0.05f) both = true;     // reversing and turning at the same time
+      if (g_shootPhase == 1) seqPhase1 = true;
+      if (g_shootPhase == 2) maxDrive = std::max(maxDrive, maxWheelDuty());
+    }
+  }
+  g_mpu.gz = 0.0f;
+  CHECK(both && !seqPhase1);
+  CHECK(g_stats.shots == 1);
+  CHECK(maxDrive >= 250);                                   // shootpwm 255 overrides the autonomous limit (maxauto = 170)
+  CHECK(absf(angDiffDeg(g_goalYaw, g_imu.yaw)) <= 0.5f * shootAimTolDeg(g_cfg) + 1.5f);
+}
+static void t_shoot_pwm_limit_and_no_reverse() {
+  shotSetup();
+  g_cfg.shootPwm = 200; g_cfg.shootBackMs = 0; g_cfg.shootParallel = 1;
+  ballFar();
+  startAuto(); simRun(1200);
+  ballHeld();
+  int maxDrive = 0; bool reversed = false;
+  uint64_t end = g_mockUs + 4000000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) {
+    loop(); mockAdvance(50);
+    if (g_navState == NAV_SHOOT) { if (g_reqVy < -0.05f) reversed = true; if (g_shootPhase == 2) maxDrive = std::max(maxDrive, maxWheelDuty()); }
+  }
+  CHECK(g_stats.shots == 1 && !reversed);                   // shootbackms 0: no reverse phase at all
+  CHECK(maxDrive >= 195 && maxDrive <= 200);                // limited by shootpwm, not by maxauto
 }
 
-static void t_e2_phantom_exposure() {
-  // A ball-like burst that is accepted just before it ends is believed for a shorter time: the first grace period of a new
-  // track is judged at the focus-window rate, not at the ring rate (it used to be the full 300 ms).
-  bootCal(); for (int i = 0; i < 12; i++) g_cfg.ch[i].verified = 1;
-  g_cfg.acqSpan1Ms = 96; g_cfg.acqSpan2Ms = 30;                // the fast profile accepts short bursts
-  irRestartSchedule(); bwClear(); simRun(500);
-  std::vector<double> after;
-  for (int k = 0; k < 24; k++) {
-    bool a; double lostAfter;
-    benchBrief(2, 80, (uint32_t)(k * 3010), &a, &lostAfter);
-    if (a && lostAfter >= 0) after.push_back(lostAfter);
-  }
-  CHECK(after.size() >= 5);
-  std::sort(after.begin(), after.end());
-  double median = after.empty() ? 1e9 : after[after.size() / 2];
-  printf("  accepted %zu, median loss after the burst %.0f ms, worst %.0f ms\n", after.size(), median, after.empty() ? 0.0 : after.back());
-  CHECK(median <= 200.0);                                      // median was 299 ms; the worst case stays at the 300 ms cap
+// ================================================================================================
+// the old hardware is gone
+static void t_old_hardware_removed() {
+  bootCal();
+  simRun(200);
+  Serial.out.clear();
+  const char* cmds[] = {":ch 3 en 1\n", ":learn 90\n", ":verify 2\n", ":irgate auto\n", ":irprofile fast\n", ":cov\n", ":irchar 3\n", ":aux on\n", ":avoid\n", ":hold\n", ":chreset 1\n"};
+  for (const char* c : cmds) { send(c); simRun(30); }
+  CHECK(outCount("unknown word command") == 11);           // none of the multiplexer-era commands exists any more
+  Serial.out.clear(); send("?"); simRun(50); send("h"); simRun(300); send("i"); simRun(50); send("d"); simRun(50);
+  CHECK(!outHas("mux") && !outHas("Mux") && !outHas("multiplexer") && !outHas("TSOP") && !outHas("C0 ") && !outHas("C11"));
+  CHECK(outHas("IR sensor"));
+  // only the specified pins exist: 12 motor + 2 I2C outputs, 2 input-only sensor pins
+  CHECK(OUTPUT_PIN_MASK != 0 && __builtin_popcountll(OUTPUT_PIN_MASK) == 14 && __builtin_popcountll(IR_PIN_MASK) == 2);
+  CHECK(strstr(LOG_COLUMNS, "irmask,ball,offset,s0,s1") != nullptr && strstr(LOG_COLUMNS, "actmask") == nullptr && strstr(LOG_COLUMNS, "bear_deg") == nullptr);
 }
 
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
-  T(t_angles), T(t_timer_rollover), T(t_mecanum), T(t_pinmap), T(t_boot_safe), T(t_ramp), T(t_config), T(t_classify),
-  T(t_ir_detect), T(t_ir_wrap), T(t_ir_ambiguous), T(t_ir_stuck_and_recover), T(t_ir_noise), T(t_ir_polarity),
-  T(t_ir_system_loss), T(t_ir_trusted_low), T(t_ir_scan_stall), T(t_ir_overrun), T(t_ir_coverage), T(t_ir_probe),
-  T(t_imu_integrate), T(t_imu_bias), T(t_imu_missing), T(t_imu_dropout), T(t_imu_invalid), T(t_heading_hold),
-  T(t_nav_approach), T(t_nav_unreliable_slow), T(t_nav_lost_search), T(t_nav_hysteresis), T(t_nav_isolated_samples),
-  T(t_safe_stop_moving), T(t_loop_stall), T(t_resets), T(t_reset_wdt), T(t_fault_report_format),
-  T(t_cli_manual), T(t_cli_robust), T(t_diag_no_motion), T(t_live_ir_rate), T(t_motor_test), T(t_drive_test), T(t_nav_all_directions), T(t_nav_sweep_and_multi), T(t_imu_frozen_in_approach), T(t_gpio_tamper), T(t_ch_inspect), T(t_ir_spare_channels), T(t_ir_period_gate), T(t_ir_slow_interferer), T(t_latency), T(t_fast_engine_rejection), T(t_side_zone_note), T(t_boot_no_channels), T(t_fs_commands), T(t_cfg_boot_corrupt), T(t_cfg_save_fail), T(t_cfg_set),
-  T(t_fs_missing), T(t_fs_write_failure), T(t_fs_full), T(t_log_rotation), T(t_log_queue_overflow),
-  T(t_flight_recorder), T(t_export), T(t_nonblocking), T(t_reboot_phase1), T(t_reboot_phase2),
-  T(t_cal_startup_defaults), T(t_health_report_text),
-  T(t_e2_broadband_tail), T(t_e2_stall_is_not_absence), T(t_e2_focus_scheduling), T(t_e2_grace_period_bounds), T(t_e2_dropout_survival),
-  T(t_e2_reacquisition), T(t_e2_stop_after_loss), T(t_legacy_fallback), T(t_e2_config_params), T(t_scan_revisit_metrics),
-  T(t_startup_schedule), T(t_e2_view_transitions), T(t_e2_stale_not_followed), T(t_irprofile), T(t_e2_phantom_exposure), T(t_irchar_gate_functions), T(t_irchar_ball_like), T(t_irchar_interferer), T(t_irgate_auto_warnings), T(t_aux_inputs), T(t_avoid_functions), T(t_avoid_nav_ball_in_zone), T(t_avoid_nav_blocked_ball_ahead), T(t_avoid_nav_blocked_ball_side), T(t_avoid_cli), T(t_goal_register_and_aim_window), T(t_hold_functions), T(t_hold_cli), T(t_shoot_sequence), T(t_shoot_preconditions), T(t_shoot_aim_timeout_and_ball_lost), T(t_shoot_blocked_behind), T(t_hold_sensor_is_not_an_obstacle), T(t_goal_invalid_after_gyro_reset), T(t_shoot_launch_clock_and_one_shot_per_ball), T(t_hold_sensor1_calibration), T(t_e2_micros_wrap_steady), T(t_e2_micros_wrap_flicker), T(t_engine_switch_at_run_time),
+  T(t_angles),
+  T(t_timer_rollover),
+  T(t_mecanum),
+  T(t_pinmap),
+  T(t_boot_safe),
+  T(t_ramp),
+  T(t_config),
+  T(t_imu_integrate),
+  T(t_imu_bias),
+  T(t_imu_missing),
+  T(t_imu_dropout),
+  T(t_imu_invalid),
+  T(t_heading_hold),
+  T(t_safe_stop_moving),
+  T(t_loop_stall),
+  T(t_resets),
+  T(t_fault_report_format),
+  T(t_reset_wdt),
+  T(t_cli_manual),
+  T(t_cli_robust),
+  T(t_diag_no_motion),
+  T(t_motor_test),
+  T(t_drive_test),
+  T(t_fs_commands),
+  T(t_gpio_tamper),
+  T(t_cfg_boot_corrupt),
+  T(t_cfg_save_fail),
+  T(t_cfg_set),
+  T(t_fs_missing),
+  T(t_fs_write_failure),
+  T(t_fs_full),
+  T(t_log_rotation),
+  T(t_log_queue_overflow),
+  T(t_flight_recorder),
+  T(t_export),
+  T(t_nonblocking),
+  T(t_reboot_phase1),
+  T(t_reboot_phase2),
+  T(t_cal_startup_defaults),
+  T(t_health_report_text),
+  T(t_imu_frozen_in_approach),
+  T(t_ir_pure_rules),
+  T(t_ir_states_and_debounce),
+  T(t_ir_polarity_and_digital),
+  T(t_ir_rail_fault_and_uncalibrated),
+  T(t_ir_uncalibrated_autonomy_refused),
+  T(t_ir_cli),
+  T(t_ball_offset_and_shooting_position),
+  T(t_nav_approach_and_stop),
+  T(t_nav_single_sensor_alignment),
+  T(t_nav_lost_search_reacquire),
+  T(t_nav_sensor_fault_safe),
+  T(t_goal_register_and_aim_window),
+  T(t_shoot_sequence),
+  T(t_shoot_preconditions),
+  T(t_shoot_aim_timeout_and_ball_lost),
+  T(t_goal_invalid_after_gyro_reset),
+  T(t_shoot_launch_clock_and_one_shot_per_ball),
+  T(t_shot_speed_old_vs_new),
+  T(t_shot_parallel_aims_while_reversing),
+  T(t_shoot_pwm_limit_and_no_reverse),
+  T(t_old_hardware_removed),
 };
 
 int main(int argc, char** argv) {
   if (argc >= 2 && strcmp(argv[1], "--list") == 0) { for (auto& t : TESTS) printf("%s\n", t.name); return 0; }
-  if (argc >= 2 && strcmp(argv[1], "--bench") == 0) { freshFs((std::string("bench") + std::to_string((long)getpid())).c_str()); return benchMain(argc, argv); }
-  if (argc >= 5 && strcmp(argv[1], "--eval-ir") == 0) { freshFs("eval"); return evalMain(argc, argv); }
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {
     if (strcmp(t.name, argv[1]) != 0) continue;
-    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_boot_no_channels") != 0 && strcmp(t.name, "t_cfg_boot_corrupt") != 0 &&
+    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_cfg_boot_corrupt") != 0 &&
         strcmp(t.name, "t_log_rotation") != 0 && strcmp(t.name, "t_flight_recorder") != 0 && strcmp(t.name, "t_export") != 0)
       freshFs(t.name);
     t.fn();

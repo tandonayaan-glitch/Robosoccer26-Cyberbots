@@ -12,14 +12,14 @@
 #include "health.h"
 #include "storage.h"
 #include "motors.h"
-#include "irscan.h"
+#include "ir2.h"
 #include "imu.h"
 
 #define FW_VERSION "1.0.0"
 #define LOG_SCHEMA 1
 static const char* LOG_COLUMNS =
-  "t_ms,sess,seq,type,cond,nav,irmask,actmask,ball,bear_deg,conf,imu,yaw_deg,herr_deg,gz_dps,"
-  "vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,scan_us,loop_us,note";
+  "t_ms,sess,seq,type,cond,nav,irmask,ball,offset,s0,s1,imu,yaw_deg,herr_deg,gz_dps,"
+  "vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,loop_us,note";
 
 enum NavState : uint8_t {
   NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT
@@ -218,12 +218,12 @@ struct FrRec {
   uint32_t t;
   char type;
   uint8_t nav, cond;
-  uint16_t irmask, actmask, faults;
-  int16_t bear10, yaw10, herr10, gz10;   // 0x7FFF = not available
-  uint8_t conf100, ball, imu;            // imu: 0 absent, 1 present-not-ok, 2 ok
+  uint16_t irmask, faults;               // irmask: bit0/1 sensor 0/1 sees the ball, bit2/3 near, bit4 held, bit5 ready (shooting position)
+  int16_t off100, s0x100, s1x100;        // ball offset (-1..1) and sensor strengths, times 100; off100 0x7FFF = unknown
+  int16_t yaw10, herr10, gz10;           // 0x7FFF = not available
+  uint8_t ball, imu;                     // imu: 0 absent, 1 present-not-ok, 2 ok
   int8_t vx100, vy100, w100;
   int16_t pwm[4];
-  uint16_t scan100us;
   uint16_t loop100us;
   char note[24];
 };
@@ -245,36 +245,33 @@ static void frCapture(FrRec& r, char type, const char* note) {
   r.type = type;
   r.nav = g_navState;
   r.cond = g_cond;
-  uint16_t im = 0;
-  for (uint8_t i = 0; i < MUX_CHANNELS; i++) if (g_ir[i].detect) im |= (uint16_t)(1u << i);
-  r.irmask = im;
-  r.actmask = g_ball.actMask;
+  r.irmask = (uint16_t)(g_ball.seenMask | (g_ball.nearMask << 2) | (g_ball.held ? 0x10 : 0) | (g_ball.ready ? 0x20 : 0));
   r.faults = faultMask();
   r.ball = g_ball.valid ? 1 : 0;
-  r.bear10 = (g_ball.valid || g_ball.anyDetect) ? sc10(g_ball.bearingDeg) : FR_NA;
-  r.conf100 = (uint8_t)(clampf(g_ball.conf, 0, 1) * 100.0f + 0.5f);
+  r.off100 = g_ball.offsetKnown ? (int16_t)(clampf(g_ball.offset, -1.0f, 1.0f) * 100.0f) : (int16_t)FR_NA;
+  r.s0x100 = (int16_t)(clampf(g_ball.s0, -300.0f, 300.0f) * 100.0f);
+  r.s1x100 = (int16_t)(clampf(g_ball.s1, -300.0f, 300.0f) * 100.0f);
   r.imu = g_imu.present ? (g_imu.ok ? 2 : 1) : 0;
   r.yaw10 = (g_imu.present && g_imu.yawValid) ? sc10(g_imu.yaw) : FR_NA;
   r.herr10 = isnan(g_hdgErr) ? FR_NA : sc10(g_hdgErr);
   r.gz10 = (g_imu.present && g_imu.ok) ? sc10(g_imu.gz) : FR_NA;
   r.vx100 = (int8_t)(g_reqVx * 100.0f); r.vy100 = (int8_t)(g_reqVy * 100.0f); r.w100 = (int8_t)(g_reqW * 100.0f);
   for (int i = 0; i < 4; i++) r.pwm[i] = g_wheelOut[i];
-  r.scan100us = (uint16_t)(g_scan.cycleUs / 100u > 65535u ? 65535u : g_scan.cycleUs / 100u);
   r.loop100us = (uint16_t)(g_loopMaxUs / 100u > 65535u ? 65535u : g_loopMaxUs / 100u);
   if (note) { snprintf(r.note, sizeof(r.note), "%s", note); for (char* p = r.note; *p; p++) if (*p == ',' || *p == '\n' || *p == '\r') *p = ';'; }
 }
 
 static void frFormat(const FrRec& r, uint32_t seq, char* out, size_t n) {
-  char bear[12] = "", yaw[12] = "", herr[12] = "", gz[12] = "";
-  if (r.bear10 != FR_NA) snprintf(bear, sizeof(bear), "%.0f", r.bear10 / 10.0f);
+  char off[12] = "", yaw[12] = "", herr[12] = "", gz[12] = "";
+  if (r.off100 != FR_NA) snprintf(off, sizeof(off), "%.2f", r.off100 / 100.0f);
   if (r.yaw10 != FR_NA) snprintf(yaw, sizeof(yaw), "%.1f", r.yaw10 / 10.0f);
   if (r.herr10 != FR_NA) snprintf(herr, sizeof(herr), "%.1f", r.herr10 / 10.0f);
   if (r.gz10 != FR_NA) snprintf(gz, sizeof(gz), "%.1f", r.gz10 / 10.0f);
-  snprintf(out, n, "%lu,%lu,%lu,%c,%u,%u,%04X,%04X,%u,%s,%.2f,%u,%s,%s,%s,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04X,%lu,%lu,%s\n",
+  snprintf(out, n, "%lu,%lu,%lu,%c,%u,%u,%04X,%u,%s,%.2f,%.2f,%u,%s,%s,%s,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04X,%lu,%s\n",
            UL(r.t), UL(g_session), UL(seq), r.type, (unsigned)r.cond, (unsigned)r.nav, (unsigned)r.irmask,
-           (unsigned)r.actmask, (unsigned)r.ball, bear, r.conf100 / 100.0f, (unsigned)r.imu, yaw, herr, gz,
+           (unsigned)r.ball, off, r.s0x100 / 100.0f, r.s1x100 / 100.0f, (unsigned)r.imu, yaw, herr, gz,
            r.vx100 / 100.0f, r.vy100 / 100.0f, r.w100 / 100.0f, r.pwm[0], r.pwm[1], r.pwm[2], r.pwm[3],
-           (unsigned)r.faults, UL((uint32_t)r.scan100us * 100u), UL((uint32_t)r.loop100us * 100u), r.note);
+           (unsigned)r.faults, UL((uint32_t)r.loop100us * 100u), r.note);
 }
 
 static void frPush(const FrRec& r) {
@@ -356,10 +353,10 @@ static void logService(const Config& c, uint32_t nowMs) {
   }
   if (c.detailMs && elapsedMs(nowMs, g_lastDetailMs) >= c.detailMs) {
     g_lastDetailMs = nowMs;
-    for (uint8_t i = 0; i < MUX_CHANNELS; i++) {
-      if (!c.ch[i].enabled) continue;
+    for (uint8_t i = 0; i < IR_SENSORS; i++) {
+      if (!irEnabled(c, i)) continue;
       char note[24];
-      snprintf(note, sizeof(note), "c%u r%u e%u %s", (unsigned)i, (unsigned)g_ir[i].raw, (unsigned)g_ir[i].edges, WS_NAME[g_ir[i].winState]);
+      snprintf(note, sizeof(note), "s%u r%u %.2f%s", (unsigned)i, (unsigned)g_irs[i].raw, (double)g_irs[i].s, g_irs[i].near ? "N" : (g_irs[i].seen ? "S" : ""));
       logRow('D', note);
     }
   }

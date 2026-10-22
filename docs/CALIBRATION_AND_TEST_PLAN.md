@@ -1,88 +1,48 @@
 # Calibration guide, first power-on, and physical test plan
 
-See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_DETECTION_AUDIT.md` §8 (distance/angle matrix at 10/20/40/60 cm).
+See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_SENSORS.md` (the two IR sensors).
 
-Everything here is a **procedure for you to run**. No step has been performed on the robot;
-every result below is **NOT TESTED**.
+Everything here is a **procedure for you to run**. No step has been performed on the robot; every result below is **NOT TESTED**.
 
 ## A. First power-on (do in this order)
 
-1. **Hardware first** (power off): remove the ENA/ENB jumpers on both L298N boards; add 4.7–10 kΩ
-   pull-downs on all 12 L298N control inputs (IN1–IN4, ENA, ENB, both boards); common ground
-   everywhere; 5 V logic from a buck converter (not from the L298N regulator when the pack is > 12 V);
-   10–100 kΩ pull-up from mux SIG (GPIO34) to 3.3 V; receivers powered per `HARDWARE_REVIEW.md` §2
-   (**confirm the receiver pinout and supply with a meter before applying power**); fuse the battery.
-2. **Wheels off the ground**, robot on a stand, motor battery connector reachable. First flash with the
-   motor battery **disconnected** (USB only).
-3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem,
-   PWM init, IR channels, MPU6050 found at 0x68/0x69. Expect warnings: bearings UNCALIBRATED, wheels
-   NOT TESTED, receivers NOT TESTED. Confirm **no wheel moved** and autonomy is DISABLED.
-4. Press the reset button several times and power-cycle: with the motor battery *connected* and wheels
-   lifted, confirm no wheel twitches at reset (validates the pull-downs; GPIO5/14 boot behaviour).
+1. **Hardware first** (power off): remove the ENA/ENB jumpers on both L298N boards; add 4.7–10 kΩ pull-downs on all 12 L298N control inputs
+   (IN1–IN4, ENA, ENB, both boards); common ground everywhere; a regulated 5 V for the ESP32 (not the L298N regulator when the pack is above 12 V);
+   the two IR sensors wired as in `IR_SENSORS.md` (**confirm their type and pin voltage with a meter before applying power**); fuse the battery.
+2. **Wheels off the ground**, robot on a stand, motor battery connector reachable. First flash with the motor battery **disconnected** (USB only).
+3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, IR sensors (`NOT CALIBRATED`), MPU6050 found at 0x68/0x69.
+   Expect warnings: wheels NOT TESTED, sensors NOT TESTED. Confirm **no wheel moved** and autonomy is DISABLED.
+4. Press reset several times and power-cycle: with the motor battery *connected* and wheels lifted, confirm no wheel twitches at reset (validates the pull-downs; GPIO5/14 boot behaviour).
 5. Connect the motor battery. Send `h` and `?`. Nothing may move.
-6. **Motor direction** (§C), then **IR** (§D), then **IMU** (§E), then `:save`.
+6. **Motor direction** (§B), **IR sensors** (§C), **IMU** (§D), then `:save`.
 7. Only then try autonomy on the stand (`a`), then on the floor at low speed (`:set maxauto 100`).
 
-Stopping fast: `s` stops and disables autonomy, `!` is an emergency stop that works even in the middle
-of typing a `:` command; the manual keys time out by themselves; disconnect the motor battery for a hard stop.
+Stopping fast: `s` stops and disables autonomy, `!` is an emergency stop that works even in the middle of typing a `:` command; manual keys time out by themselves;
+disconnect the motor battery for a hard stop.
 
-## B. Software verification already done
-Host tests only (see `VERIFICATION_REPORT.md`). Not a hardware result.
+## B. Motor direction calibration
 
-## C. Motor direction calibration
-1. `t` (test mode), then for each wheel: `:mtest FL` → read the warning → `:confirm`. The wheel turns
-   forward for 1 s, pauses, reverses for 1 s at `testpwm` (100).
-2. If the first motion was **robot-forward**: `:mok FL`. If it was backward: `:mrev FL`, repeat the test, then `:mok FL`.
-   (Left and right motors are normally mounted mirrored, so expect some reversals.)
-3. `:dtest` → `:confirm` runs forward, backward, strafe left, strafe right, rotate cw, rotate ccw.
-   If strafes are mirrored but forward/rotate are right → `:roller O`.
-4. Find the smallest PWM that starts a wheel under load: `:set minpwm <n>`; set `:set maxauto`/`maxmanual`
-   from the motor/driver ratings. `:save`.
+1. `t` (test mode), then for each wheel: `:mtest FL` → read the warning → `:confirm`. The wheel turns forward for 1 s, pauses, reverses for 1 s at `testpwm` (100).
+2. If the first motion was **robot-forward**: `:mok FL`. If it was backward: `:mrev FL`, repeat the test, then `:mok FL`. (Left and right motors are normally mounted mirrored.)
+3. `:dtest` → `:confirm` runs forward, backward, strafe left, strafe right, rotate cw, rotate ccw. If strafes are mirrored but forward/rotate are right → `:roller O`.
+4. Find the smallest PWM that starts a wheel under load: `:set minpwm <n>`; set `:set maxauto`/`maxmanual` from the motor/driver ratings. `:save`.
 
-## D. IR calibration (use the real ball, motors stopped, lights as in competition)
-Bearings: 0° = robot forward, increasing **clockwise** (right = 90°, rear = 180°, left = 270°).
-1. **Per receiver (identity, polarity)**: hold the ball against the face of receiver *k*:
-   `:verify k`. PASS sets the verified flag. If it fails, check the ball is on, the part's pinout/supply,
-   and polarity (`:ch k pol high` for an active-high module); a second failed test marks FAIL and excludes it.
-2. **Bearings**: with the ball at a known bearing on a marked circle (e.g. every 15° at 30 cm), run
-   `:learn <deg>` (2.5 s). It prints which channels saw the ball. Set each channel's centre with
-   `:ch <n> bear <deg>` (marks it calibrated). Confirm the **clockwise ordering**.
-3. **Rings**: repeat for the front ring, rear ring, and both sides; include the reported 4 cm gaps
-   (place the ball exactly beside the chassis between rings), near and far distances, at the ball's
-   different orientations, under competition lighting, with motors stopped and then with the wheels
-   spinning (use `I` to watch for `!` noisy channels and `edges` counts).
-4. **Mounting-angle experiment**: record the coverage table for the proposed 20–25° downward tilt, then
-   change the angle (`:ch n tilt <deg>` records the metadata), re-run the sweep, compare. Data format:
-   `:cov` prints CSV rows `COV,<deg>,<seen_mask_hex>,<pct C0..C15>`; paste them into a spreadsheet.
-5. Decide per evidence: persistent blind spot → change sensor angles, add side receivers (enable up
-   to four on C12–C15 with `:ch 12 en 1`, calibrate and verify them), relocate the rings, or change
-   the acquisition circuit (`HARDWARE_REVIEW.md` §4). Do not claim full coverage until the table shows it.
-6. Before relying on `:irgate auto`, run the ball/receiver/interference experiment of `docs/IR_HARDWARE_EXPERIMENT.md` (`:irchar`). Tune `irwindow`, `irminedges`, `irnoisy`, and optionally the pulse-period gate (`:irgate auto` after a `:verify`/`:learn` with the ball) using the `edges` and `per_us` columns of `i` (the measured
-   pulse pattern of *your* ball). `:save`.
+## C. IR sensor calibration and testing
 
-7. **Detector timing with the real ball** (all engine-2 figures in `docs/LATENCY_OPTIMIZATION.md` are simulated; none of them
-   is a property of your ball). With the robot on a stand and `d` available:
-   a. For each distance/angle of the matrix above, hold the ball steady for 30 s and note `d`'s *measured miss fraction*
-      and *grace period*. A steady ball should read < 5 % and give the minimum grace period (`losthold`). A fraction
-      above 25 % means the signal flickers at that position (range limit, 38 kHz receiver vs 40 kHz ball, orientation):
-      record where, because that is where `flickerhold` and the focus windows are doing the work.
-   b. Cover and uncover the ball by hand for 50, 100, 150, 200, 250 ms (cardboard card, stopwatch or a logged event):
-      note which gaps keep the track (`ball lost` events in the log, `g`), separately for a close (steady) and a distant
-      (flickering) ball. Compare with the simulated survival (steady ≈ 100 ms, flickering ≈ 200 ms) and set `losthold`,
-      `flickerhold`, `losthold_max` from what a real ball does, not from the simulation.
-   c. Wave an unrelated IR source (remote control, phone camera flash, another robot) across the receivers: count
-      phantom acquisitions in 60 s. If the count is unacceptable, move to `:irprofile safe` or tune `acqspan1`/`acqspan2`;
-      if the ball is hard to catch, `:irprofile fast`. Record the measured pulse period and consider `:irgate auto`.
-   d. Physical latency: with a logic analyser on the ball-emitter switch and a motor EN pin, record 20 appearances and 20
-      disappearances; the firmware-only part is in the simulation tables, the receiver recovery and the wheels' real
-      response are not. Record the distribution and the worst case.
+Follow `IR_SENSORS.md` ("Calibration and sensor-testing procedure"): raw check, `:ir mode`, `:ir cal clear|near 0|1`, `:set iroffset 1|-1`, state test with the ball, distance table,
+interference test in competition lighting, then `:save`. Autonomy (`a`) is refused until sensor 0 is calibrated.
 
-## E. IMU calibration
-Robot level and still: `:gcal` (≈2 s). Rotate the robot by hand clockwise 90°: `m` must show the
-heading changing by about +90 (if it goes negative: `:set yawsign 1`). `:zero` sets the reference.
-Drift is expected (the gyro is integrated); the reference is re-set every time the ball is acquired.
-Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues; reconnect → verified
-recovery after ~3 s.
+## D. IMU calibration
+
+Robot level and still: `:gcal` (about 2 s). Rotate the robot by hand clockwise 90°: `m` must show the heading changing by about +90 (if it goes negative: `:set yawsign 1`).
+`:zero` sets the reference. Drift is expected (the gyro is integrated); the approach heading reference is re-set every time the ball is acquired.
+Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues; reconnect → verified recovery after about 3 s.
+`:gcal` and `:zero` invalidate the registered goal heading (`:goal set` after pointing the robot at the goal).
+
+## E. Goal heading and the shot (only when you want it)
+
+1. Set `goalwidth` and `goaldist` for your field. 2. Power the robot on **pointing at the goal and still**; 5 s later `[NAV] goal heading registered` appears (`:goal` to check). 3. Calibrate the sensors (§C),
+`:set shootenable 1`. 4. Wheels lifted first, then restrained, then on the floor. See `IR_SENSORS.md` for the sequence and what cancels a shot.
 
 ## F. Physical test plan (all NOT TESTED)
 
@@ -90,19 +50,21 @@ recovery after ~3 s.
 |---|---|---|---|---|
 | 1 | First power-on | §A 1–5 | no motion, report as expected | NOT TESTED |
 | 2 | Startup / reset safety | §A 4, also pull USB, brown-out by lowering supply | no wheel motion; autonomy off after every reset | NOT TESTED |
-| 3 | Individual motor direction | §C 1–2 | each wheel forward = robot-forward | NOT TESTED |
+| 3 | Individual motor direction | §B 1–2 | each wheel forward = robot-forward | NOT TESTED |
 | 4 | Four mecanum motions | `:dtest` | motions match labels | NOT TESTED |
-| 5 | Individual IR channels | `:verify k` per receiver with the real ball | 12/12 PASS | NOT TESTED |
-| 6 | Receiver angle + coverage | §D 2–5 | coverage table without holes | NOT TESTED |
-| 7 | Front, side, rear sectors | §D 3 | every bearing seen by ≥ 1 channel | NOT TESTED |
-| 8 | The 4 cm side gaps | ball beside the chassis | detected, or gap documented | NOT TESTED |
-| 9 | Near-ground ball | ball on the floor at 5/15/30/60 cm | detection range recorded | NOT TESTED |
-| 10 | Scan-cycle timing | `i` shows cycle µs; compare with an oscilloscope on S0–S3 | ≈ 36 ms, no overruns | NOT TESTED |
-| 11 | Detection while motors run | `I` while driving (wheels lifted) | no `!` flags / false balls | NOT TESTED |
-| 12 | MPU6050 calibration, heading stability | §E, 60 s still, 90° turns | drift rate recorded | NOT TESTED |
-| 13 | Ball loss and reacquisition | remove/replace the ball while autonomous | SEARCH, reacquire time in stats | NOT TESTED |
-| 14 | Missing optional parts | unplug MPU6050; remove the flash partition scheme | DEGRADED, robot still seeks | NOT TESTED |
-| 15 | Deliberate storage failure | choose a partition scheme without spiffs | logging OFF, robot unaffected, no format | NOT TESTED |
-| 16 | Runtime fault alerts / recovery | unplug a receiver supply, SDA; stuck/noisy channel | fault line, then verified recovery, autonomy still off | NOT TESTED |
-| 17 | Repeated autonomous runs | 10 runs, check `h` stats and logs | consistent, no unexplained safety stops | NOT TESTED |
-| 18 | Log export and analysis | `g`, `:xsel 0`, `x`, verify CRC in Python | CRC matches | NOT TESTED |
+| 5 | Sensor wiring and raw readings | `IR_SENSORS.md` steps 2–3 | stable raw readings, clear change with the ball | NOT TESTED |
+| 6 | Sensor calibration and polarity | `:ir cal ...` | calibrated; stronger = closer confirmed | NOT TESTED |
+| 7 | Seen / near / left / right states | `I` with the ball | states and the offset side match what you do | NOT TESTED |
+| 8 | Overlap of the two fields of view at the shooting position | ball at the shooting position, `i` | sensor 1 sees it (else `irneedboth 0`) | NOT TESTED |
+| 9 | Detection range of the ball | ball at 5/10/20/40 cm, centre and 20° off | range recorded; if too short, the search cannot find a distant ball | NOT TESTED |
+| 10 | Interference | competition lighting, sunlight, other robots, motors running (wheels lifted) | no false "seen" | NOT TESTED |
+| 11 | MPU6050 calibration, heading stability | §D, 60 s still, 90° turns | drift rate recorded | NOT TESTED |
+| 12 | Search, loss and reacquisition | remove/replace the ball while autonomous | SEARCH starts, ball re-found, stats | NOT TESTED |
+| 13 | Approach, alignment and stop at the shooting position | autonomy on the stand, then the floor | creeps in, centres, stops | NOT TESTED |
+| 14 | Goal heading and aim | §E with the wheels lifted | rotates toward the registered heading, stops inside the window | NOT TESTED |
+| 15 | Shot | §E restrained, then on the floor | reverse then forward burst; one shot per ball | NOT TESTED |
+| 16 | Missing optional parts | unplug the MPU6050 | DEGRADED, robot still seeks, no shot | NOT TESTED |
+| 17 | Deliberate storage failure | partition scheme without spiffs | logging OFF, robot unaffected, no format | NOT TESTED |
+| 18 | Sensor fault | short sensor 1 / sensor 0 to GND | `IR_ALIGN` degraded / `IR_FRONT` safe stop; recovery after the verification period | NOT TESTED |
+| 19 | Repeated autonomous runs | 10 runs, check `h` stats and logs | consistent, no unexplained safety stops | NOT TESTED |
+| 20 | Log export and analysis | `g`, `:xsel 0`, `x`, verify the CRC in Python | CRC matches | NOT TESTED |

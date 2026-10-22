@@ -1,115 +1,127 @@
-# Robosoccer26 Cyberbots – RoboCup Junior soccer robot firmware
+# Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware
 
-Firmware for an ESP32-S (38-pin) robot: four mecanum wheels on two L298N drivers, twelve TSOP17xx
-IR receivers read through a CD74HC4067 multiplexer, an MPU6050 for relative heading, LittleFS CSV
-logging with a RAM flight recorder, and a Hardware Health Monitor that degrades or stops instead of
-guessing.
+Firmware for an ESP32-S (38-pin) robot: four mecanum wheels on two L298N drivers, **two 2-pin IR sensors at the front** (no multiplexer, no sensor ring),
+an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder, and a Hardware Health Monitor that degrades or stops instead of guessing.
 
-> **Status – read this first.** Verified so far, by evidence class (details in `docs/VERIFICATION_REPORT.md`):
+> **Status – read this first.**
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 32–33 % flash, 21 % RAM |
-> | Real binary in a third-party emulator | boots to the health report with autonomy disabled; no motor line rises (boot-level only) |
-> | **Host simulation** (simulated ball/IMU/filesystem) | 70 test cases × 2 API shapes = 140 runs, 5,108 checks, all pass, ASan/UBSan clean |
-> | Static analysis (cppcheck, clang-tidy, Valgrind) | no defects found |
-> | Requires electrical inspection | **not done** (receiver pinout/supply, pull-downs, reset-state voltages, IMU board) |
-> | Requires testing with the real ball | **not done** (38 kHz receiver vs 40 kHz ball, range, coverage, side gap, interference) |
-> | Requires supervised physical robot tests | **not done** (motor directions, ramps, heading, autonomy) |
-> | Not yet verified | datasheet/rules facts (source documents were unreachable) – `docs/IR_DETECTION_AUDIT.md` §1 |
+> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–32 % flash, 19 % RAM |
+> | **Host simulation** (simulated sensor values, IMU, filesystem) | 62 test cases × 2 API shapes = 124 runs, 4,568 checks, all pass, ASan/UBSan clean |
+> | Requires the real sensors and the real ball | **not done**: the sensors' type, polarity, range, field of view and response to the ball are unknown to the firmware and untested |
+> | Requires electrical inspection and supervised robot tests | **not done**: pull-downs, reset-state voltages, motor directions, ramps, heading, autonomy, the shot |
 >
-> **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md`.
+> **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md`. Details: `docs/VERIFICATION_REPORT.md`.
+
+## Hardware (what the firmware is written for)
+
+| Qty | Part |
+|---:|---|
+| 1 | ESP-32S v1.1 development board (38 pins) |
+| 2 | L298N motor driver |
+| 4 | yellow BO geared DC motor |
+| 4 | mecanum wheel |
+| 1 | 3S 11.1 V 4500 mAh battery |
+| 2 | 2-pin IR sensor (**exact part not known to the firmware: see `docs/IR_SENSORS.md`**) |
+| 1 | MPU6050 |
+| 1 | breadboard, jumper wires, power wiring |
+
+**No multiplexer. No 12-sensor ring. No kicker or other shooting actuator** (none is assumed; the "shot" is a drive burst).
+
+### Wiring (pins fixed in `pins.h`)
+
+| ESP32 GPIO | Connects to |
+|---|---|
+| **25 / 26 / 27 / 14** | **Right** L298N IN1 / IN2 / IN3 / IN4 |
+| **33 / 32** | Right L298N ENA / ENB (PWM) |
+| | Right OUT1/OUT2 = **front-right** motor, OUT3/OUT4 = **back-right** motor |
+| **18 / 19 / 21 / 22** | **Left** L298N IN1 / IN2 / IN3 / IN4 |
+| **23 / 5** | Left L298N ENA / ENB (PWM) |
+| | Left OUT1/OUT2 = **front-left** motor, OUT3/OUT4 = **back-left** motor |
+| **35** | IR sensor 0, **front centre** (input-only, ADC1) |
+| **36** | IR sensor 1, **front, slightly off-centre** (input-only, ADC1) |
+| **16 / 17** | MPU6050 SDA / SCL |
+| 1 / 3 | USB serial (115200 baud) |
+
+Battery + / − go to both L298N motor-supply and ground terminals (fuse and a switch within reach); **all grounds common**. How the ESP32 itself is powered is not specified in the project notes
+(do not feed it from the L298N regulator with a charged 3S pack, ~12.6 V). Full tables, electrical notes and the boot/reset analysis: `docs/HARDWARE_REVIEW.md`.
+
+**Free GPIOs:** 34 and 39 (input-only, ADC1) · 4 and 13 (ordinary I/O) · 2 and 15 (strapping pins: usable as outputs, avoid pull-ups on GPIO2) · 0 and 12 (boot strapping: deliberately unused). GPIO6–11 are the flash and cannot be used.
+
+## How the two IR sensors are used (`docs/IR_SENSORS.md`)
+
+* **Sensor 0 (front centre)** reports how strongly it sees the ball. When its strength reaches the *near* level the ball is "in the shooting position". The robot does not shoot because a ball is merely visible far away.
+* **Sensor 1 (offset)** lets the robot judge centred or off-centre: the stronger sensor shows the side; a ball seen by only one sensor gives a cautious sideways move toward its side (needs `:set iroffset 1|-1` = sensor 1 right/left of sensor 0).
+* **Both see the ball and sensor 0 is near** → shooting position (assumes the two fields of view overlap there; `:set irneedboth 0` if they do not).
+* **A 2-pin sensor gives strength only**: no position, no distance, and nothing outside its field of view. The robot therefore *searches by rotating*; whether that can find a ball depends on the sensors' range. If they turn out to be short-range, see the options in `docs/IR_SENSORS.md`.
+* Nothing is assumed about the sensors: analog or digital is a setting, and which direction means "ball" is learned by `:ir cal`.
+
+## Autonomous behaviour
+
+`a` starts autonomy (refused until sensor 0 is calibrated, or in SAFE_STOP). SEEK → APPROACH (drive forward, slowing as the signal rises; centre with sensor 1; heading held by the gyro) → stop at the shooting position;
+ball lost (`losthold` 300 ms) → SEARCH (rotate toward the last side, pause, reverse direction, wait; bounded). With `:set shootenable 1`, a registered goal heading and the ball held centred: aim at the goal heading, reverse a little, drive forward at full power.
+Motor commands are ramped (acceleration, deceleration, a dwell at zero when a wheel reverses); sensor faults stop or degrade the robot; the MPU6050 failing disables heading hold and the shot.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
 | `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino` | Arduino sketch (`setup`/`loop`, boot sequence, watchdog) |
-| `Robosoccer26_Cyberbots/*.h` | Modules, one translation unit: `pins` `util` `config` `storage` `health` `motors` `irscan` `imu` `logger` `nav` `report` `cli` |
-| `test/` | Host test harness: `mock_arduino.h`, `test_main.cpp`, `run_tests.sh` |
-| `docs/HARDWARE_REVIEW.md` | Compatibility review, pin map, boot/strapping analysis, IR timing analysis, limitations |
+| `Robosoccer26_Cyberbots/*.h` | Modules, one translation unit: `pins` `util` `config` `storage` `health` `motors` `ir2` `imu` `logger` `nav` `report` `ircli` `cli` |
+| `test/` | Host test harness: `mock_arduino.h`, `test_main.cpp`, `run_tests.sh`, `static_analysis.sh` |
+| `docs/IR_SENSORS.md` | The two sensors: roles, limits, wiring example, calibration and testing procedure, the shot |
+| `docs/HARDWARE_REVIEW.md` | Component list, wiring tables, GPIO summary, electrical notes, boot/strapping analysis, limitations |
 | `docs/HEALTH_AND_LOGGING.md` | Health monitor, fault codes, CSV schema, rotation, flight recorder, export |
-| `docs/CALIBRATION_AND_TEST_PLAN.md` | Calibration guide, first-power-on procedure, physical test plan |
-| `docs/IR_DETECTION_AUDIT.md` | Highest-priority risk: ball/receiver compatibility, timing, interference, geometry, physical test procedure |
-| `docs/LATENCY_OPTIMIZATION.md` | Simulated latency baseline vs optimised, reliability cost, physical limits |
+| `docs/CALIBRATION_AND_TEST_PLAN.md` | Calibration guide, first power-on, physical test plan |
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
-| `docs/LATENCY_OPTIMIZATION.md` | IR detector latency/reliability: method, root causes, engine 2, simulated before/after tables, targets met and unmet, physical limits |
-| `docs/IR_HARDWARE_EXPERIMENT.md` | What the IR golf ball's source code says about its waveform, what `:irgate auto` actually measures, the `:irchar` capture and the step-by-step ball/receiver/interference experiment (no hardware results yet) |
-| `docs/AUX_IR_INPUTS.md` | Optional extra IR inputs on GPIO35/GPIO36: `:aux` diagnostics, obstacle avoidance (`:avoid`, cautious approach when the ball is in the obstacle's direction) the gyro-registered goal heading (`:goal`), the front ball-held sensor (`:hold`) and the aim, reverse, full-speed shot; all off by default; wiring and placement |
-| `docs/bench/` | Raw benchmark outputs (simulation), static-analysis and real-build logs |
-| `docs/VERIFICATION_REPORT.md` | Evidence classes, exact commands/results, defects found, what remains untested |
-| `tools/real_build.sh`, `tools/coverage_calc.py` | Real-toolchain build; receiver geometry calculator |
-| `tools/bench_all.sh`, `tools/bench_summary.py` | Regenerate the host benchmark outputs under `docs/bench/`; one-line summary per parameter set |
+| `docs/VERIFICATION_REPORT.md` | Evidence, what was and was not verified |
+| `docs/CHANGES_TWO_SENSOR.md` | What was removed, kept and added, and the files changed |
+| `tools/real_build.sh` | Real-toolchain build (see the header of the script for toolchain setup) |
 
-## Environment and installation (Arduino IDE)
+## Compile and upload (Arduino IDE)
 
-* Arduino IDE 2.x (any recent version).
-* Board package: **"esp32 by Espressif Systems"**. The code supports both generations of the core
-  (LEDC and watchdog APIs are selected at compile time with `ESP_ARDUINO_VERSION_MAJOR`):
-  **2.0.17** and **3.0.7** have both been compiled with the real toolchains (zero warnings). Newer releases are untested.
-* Board: **ESP32 Dev Module** (ESP-32S, 38 pins). Upload speed 921600 or lower.
-* **Partition scheme must contain a data partition labelled `spiffs`**, e.g. *Default 4MB with spiffs
-  (1.2MB APP/1.5MB SPIFFS)*. LittleFS uses that label. Without it the robot still runs; logging is
-  reported OFF and nothing is ever auto-formatted.
-* **No external libraries are required** (`Wire`, `LittleFS`, FreeRTOS and ESP-IDF headers ship with
-  the core). The MPU6050 is driven through raw registers.
-* Open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino` (the folder name must match the sketch).
-* Serial Monitor: **115200 baud**; line ending "Both NL & CR" or "No line ending" both work.
+1. Install **Arduino IDE 2.x**. In *Boards Manager* install **"esp32 by Espressif Systems"**. Versions **2.0.17** and **3.0.7** have been compiled with the real toolchains (zero warnings); newer releases are untested. The code selects the LEDC and watchdog APIs with `ESP_ARDUINO_VERSION_MAJOR`.
+2. Open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino` (the folder name must match the sketch name). **No external libraries are required** (`Wire`, `LittleFS` and FreeRTOS ship with the core; the MPU6050 is driven through raw registers).
+3. *Tools → Board → ESP32 Arduino → **ESP32 Dev Module***; *Tools → Partition Scheme → **Default 4MB with spiffs** (1.2 MB APP / 1.5 MB SPIFFS)*: LittleFS needs the `spiffs` label (without it the robot still runs; logging is reported OFF and nothing is ever auto-formatted); *Upload Speed* 921600 or lower; select the *Port*.
+4. **First upload with the motor battery disconnected** (USB only). Click *Upload*. If it stays on "Connecting…", hold the board's BOOT button until the upload starts.
+5. *Tools → Serial Monitor*, **115200 baud**, line ending "Both NL & CR" or "No line ending". Send `?` for the commands. The boot report must show autonomy DISABLED and no wheel moving.
+6. Calibrate the sensors (`docs/IR_SENSORS.md`), then `:save`.
 
 ## Safety first
 
 * First tests with the **wheels off the ground**, robot secured, motor battery switch/connector within reach.
-* The robot **never moves at boot** and **never resumes autonomy after a reset or fault**; autonomy
-  needs an explicit `a`. Manual motion auto-stops after `manualhold` ms (default 600 ms) unless repeated.
-* Fit **external pull-downs (4.7–10 kΩ) on all twelve L298N control lines**; see
-  `docs/HARDWARE_REVIEW.md` §3. Software cannot control pins while the ESP32 is in reset or boot ROM.
-* Software failsafes are not a substitute for fuses, current limits, a regulated logic supply, or a
-  physical power switch.
+* The robot **never moves at boot** and **never resumes autonomy after a reset or fault**; autonomy needs an explicit `a`. Manual motion auto-stops after `manualhold` ms (default 600 ms) unless repeated.
+* Fit **external pull-downs (4.7–10 kΩ) on all twelve L298N control lines** (`docs/HARDWARE_REVIEW.md` §5). Software cannot control pins while the ESP32 is in reset or boot ROM.
+* Software failsafes are not a substitute for fuses, current limits, a regulated logic supply, or a physical power switch.
+* The shot drives at full power (`shootpwm` 255) and is off by default: test it with the wheels lifted first.
 
 ## Serial command guide
 
-Single keys act immediately. Words start with `:` and end with Enter. Output below is an **example
-of the format, not a hardware measurement.**
+Single keys act immediately. Words start with `:` and end with Enter.
 
 | Key | Behaviour |
 |---|---|
-| `f` `b` | manual forward / backward |
-| `l` `r` | manual strafe left / right |
-| `q` `e` | rotate counter-clockwise / clockwise |
+| `f` `b` / `l` `r` / `q` `e` | manual forward-backward / strafe left-right / rotate counter-clockwise-clockwise |
 | `s` | stop and disable autonomy |
 | `!` | emergency stop (also works in the middle of a `:` line) |
-| `i` | one snapshot of all enabled IR channels |
+| `i` | snapshot of both IR sensors and the ball state |
 | `I` | toggle rate-limited live IR view (`streamms`, default 500 ms) |
 | `m` | MPU6050 readings and heading estimate |
 | `t` | test mode: stops everything, prints the bench checklist (motors stay off) |
-| `a` | enable autonomous ball seeking (refused if SAFE_STOP, or fewer than `mintrusted` calibrated channels) |
+| `a` | enable autonomous ball seeking (refused if SAFE_STOP or sensor 0 is not calibrated) |
 | `h` | full hardware-health report |
-| `d` | navigation state, ball estimate, confidence, heading, request, four commanded PWM values |
+| `d` | navigation state, ball state, heading, request, four commanded PWM values |
 | `g` | logger status, buffers, storage, file list |
 | `x` | export the selected log (`:xsel ring` or `:xsel <n>`) |
 | `?` | command list |
 
-Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`,
-`:roller <X|O>`, `:ch <n> [<en|pol|trust|bear|tilt> <v>]` (no field = inspect that channel), `:chreset <n>`, `:learn <deg>`, `:irchar <ch> [s] [period_us]`, `:verify <n>`,
-`:cov`, `:irgate <off|auto|min max>`, `:irprofile <fast|balanced|safe>`, `:zero`, `:gcal`, `:diag <on|off>`, `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`,
-`:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
+Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`, `:roller <X|O>`,
+`:ir [cal clear|near <0|1> | mode <0|1> analog|digital | on|off <0|1> | side right|left|none | reset]`, `:goal [set|clear]`, `:zero`, `:gcal`, `:diag <on|off>`,
+`:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`, `:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
 
-Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited
-warning); `:` lines are limited to 63 characters, rejected if too long or containing control
-characters, and abandoned after 4 s without Enter. Diagnostic commands never start motors; motor
-tests require `:mtest`/`:dtest` **and** `:confirm`.
-
-### Example output (format illustration only)
-
-```
-[INFO] 41.250 IR snapshot: 12 enabled channel(s), scan cycle 36120 us (avg 36118, max 36240), cycles=1130, window=3000 us
-[INFO] 41.250  ch label bearing   raw det act edges per_us  hits8 status
-[INFO] 41.250  C3  AL      90     0   1   1      3    830  5/8   UNVERIFIED
-[INFO] 41.250 ball: DETECTED, direction 90 deg (heuristic from 1 active channel(s)), confidence 0.53 (heuristic), channel agreement 1.00
-[INFO] 41.250 no distance or signal strength is available: receivers are digital (pulse seen / not seen)
-[WARN] 52.100 IMU_TIMEOUT sev=DEGRADED comp=MPU6050 evidence="IMU not delivering data (errors=3 timeouts=1)" certainty="bus errors observed; cause unproven" action="heading hold disabled, retrying init" mode=DEGRADED recovery=automatic when verified
-[SAFETY] 60.004 SAFE_STOP entered: autonomous movement disabled, motors stopped. Diagnostics stay available ('h' for cause).
-```
+Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited warning); `:` lines are limited to 63 characters, rejected if too long or containing control characters, and abandoned after 4 s without Enter.
+Diagnostic commands never start motors; motor tests require `:mtest`/`:dtest` **and** `:confirm`.
 
 ## Running the host tests
 
@@ -117,6 +129,4 @@ tests require `:mtest`/`:dtest` **and** `:confirm`.
 ./test/run_tests.sh        # host simulation: mock core v3 and v2, -Wall -Wextra -Wshadow, ASan+UBSan, every case in its own process
 ./test/static_analysis.sh  # cppcheck, clang-tidy, Valgrind
 tools/real_build.sh both   # REAL Arduino-ESP32 2.0.17 + 3.0.7 compile (see the header of the script for toolchain setup)
-tools/bench_all.sh         # regenerate the simulated latency/reliability benchmark outputs under docs/bench/
-/tmp/rs26_bench_all --bench suite=acq|loss|dir|drop|miss|interf|fault|stall|soak|sweep|brief|period|speed|dacc|cpu|imm seed=N engine=0|2 [name=value ...]   # one suite (binary built by tools/bench_all.sh)
 ```

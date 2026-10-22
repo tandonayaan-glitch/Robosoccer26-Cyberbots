@@ -6,7 +6,7 @@ enum Severity : uint8_t { SEV_INFO, SEV_WARN, SEV_DEGRADED, SEV_CRITICAL };
 enum Cond : uint8_t { COND_NORMAL, COND_DEGRADED, COND_SAFE_STOP };
 
 enum FaultCode : uint8_t {
-  F_IR_NO_CHANNELS, F_IR_SCAN_STALL, F_IR_TRUSTED_LOW, F_IR_GAP, F_IR_CHANNEL,
+  F_IR_FRONT, F_IR_ALIGN,
   F_IMU_MISSING, F_IMU_TIMEOUT, F_IMU_INVALID,
   F_FS_UNAVAILABLE, F_FS_WRITE,
   F_CFG_REPLACED, F_BROWNOUT_RESET, F_ABNORMAL_RESET,
@@ -24,11 +24,8 @@ struct FaultMeta {
 };
 
 static const FaultMeta FMETA[F_COUNT] = {
-  {"IR_NO_CHANNELS",  "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "certain: configuration has no enabled channel"},
-  {"IR_SCAN_STALL",   "IR acquisition",  SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "certain: no completed scan for >600 ms"},
-  {"IR_TRUSTED_LOW",  "IR coverage",     SEV_CRITICAL, false, "too few trusted receivers: ball seeking disabled", "certain: count of trusted channels"},
-  {"IR_GAP",          "IR coverage",     SEV_DEGRADED, false, "reduced speed, wide blind sector", "estimate: configured bearings + assumed fov, not measured"},
-  {"IR_CHANNEL",      "IR receiver",     SEV_DEGRADED, false, "suspect/failed channels excluded from navigation", "symptom measured; cause (receiver/wiring/interference) unproven"},
+  {"IR_FRONT",        "IR sensor 0",     SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "symptom measured (reading held at an ADC end stop); cause (wiring/supply/part) unproven"},
+  {"IR_ALIGN",        "IR sensor 1",     SEV_DEGRADED, false, "sensor 1 excluded: no sideways guidance, shooting position uses sensor 0 only", "symptom measured (reading held at an ADC end stop); cause unproven"},
   {"IMU_MISSING",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, turn-toward-ball fallback", "no I2C ACK; wiring vs dead chip not distinguishable"},
   {"IMU_TIMEOUT",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, retrying init", "bus errors observed; cause unproven"},
   {"IMU_INVALID",     "MPU6050",         SEV_DEGRADED, false, "invalid samples rejected, heading hold disabled", "frames failed plausibility checks; cause unproven"},
@@ -54,8 +51,7 @@ static Cond g_cond = COND_NORMAL;
 struct Stats {
   uint32_t ballLossEvents, reacquisitions, reacquireTotalMs, searchTotalMs, shots;
   uint32_t imuTimeouts, imuRecoveries, degradedTransitions, safetyStops;
-  uint32_t logDropped, storageFailures, scanOverruns;
-  uint16_t channelTestFailMask;   // channels that failed an operator-run controlled test
+  uint32_t logDropped, storageFailures;
 };
 static Stats g_stats;
 
