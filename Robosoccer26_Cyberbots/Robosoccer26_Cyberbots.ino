@@ -1,9 +1,11 @@
-// Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware (ESP32-S, Arduino-ESP32 2.x or 3.x)
+// Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware for the ARDUINO MEGA 2560 (ATmega2560).
+// (The ESP32-S version is kept in git: tag esp32-final.)
 //
-// 4x mecanum (2x L298N) | 12-channel IR ring on a CD74HC4067 (GPIO34) + 2 IR modules (GPIO35, GPIO36) | MPU6050 | LittleFS CSV logging
+// 4x mecanum (2x L298N) | 2 phototransistor receivers on A0 / A1 (more can be added on A2..A7) | 2 IR obstacle modules (D34, D35) | MPU6050 on I2C (D20/D21)
 // Safe by construction: motors off at boot, autonomy only after an explicit 'a', every fault
-// degrades or stops instead of guessing. See docs/ for wiring review, calibration and test plan.
+// degrades or stops instead of guessing. See docs/ for wiring, power, calibration and the test plan.
 //
+// Board: Arduino Mega or Mega 2560 (ATmega2560), Arduino AVR core 1.8.3 or newer. No external libraries (Wire and EEPROM ship with the core).
 // Serial: 115200 baud, send '?' for the command list.
 
 #ifdef HOST_TEST
@@ -11,91 +13,56 @@
 #else
   #include <Arduino.h>
   #include <Wire.h>
-  #include <LittleFS.h>
-  #include <esp_system.h>
-  #include <soc/soc_caps.h>
-  #include <esp_task_wdt.h>
-  #include <freertos/FreeRTOS.h>
-  #include <freertos/task.h>
-  #include <freertos/semphr.h>
-  #if __has_include(<esp_arduino_version.h>)
-    #include <esp_arduino_version.h>
-  #endif
+  #include <EEPROM.h>
+  #include <avr/wdt.h>
 #endif
 
 #include "cli.h"
 
-static const uint32_t WDT_TIMEOUT_MS = 3000;        // hung loop => reset (outputs return to inputs: external pull-downs!)
+// Optional hardware watchdog. OFF by default: the stock Arduino Mega 2560 bootloader (STK500v2) does not clear the watchdog after a watchdog reset, which
+// can leave the board in a reset loop that only an ISP programmer fixes. Enable (-DRS_USE_WATCHDOG=1) only with a bootloader that handles it (e.g. Optiboot-Mega).
+#ifndef RS_USE_WATCHDOG
+#define RS_USE_WATCHDOG 0
+#endif
 static const uint32_t LOOP_STALL_FATAL_MS = 1000;   // a single loop gap this long => SAFE_STOP (latched)
 static uint32_t g_lastHealthMs = 0, g_lastCtlMs = 0;
 static bool g_ctlBallValid = false;           // last ball state seen by the control tick (an edge triggers an early tick)
-#ifdef HOST_TEST
-static bool g_hostWriterInline = true;
-#endif
 
-static void wdtBegin() {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  esp_task_wdt_config_t cfg;
-  cfg.timeout_ms = WDT_TIMEOUT_MS;
-  cfg.idle_core_mask = (1u << 0);
-  cfg.trigger_panic = true;
-  if (esp_task_wdt_reconfigure(&cfg) != ESP_OK) esp_task_wdt_init(&cfg);
-#else
-  esp_task_wdt_init(WDT_TIMEOUT_MS / 1000, true);
-#endif
-  esp_task_wdt_add(NULL);
-}
-
-#ifndef HOST_TEST
-static void logTask(void*) {
-  for (;;) {
-    logPump(g_cfg, millis());
-    vTaskDelay(pdMS_TO_TICKS(20));
-  }
-}
-#endif
-
-static void bootRingSettle(uint32_t ms) {            // let the ring settle before the report
+static void bootRingSettle(uint32_t ms) {            // let the receivers settle before the report
   uint32_t t0 = millis();
   while (elapsedMs(millis(), t0) < ms) {
     uint32_t now = millis();
     ringService(g_cfg, now);
     imuUpdate(g_cfg, now, true);
     outPump();
-    delayMicroseconds(100);
   }
 }
 
 void setup() {
   motorsPinsSafe();                                // FIRST: every motor pin LOW, before anything can fail
-  Serial.setTxBufferSize(2048);
   Serial.begin(SERIAL_BAUD);
   delay(100);
-  g_resetReason = esp_reset_reason();
   cfgDefaults(g_cfg);
   say("BOOT", "Robosoccer26_Cyberbots %s starting. Motors are OFF; autonomy is OFF until 'a'.", FW_VERSION);
-  say("BOOT", "reset reason: %s", resetReasonName(g_resetReason));
 
-  // Storage + configuration (never formats).
-  fsInit();
-  char rep[64];
+  // Configuration from EEPROM (never writes at boot).
+  char rep[40];
   CfgLoadResult cr = cfgLoad(g_cfg, rep, sizeof(rep));
-  say("BOOT", "filesystem: %s | config: %s%s%s", g_fsDetail, cfgLoadText(cr), rep[0] ? " -> " : "", rep);
-  if (cr != CL_OK && cr != CL_NOFILE && cr != CL_NOFS) faultRaise(F_CFG_REPLACED, "%s %s", cfgLoadText(cr), rep);
-  if (!g_fsRwOk) faultRaise(F_FS_UNAVAILABLE, "%s", g_fsDetail);
+  say("BOOT", "config: %S%s%s", cfgLoadText(cr), rep[0] ? " -> " : "", rep);
+  if (cr != CL_OK && cr != CL_NOFILE) faultRaise(F_CFG_REPLACED, "%s", rep[0] ? rep : "config replaced");
 
-  // Drivetrain PWM (duty 0, outputs still disabled).
+  // Drivetrain PWM check (duty 0, outputs still disabled).
   bool pwmOk = motorsAttachPwm(g_cfg);
-  say("BOOT", "motor PWM init: %s (%u Hz, %u-bit)", pwmOk ? "OK" : "FAILED", (unsigned)g_cfg.pwmFreq, (unsigned)PWM_BITS);
+  say("BOOT", "motor PWM pins: %S (D%u D%u D%u D%u)", pwmOk ? PSTR("OK") : PSTR("NOT PWM CAPABLE"), (unsigned)WHEEL_PINS[0].en, (unsigned)WHEEL_PINS[1].en, (unsigned)WHEEL_PINS[2].en, (unsigned)WHEEL_PINS[3].en);
 
-  // Ball ring (CD74HC4067 on GPIO34, select GPIO4/13/2/15) and the two IR modules (GPIO35 / GPIO36).
+  // Ball receivers (analog inputs A0, A1, ...) and the two IR modules (D34 / D35).
   ringBegin();
-  say("BOOT", "ball ring: %u of %u channels enabled, noise floor %s | IR modules: front GPIO%u %s, second GPIO%u %s", (unsigned)ringCountEnabled(g_cfg), (unsigned)RING_CH_MAX,
-      g_cfg.ringCalDone ? "calibrated" : "NOT CALIBRATED", (unsigned)PIN_MOD[0], modEnabled(g_cfg, 0) ? "on" : "off", (unsigned)PIN_MOD[1], modEnabled(g_cfg, 1) ? "on" : "off");
+  say("BOOT", "ball receivers: %u of %u enabled, noise floor %S | IR modules: front D%u %S, second D%u %S", (unsigned)ringCountEnabled(g_cfg), (unsigned)RING_CH_MAX,
+      g_cfg.ringCalDone ? PSTR("calibrated") : PSTR("NOT CALIBRATED"), (unsigned)PIN_MOD[0], modEnabled(g_cfg, 0) ? PSTR("on") : PSTR("off"), (unsigned)PIN_MOD[1], modEnabled(g_cfg, 1) ? PSTR("on") : PSTR("off"));
 
   // IMU: probe, configure, measure gyro bias while stationary.
   bool imuOk = imuInit(g_cfg, true);
-  say("BOOT", "MPU6050: %s", imuOk ? "found, calibrating gyro bias (keep the robot still)" : "NOT FOUND - heading hold will be unavailable");
+  say("BOOT", "MPU6050: %S", imuOk ? PSTR("found, calibrating gyro bias (keep the robot still)") : PSTR("NOT FOUND - heading hold will be unavailable"));
   if (imuOk) {
     imuStartCalibration();
     uint32_t t0 = millis();
@@ -104,44 +71,38 @@ void setup() {
       ringService(g_cfg, now);
       imuUpdate(g_cfg, now, true);
       outPump();
-      delayMicroseconds(100);
     }
   }
-
-  logInit(g_cfg);
-  if (g_resetReason == ESP_RST_BROWNOUT) faultRaise(F_BROWNOUT_RESET, "previous reset was a brownout: supply dipped below threshold");
-  if (g_resetReason == ESP_RST_PANIC || g_resetReason == ESP_RST_INT_WDT || g_resetReason == ESP_RST_TASK_WDT || g_resetReason == ESP_RST_WDT)
-    faultRaise(F_ABNORMAL_RESET, "previous reset: %s", resetReasonName(g_resetReason));
 
   bootRingSettle(700);
   uint32_t now = millis();
   ringHealth(g_cfg, now);
   imuHealth(g_cfg, now);
   condEvaluate();
-  logEvent("E", "boot");
 
   motorsSetEnabled(true);                          // outputs allowed, but every target is zero
   motorsDrive(g_cfg, 0, 0, 0, g_cfg.maxManual);
   g_motorsLastUpdateMs = millis();
-  navSetState(g_cond == COND_SAFE_STOP ? NAV_SAFE_STOP : NAV_IDLE, "boot complete");
+  navSetState(g_cond == COND_SAFE_STOP ? NAV_SAFE_STOP : NAV_IDLE, PSTR("boot complete"));
 
-  printHealth(g_cfg, now, "BOOT");
+  printHealth(g_cfg, now, PSTR("BOOT"));
   say("BOOT", "autonomous mode: DISABLED. Bench-test first ('t'), then send 'a'. '?' lists commands.");
   g_bootPhase = false;
   outFlushBlocking(1500);
   g_loopMaxEverUs = 0;                                  // statistics start after the boot-time blocking work
 
-#ifndef HOST_TEST
-  xTaskCreatePinnedToCore(logTask, "logw", 8192, nullptr, 1, &g_logTaskHandle, 0);   // flash writes live off the control core
+#if RS_USE_WATCHDOG
+  wdt_enable(WDTO_2S);
 #endif
-  wdtBegin();
   g_lastLoopUs = micros();
 }
 
 void loop() {
   uint32_t nowUs = micros();
   uint32_t now = millis();
-  esp_task_wdt_reset();
+#if RS_USE_WATCHDOG
+  wdt_reset();
+#endif
 
   uint32_t gap = (uint32_t)(nowUs - g_lastLoopUs);
   g_lastLoopUs = nowUs;
@@ -149,7 +110,7 @@ void loop() {
   if (gap > g_loopMaxEverUs) g_loopMaxEverUs = gap;
   if (gap > LOOP_STALL_FATAL_MS * 1000u) {
     motorsStopNow();                               // we were blind for a full second: do not trust any old command
-    faultRaise(F_LOOP_STALL, "control loop was blocked for %lu ms", UL(gap / 1000));
+    faultRaise(F_LOOP_STALL, "loop blocked for %lu ms", UL(gap / 1000));
   }
 
   cliPoll(now);
@@ -162,7 +123,6 @@ void loop() {
     g_lastHealthMs = now;
     ringHealth(g_cfg, now);
     imuHealth(g_cfg, now);
-    faultUpdate(F_FS_UNAVAILABLE, !g_fsRwOk, g_cfg.recoverVerifyMs, g_fsDetail);
     condEvaluate();
   }
   if (g_ball.valid != g_ctlBallValid) {           // acquisition / loss: do not wait for the next 10 ms tick
@@ -175,13 +135,13 @@ void loop() {
     motorsUpdate(g_cfg, now);
   }
 
-  frService(g_cfg, now);
+  reportService(g_cfg, now);
   logService(g_cfg, now);
-  exportService();
   streamService(g_cfg, now);
-#ifdef HOST_TEST
-  if (g_hostWriterInline) logPump(g_cfg, now);
-#endif
   outPump();
-  yield();
 }
+
+#ifdef HOST_TEST
+#undef snprintf
+#undef say
+#endif

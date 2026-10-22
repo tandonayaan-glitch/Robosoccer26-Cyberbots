@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 16
+#define CFG_VERSION 17
 
 struct Config {
   uint32_t magic;
@@ -17,7 +17,6 @@ struct Config {
   uint8_t reverse[WHEEL_COUNT];  // software reversal per wheel (FL,FR,BL,BR)
   uint8_t rollerO;               // 0 = "X" roller layout (default), 1 = "O" layout (flips strafe sign)
   uint8_t motorVerified;         // bitmask: wheel direction confirmed by operator test
-  uint16_t pwmFreq;              // Hz (applied at boot)
   uint8_t maxManual;             // PWM counts 0..255
   uint8_t maxAuto;
   uint8_t minPwm;                // smallest non-zero PWM that reliably starts a wheel (to be calibrated)
@@ -27,25 +26,24 @@ struct Config {
   uint16_t reverseDeadMs;        // pause at zero when a wheel changes direction
   uint16_t manualHoldMs;         // manual motion auto-stops after this long without a repeated key
 
-  // ---- ball ring: 12 phototransistors (+ up to 4 extra) on the CD74HC4067, read on one analog line (GPIO34) ----
-  uint16_t ringEnable;           // bit n = multiplexer channel Cn is fitted and scanned. C0..C11 on by default; C12..C15 once you fit them
+  // ---- ball receivers: phototransistors, each on its own analog input (A0, A1 fitted; A2..A7 optional), 10-bit ADC ----
+  uint16_t ringEnable;           // bit n = receiver on analog input An is fitted and scanned. A0 and A1 on by default; more once you fit them
   int16_t ringBearing[RING_CH_MAX]; // where each receiver looks, degrees: 0 = straight ahead, + clockwise (right), +-180 = behind. PLACEHOLDERS until you measure (':ring bearing')
-  uint16_t ringNoise[RING_CH_MAX];  // per-channel noise floor in ADC counts (peak-to-peak with no ball emitting), set by ':ring cal noise'
+  uint16_t ringNoise[RING_CH_MAX];  // per-channel noise floor in ADC counts (0..1023) (peak-to-peak with no ball emitting), set by ':ring cal noise'
   uint8_t ringCalDone;           // 1 = ':ring cal noise' has been run on this robot (autonomy is refused otherwise)
   uint16_t ringWinUs;            // each channel is sampled this long (microseconds) and the peak-to-peak swing is taken: must cover one ball burst period
-  uint16_t ringSettleUs;         // wait after switching the multiplexer before the first sample
-  uint16_t ringSeen;             // a channel "sees" the ball at this peak-to-peak swing (ADC counts), or above its noise floor times ringnoisex, whichever is more
+  uint16_t ringSeen;             // a channel "sees" the ball at this peak-to-peak swing (10-bit ADC counts), or above its noise floor times ringnoisex, whichever is more
   uint8_t ringNoiseX10;          // noise-floor multiplier x10 (30 = 3.0x)
   uint16_t ringNear;             // swing at which the ball counts as "very close" (strength 1.0); ':ring cal near' sets it from the shooting position
   uint8_t ringDebounce;          // consecutive scans needed to change a channel's state
   uint8_t ringFovHalf;           // ASSUMED half field of view of one receiver, degrees: used only for the coverage-gap estimate
   uint8_t ringBlend;             // channels within this many degrees of the strongest one are averaged into the bearing
-  uint8_t ringMaxGap;            // largest tolerated uncovered arc in degrees (estimate from the configured bearings), above it: DEGRADED
+  uint16_t ringMaxGap;           // largest tolerated uncovered arc in degrees (estimate from the configured bearings), above it: DEGRADED. 360 = never (only two receivers are fitted)
   uint16_t ringRailMs;           // a channel held saturated this long is excluded and reported (shorted to a rail / sunlight saturation)
-  uint16_t ringRailHi;           // "saturated" = lowest reading of the window at or above this ADC value. With the 5 V-collector circuit (series 6.8 kΩ + 10 kΩ divider) a lit channel tops out near 3.0 V, so lower it (about 3500) to catch sunlight saturation; 4000 only catches a short to 3.3 V
+  uint16_t ringRailHi;           // "saturated" = lowest reading of the window at or above this ADC value (0..1023). The emitter node of a lit phototransistor tops out near 4.8 V = about 980 counts; 1000 flags a channel stuck at the 5 V rail
   // ---- IR obstacle modules (digital OUT): module 0 = front, ball in the shooting position; module 1 = undecided position, logged only ----
   uint8_t modEnable;             // bit0: module 0 in use (default), bit1: module 1 in use
-  uint8_t modActiveLow;          // 1 = OUT goes LOW when something is detected (typical for these modules; NOT assumed: check with ':mod')
+  uint8_t modActiveLow;          // bit n set = module n output goes LOW when something is detected (typical for these boards; NOT assumed: check with ':mod' and set with ':mod level <n> low|high')
   uint8_t modDebounce;           // consecutive 5 ms samples needed to change a module's state
   uint8_t modNeedRing;           // 1 = the shooting position also needs the ring to see the ball near the front (a wall or a robot also trips the module)
   // ---- navigation ----
@@ -92,15 +90,8 @@ struct Config {
   uint16_t shootHoldMs;          // the ball must stay in the shooting position this long before the shot starts
   uint16_t shootCooldownMs;      // minimum time between shots
 
-  // ---- logging ----
-  uint16_t snapshotMs;
-  uint16_t detailMs;             // 0 = detailed per-sensor rows off
-  uint32_t fileMaxBytes;
-  uint8_t maxFiles;
-  uint32_t fsReserveBytes;
-  uint16_t flushMs;
-  uint16_t frPeriodMs;           // flight recorder sampling period
-  uint16_t frPostMs;             // post-trigger capture time
+  // ---- serial reporting ----
+  uint16_t snapshotMs;           // period of the CSV rows after ':diag on'
   uint16_t streamMs;             // 'I' live ring view period
 
   // ---- recovery ----
@@ -111,11 +102,10 @@ struct Config {
 
 // Settable scalar parameters (Serial ":set"). Range-checked on set and on load.
 enum ParamType : uint8_t { PT_U8, PT_U16, PT_U32, PT_F32, PT_I8 };
-struct ParamDef { const char* name; ParamType type; size_t off; float lo; float hi; };
+struct ParamDef { char name[16]; uint8_t type; uint16_t off; float lo; float hi; };   // lives in flash (PROGMEM)
 
-#define PD(n, t, f, lo, hi) {n, t, offsetof(Config, f), (float)(lo), (float)(hi)}
-static const ParamDef PARAMS[] = {
-  PD("pwmfreq", PT_U16, pwmFreq, 1000, 20000),
+#define PD(n, t, f, lo, hi) {n, (uint8_t)(t), (uint16_t)offsetof(Config, f), (float)(lo), (float)(hi)}
+static const ParamDef PARAMS[] PROGMEM = {
   PD("maxmanual", PT_U8, maxManual, 20, 255),
   PD("maxauto", PT_U8, maxAuto, 20, 255),
   PD("minpwm", PT_U8, minPwm, 0, 120),
@@ -125,19 +115,18 @@ static const ParamDef PARAMS[] = {
   PD("revdead", PT_U16, reverseDeadMs, 0, 500),
   PD("manualhold", PT_U16, manualHoldMs, 100, 5000),
   PD("ringenable", PT_U16, ringEnable, 0, 65535),
-  PD("ringwinus", PT_U16, ringWinUs, 200, 3000),
-  PD("ringsettle", PT_U16, ringSettleUs, 0, 500),
-  PD("ringseen", PT_U16, ringSeen, 10, 2000),
+  PD("ringwinus", PT_U16, ringWinUs, 400, 3000),
+  PD("ringseen", PT_U16, ringSeen, 3, 500),
   PD("ringnoisex", PT_U8, ringNoiseX10, 10, 100),
-  PD("ringnear", PT_U16, ringNear, 50, 4095),
+  PD("ringnear", PT_U16, ringNear, 20, 1023),
   PD("ringdebounce", PT_U8, ringDebounce, 1, 10),
   PD("ringfov", PT_U8, ringFovHalf, 10, 90),
   PD("ringblend", PT_U8, ringBlend, 10, 120),
-  PD("ringmaxgap", PT_U8, ringMaxGap, 30, 250),
+  PD("ringmaxgap", PT_U16, ringMaxGap, 30, 360),
   PD("ringrailms", PT_U16, ringRailMs, 200, 20000),
-  PD("ringrailhi", PT_U16, ringRailHi, 2000, 4095),
+  PD("ringrailhi", PT_U16, ringRailHi, 500, 1023),
   PD("modenable", PT_U8, modEnable, 0, 3),
-  PD("modactivelow", PT_U8, modActiveLow, 0, 1),
+  PD("modactivelow", PT_U8, modActiveLow, 0, 3),
   PD("moddebounce", PT_U8, modDebounce, 1, 20),
   PD("modneedring", PT_U8, modNeedRing, 0, 1),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
@@ -177,13 +166,6 @@ static const ParamDef PARAMS[] = {
   PD("shoothold", PT_U16, shootHoldMs, 50, 3000),
   PD("shootcooldown", PT_U16, shootCooldownMs, 500, 20000),
   PD("snapms", PT_U16, snapshotMs, 50, 5000),
-  PD("detailms", PT_U16, detailMs, 0, 5000),
-  PD("filemax", PT_U32, fileMaxBytes, 4096, 262144),
-  PD("maxfiles", PT_U8, maxFiles, 2, 16),
-  PD("fsreserve", PT_U32, fsReserveBytes, 16384, 1048576),
-  PD("flushms", PT_U16, flushMs, 500, 10000),
-  PD("frms", PT_U16, frPeriodMs, 20, 1000),
-  PD("frpost", PT_U16, frPostMs, 0, 10000),
   PD("streamms", PT_U16, streamMs, 100, 5000),
   PD("recoverms", PT_U16, recoverVerifyMs, 500, 30000),
 };
@@ -210,10 +192,11 @@ static void paramSet(Config& c, const ParamDef& p, float val) {
     case PT_F32: memcpy(b, &val, 4); break;
   }
 }
-static const ParamDef* paramFind(const char* name) {
+static void paramAt(size_t i, ParamDef* out) { memcpy_P(out, &PARAMS[i], sizeof(ParamDef)); }
+static bool paramFind(const char* name, ParamDef* out) {
   for (size_t i = 0; i < PARAM_COUNT; i++)
-    if (strcmp(PARAMS[i].name, name) == 0) return &PARAMS[i];
-  return nullptr;
+    if (strcmp_P(name, (PGM_P)PARAMS[i].name) == 0) { paramAt(i, out); return true; }
+  return false;
 }
 static bool paramInRange(const ParamDef& p, float v) {
   return isfinite(v) && v >= p.lo && v <= p.hi;
@@ -225,7 +208,6 @@ static void cfgDefaults(Config& c) {
   c.version = CFG_VERSION;
   c.size = (uint16_t)sizeof(Config);
   c.rollerO = 0;
-  c.pwmFreq = 5000;
   c.maxManual = 150;
   c.maxAuto = 170;
   c.minPwm = 40;
@@ -234,17 +216,17 @@ static void cfgDefaults(Config& c) {
   c.decelPwmPerS = 1200;
   c.reverseDeadMs = 60;
   c.manualHoldMs = 600;
-  c.ringEnable = 0x0FFF;
+  c.ringEnable = 0x0003;         // A0 and A1 (the two fitted phototransistors)
   for (int i = 0; i < RING_CH_MAX; i++) {
-    // PLACEHOLDER layout: C0..C11 evenly spaced every 30 deg starting straight ahead, going clockwise. The real mounting angles are not known to the
-    // firmware: set them with ':ring bearing <ch> <deg>'. C12/C14 are guessed as right-looking, C13/C15 as left-looking (not fitted: disabled).
-    c.ringBearing[i] = (i < RING_CH_FIXED) ? (int16_t)(i <= 6 ? i * 30 : i * 30 - 360) : (int16_t)((i & 1) ? -90 : 90);
+    // PLACEHOLDER: the firmware does not know where the receivers look. All channels default to straight ahead (0 deg): the robot then sees THAT a ball is
+    // in front but cannot tell left from right. Set the real mounting angles with ':ring bearing <ch> <deg>' (0 = ahead, + = right, +-180 = behind).
+    c.ringBearing[i] = 0;
     c.ringNoise[i] = 0;
   }
   c.ringCalDone = 0;             // autonomy is refused until ':ring cal noise' has been run
-  c.ringWinUs = 900; c.ringSettleUs = 30; c.ringSeen = 80; c.ringNoiseX10 = 30; c.ringNear = 1500; c.ringDebounce = 2;
-  c.ringFovHalf = 45; c.ringBlend = 65; c.ringMaxGap = 90; c.ringRailMs = 2000; c.ringRailHi = 4000;
-  c.modEnable = 1; c.modActiveLow = 1; c.modDebounce = 3; c.modNeedRing = 1;
+  c.ringWinUs = 900; c.ringSeen = 20; c.ringNoiseX10 = 30; c.ringNear = 375; c.ringDebounce = 2;
+  c.ringFovHalf = 45; c.ringBlend = 100; c.ringMaxGap = 360; c.ringRailMs = 2000; c.ringRailHi = 1000;
+  c.modEnable = 1; c.modActiveLow = 3; c.modDebounce = 3; c.modNeedRing = 1;
   c.lostHoldMs = 300;
   c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;
   c.approachSpeed = 0.5f;
@@ -267,13 +249,6 @@ static void cfgDefaults(Config& c) {
   c.goalRegisterMs = 5000; c.goalWidthMm = 450; c.goalDistMm = 1000; c.ballDiaMm = 43; c.aimSpeed = 0.5f; c.aimTimeoutMs = 3000;
   c.shootEnable = 0; c.shootPwm = 255; c.shootParallel = 1; c.shootBackMs = 150; c.shootBackSpeed = 0.7f; c.shootDriveMs = 400; c.shootHoldMs = 100; c.shootCooldownMs = 3000;
   c.snapshotMs = 250;
-  c.detailMs = 0;
-  c.fileMaxBytes = 65536;
-  c.maxFiles = 4;
-  c.fsReserveBytes = 65536;
-  c.flushMs = 2000;
-  c.frPeriodMs = 100;
-  c.frPostMs = 2000;
   c.streamMs = 500;
   c.recoverVerifyMs = 3000;
 }
@@ -285,23 +260,30 @@ static bool cfgCrcOk(const Config& c) {
   return c.crc == crc32Update(0, (const uint8_t*)&c, offsetof(Config, crc));
 }
 
-static void repNote(char* rep, size_t n, const char* what) {
+// Appends a field name (in flash) to the comma-separated report. Use the REPN macro with a literal.
+static void repNoteP(char* rep, size_t n, PGM_P what) {
   size_t l = strlen(rep);
-  if (l + strlen(what) + 2 >= n) return;
+  if (l + strlen_P(what) + 2 >= n) return;
   if (l) { rep[l++] = ','; rep[l] = 0; }
-  strcat(rep, what);
+  strcpy_P(rep + l, what);
 }
+#define repNote(rep, n, lit) repNoteP((rep), (n), PSTR(lit))
 
 // Replace every out-of-range / non-finite field with its safe default. Returns the number of
 // fields replaced; `rep` receives a comma-separated list of the names.
 static int cfgValidate(Config& c, char* rep, size_t repN) {
-  static Config d;                         // loop-task only; keeps 0.5 KB off the stack
+  Config d;                                // on the stack: 8 KB of RAM leave no room for a static copy
   cfgDefaults(d);
   int bad = 0;
   if (repN) rep[0] = 0;
   for (size_t i = 0; i < PARAM_COUNT; i++) {
-    const ParamDef& p = PARAMS[i];
-    if (!paramInRange(p, paramGet(c, p))) { paramSet(c, p, paramGet(d, p)); bad++; repNote(rep, repN, p.name); }
+    ParamDef p;
+    paramAt(i, &p);
+    if (!paramInRange(p, paramGet(c, p))) {
+      paramSet(c, p, paramGet(d, p)); bad++;
+      size_t l = strlen(rep);
+      if (l + strlen(p.name) + 2 < repN) { if (l) { rep[l++] = ','; rep[l] = 0; } strcpy(rep + l, p.name); }
+    }
   }
   for (int i = 0; i < WHEEL_COUNT; i++)
     if (c.reverse[i] > 1) { c.reverse[i] = 0; bad++; repNote(rep, repN, "reverse"); }
@@ -320,7 +302,7 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   if (c.centerDeg >= c.turnDeg) { c.centerDeg = d.centerDeg; c.turnDeg = d.turnDeg; bad++; repNote(rep, repN, "centerdeg/turndeg"); }
   for (int i = 0; i < RING_CH_MAX; i++) {
     if (c.ringBearing[i] < -180 || c.ringBearing[i] > 180) { c.ringBearing[i] = d.ringBearing[i]; bad++; repNote(rep, repN, "ringbearing"); }
-    if (c.ringNoise[i] > 4095) { c.ringNoise[i] = 0; bad++; repNote(rep, repN, "ringnoise"); }
+    if (c.ringNoise[i] > 1023) { c.ringNoise[i] = 0; bad++; repNote(rep, repN, "ringnoise"); }
   }
   if (c.ringCalDone > 1) { c.ringCalDone = 0; bad++; repNote(rep, repN, "ringcaldone"); }
   if (c.ballDiaMm * 2 >= c.goalWidthMm) { c.ballDiaMm = d.ballDiaMm; c.goalWidthMm = d.goalWidthMm; bad++; repNote(rep, repN, "balldia/goalwidth"); }

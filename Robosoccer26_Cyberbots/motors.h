@@ -4,12 +4,8 @@
 #include "config.h"
 #include "health.h"
 
-// ---- LEDC wrapper: Arduino-ESP32 2.x (channel based) vs 3.x (pin based) ----------------
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  #define LEDC_API_V3 1
-#else
-  #define LEDC_API_V3 0
-#endif
+// PWM: analogWrite() on the Mega's hardware PWM pins (D5 and D6 use Timer3 / Timer4, D9 and D10 Timer2; about 490 Hz).
+// Resolution is 8 bits (0..255), the same scale the rest of the firmware uses.
 static const uint8_t PWM_BITS = 8;
 static const uint16_t PWM_MAX = 255;
 
@@ -27,15 +23,11 @@ static uint32_t g_motorsStoppedSinceMs;
 
 static void pwmWrite(uint8_t wheel, uint32_t duty) {
   if (!g_pwmAttached[wheel]) return;
-#if LEDC_API_V3
-  ledcWrite(WHEEL_PINS[wheel].en, duty);
-#else
-  ledcWrite(wheel, duty);   // 2.x: LEDC channel number == wheel index
-#endif
+  analogWrite(WHEEL_PINS[wheel].en, (int)duty);
 }
 
-// Called first thing in setup(): every motor pin becomes a LOW output (coasting driver).
-// External pull-downs are still required for the window before this runs (see docs).
+// Called first thing in setup(): every motor pin becomes a LOW output (coasting driver). Until this runs the AVR pins are high-impedance inputs
+// (reset state), so the L298N inputs need external pull-downs for the first moments after power-up and during the bootloader (see docs).
 static void motorsPinsSafe() {
   for (int i = 0; i < WHEEL_COUNT; i++) {
     pinMode(WHEEL_PINS[i].in1, OUTPUT); digitalWrite(WHEEL_PINS[i].in1, LOW);
@@ -48,23 +40,17 @@ static void motorsPinsSafe() {
   g_motorsEnabled = false;
 }
 
-// Attach PWM to the enable pins (duty 0). Returns false and raises F_MOTOR_INIT on failure.
+// Check that every enable pin is a hardware PWM pin and start it at duty 0. Returns false and raises F_MOTOR_INIT otherwise.
 static bool motorsAttachPwm(const Config& c) {
+  (void)c;
   bool ok = true;
   for (int i = 0; i < WHEEL_COUNT; i++) {
-#if LEDC_API_V3
-    bool a = ledcAttach(WHEEL_PINS[i].en, c.pwmFreq, PWM_BITS);
-    if (!a) ok = false;
-    g_pwmAttached[i] = a;
-#else
-    uint32_t f = ledcSetup(i, c.pwmFreq, PWM_BITS);   // returns the achieved frequency, 0 on failure
-    if (f == 0) { ok = false; g_pwmAttached[i] = false; continue; }
-    ledcAttachPin(WHEEL_PINS[i].en, i);
-    g_pwmAttached[i] = true;
-#endif
+    bool pwmPin = digitalPinToTimer(WHEEL_PINS[i].en) != NOT_ON_TIMER;
+    g_pwmAttached[i] = pwmPin;
+    if (!pwmPin) ok = false;
     pwmWrite((uint8_t)i, 0);
   }
-  if (!ok) faultRaise(F_MOTOR_INIT, "LEDC attach failed on at least one enable pin");
+  if (!ok) faultRaise(F_MOTOR_INIT, "a motor enable pin is not a PWM pin");
   return ok;
 }
 

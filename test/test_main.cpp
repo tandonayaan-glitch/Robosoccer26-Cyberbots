@@ -22,10 +22,10 @@ static void simRun(uint32_t ms, uint32_t loopCostUs = 50) {
 static void send(const char* s) { Serial.feed(s); }
 static bool outHas(const char* s) { return Serial.out.find(s) != std::string::npos; }
 static int outCount(const char* s) { int n = 0; size_t p = 0; while ((p = Serial.out.find(s, p)) != std::string::npos) { n++; p += strlen(s); } return n; }
-static void freshFs(const char* name) {
-  g_fsDir = std::string("/tmp/mockfs_") + name;
-  std::string cmd = "rm -rf " + g_fsDir;
-  if (system(cmd.c_str()) != 0) {}
+static void freshEeprom(const char* name) {          // a private EEPROM image per test case; erased (0xFF) unless the file already exists
+  g_eepromPath = std::string("/tmp/mockeeprom_") + name;
+  ::remove(g_eepromPath.c_str());
+  EEPROM.reset();
 }
 static int wheelDir(int i) {
   int a = g_pinLevel[WHEEL_PINS[i].in1], b = g_pinLevel[WHEEL_PINS[i].in2];
@@ -44,7 +44,7 @@ static bool anyWheelEverMoved = false;
 static float g_tBrg = 0.0f;
 static void ballAt(float deg, float strength = 0.4f) {
   g_tBrg = deg;
-  for (int ch = 0; ch < 16; ch++) {
+  for (int ch = 0; ch < 8; ch++) {
     float d = absf(angDiffDeg((float)g_cfg.ringBearing[ch], deg));
     float f = d < (float)g_cfg.ringFovHalf ? cosf(d / (float)g_cfg.ringFovHalf * 1.5707963f) : 0.0f;
     g_mockRingBase[ch] = 300;
@@ -55,7 +55,12 @@ static void ballGone() { ballAt(0.0f, 0.0f); g_mockModDetect[0] = false; }
 static void ballFar() { ballAt(0.0f, 0.35f); g_mockModDetect[0] = false; }          // ahead, not near
 static void ballHeld() { ballAt(0.0f, 1.0f); g_mockModDetect[0] = true; }           // ahead, front module detecting: the shooting position
 static void calibrateAll() { g_cfg.ringCalDone = 1; }
-static void bootCal() { ballGone(); setup(); calibrateAll(); }
+// The default configuration has only A0 and A1 (both "straight ahead"). Most tests want 8 receivers 45 deg apart: A0 = 0 deg, clockwise.
+static void layout8() {
+  g_cfg.ringEnable = 0x00FF;
+  for (int i = 0; i < 8; i++) g_cfg.ringBearing[i] = (int16_t)(i <= 4 ? i * 45 : i * 45 - 360);
+}
+static void bootCal() { ballGone(); setup(); layout8(); calibrateAll(); }
 static bool wheelsMatchStrafeRight() { return wheelDir(W_FL) > 0 && wheelDir(W_FR) < 0 && wheelDir(W_BL) < 0 && wheelDir(W_BR) > 0; }
 static void trackWheelMotion() { if (!allWheelsStopped()) anyWheelEverMoved = true; }
 static void simRunTracking(uint32_t ms) {
@@ -70,26 +75,63 @@ static void startAuto() {
 // ================================================================================================
 // pure logic
 
-static uint32_t parseExportAndCrc(const std::string& out, const char* beginTag, bool* ok, int* lines) {
-  *ok = false; *lines = 0;
-  size_t b = out.find(beginTag);
-  if (b == std::string::npos) return 0;
-  size_t s = out.find('\n', b) + 1;
-  size_t e = out.find("#END-EXPORT", s);
-  if (e == std::string::npos) return 0;
-  uint32_t crc = 0; int n = 0;
-  size_t p = s;
-  while (p < e) {
-    size_t nl = out.find('\n', p);
-    std::string line = out.substr(p, nl - p + 1);
-    if (line[0] != '[') { crc = crc32Update(crc, (const uint8_t*)line.data(), line.size()); n++; }
-    p = nl + 1;
+
+// The firmware's own printf (compat.h) replaces avr-libc's, which has no floating point: it must agree with the C library on everything the firmware prints.
+static void fmtCheck(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+static void fmtCheck(const char* fmt, ...) {
+  char a[96], b[96];
+  va_list ap, ap2;
+  va_start(ap, fmt); va_copy(ap2, ap);
+  vsnprintf(a, sizeof(a), fmt, ap);
+  rsFormat(b, sizeof(b), fmt, false, ap2);
+  va_end(ap); va_end(ap2);
+  g_checks++;
+  if (strcmp(a, b) != 0) { g_fail++; printf("  FAIL fmt '%s': libc '%s' vs rsFormat '%s'\n", fmt, a, b); }
+}
+static void t_minifmt() {
+  fmtCheck("%d|%i|%u|%x|%X|%04X|%02x|%c|%%", -42, 7, 65535u, 0xBEEF, 0xBEEF, 0x2F, 0xA, 'Z');
+  fmtCheck("%ld|%lu|%lx|%08lX", -123456L, 4000000000UL, 0xDEADBEEFUL, 0xABCUL);
+  fmtCheck("[%5d][%-5d][%05d][%+d][% d]", 42, 42, 42, 42, 42);
+  fmtCheck("[%5u][%-5u][%3s][%-6s][%.2s]", 7u, 7u, "ab", "ab", "abcdef");
+  fmtCheck("%.0f|%.1f|%.2f|%.3f|%5.1f|%-8.2f|%08.3f", 2.6, 2.54, 2.555, -0.0004, 3.14159, 3.14159, -3.14159);
+  fmtCheck("%.1f|%.2f|%.0f", 0.05, 99.995, 0.4);
+  fmtCheck("%f|%6.2f|%.2f", 1.5, 100.0, 1234567.891);
+  fmtCheck("%g|%g|%g|%g", 0.5, 12.0, 0.1, 300.0);
+  fmtCheck("%.1f %.1f", 360.0, -180.0);
+  fmtCheck("%s|%s", "", "x");
+  fmtCheck("%-2u|%3.0f|%4.0f", 3u, 12.6, 7.0);
+  char buf[8];
+  rsSnprintfP(buf, sizeof(buf), "%s", "0123456789");                    // truncation is safe and terminated
+  CHECK(strlen(buf) == 7 && buf[7] == 0);
+  CHECK(rsSnprintfP(buf, 0, "x") == 0);
+}
+
+// A long report is longer than the 512-byte output queue: it must come out complete, in order, once, and the main loop must not stall while it prints.
+static void t_report_paced() {
+  bootCal();
+  simRun(300);
+  Serial.out.clear();
+  send("h");
+  uint64_t worst = 0;
+  for (int k = 0; k < 40000 && Serial.out.size() < 20000; k++) {
+    uint64_t t0 = g_mockUs; loop(); uint64_t dt = g_mockUs - t0; if (dt > worst) worst = dt; mockAdvance(50);
+    if (outHas("limits: no wheel feedback") && outHas("========================================================")) break;
   }
-  unsigned want = 0; int wl = 0;
-  sscanf(out.c_str() + e, "#END-EXPORT lines=%d crc32=%x", &wl, &want);
-  *ok = (want == crc) && wl == n;
-  *lines = n;
-  return crc;
+  simRun(300);
+  CHECK(outCount("HARDWARE HEALTH REPORT") == 1);                        // once, not repeated by the paging
+  CHECK(outCount("========================================================") == 1);   // the closing line, once
+  CHECK(outHas("[Ring] receivers on A0..A7") && outHas("stats: shots=") && outHas("limits: no wheel feedback"));
+  CHECK(worst < 900);                                                    // never a wait on Serial while it printed
+  CHECK(g_outDropped == 0);
+  // every line is complete: each '[' line start is preceded by a newline
+  size_t pos = 0; bool ok = true;
+  while ((pos = Serial.out.find("[INFO] ", pos)) != std::string::npos) { if (pos != 0 && Serial.out[pos - 1] != '\n') ok = false; pos += 7; }
+  CHECK(ok);
+  // the other long reports
+  Serial.out.clear(); send("?"); simRun(1500);
+  CHECK(outHas("commands (115200 baud)") && outHas("Safety: first motor tests"));
+  Serial.out.clear(); send("i"); simRun(1500);
+  CHECK(outHas("ball receivers: 8 of 8") && outHas("IR module 1 D35") && outHas("a module reacts to ANY reflective object"));
 }
 
 static void t_angles() {
@@ -160,19 +202,19 @@ static void t_mecanum() {
 
 static void t_pinmap() {
   // Independent copy of the specified wiring (not taken from pins.h).
-  struct Spec { int in1, in2, en; } spec[4] = {{18, 19, 23}, {25, 26, 33}, {21, 22, 5}, {27, 14, 32}};  // FL FR BL BR
+  struct Spec { int in1, in2, en; } spec[4] = {{26, 27, 9}, {22, 23, 5}, {28, 29, 10}, {24, 25, 6}};  // FL FR BL BR (Mega D numbers)
   for (int i = 0; i < 4; i++) {
     CHECK(WHEEL_PINS[i].in1 == spec[i].in1 && WHEEL_PINS[i].in2 == spec[i].in2 && WHEEL_PINS[i].en == spec[i].en);
   }
-  // multiplexer: S0 GPIO4, S1 GPIO13, S2 GPIO2, S3 GPIO15 (moved off the boot-critical GPIO12 / GPIO0), SIG GPIO34; modules on GPIO35 / GPIO36 (approved)
-  CHECK(PIN_MUX_SEL[0] == 4 && PIN_MUX_SEL[1] == 13 && PIN_MUX_SEL[2] == 2 && PIN_MUX_SEL[3] == 15 && P_MUX_SIG == 34);
-  for (int k = 0; k < 4; k++) CHECK(PIN_MUX_SEL[k] != 0 && PIN_MUX_SEL[k] != 12);          // never the boot-mode / flash-voltage strapping pins
-  CHECK(PIN_MOD[0] == 35 && PIN_MOD[1] == 36);
-  for (int k = 0; k < 4; k++) {
-    for (int i = 0; i < 4; i++) CHECK(PIN_MUX_SEL[k] != WHEEL_PINS[i].in1 && PIN_MUX_SEL[k] != WHEEL_PINS[i].in2 && PIN_MUX_SEL[k] != WHEEL_PINS[i].en);
-    CHECK(PIN_MUX_SEL[k] != PIN_I2C_SDA && PIN_MUX_SEL[k] != PIN_I2C_SCL);
-  }
-  CHECK(PIN_I2C_SDA == 16 && PIN_I2C_SCL == 17);
+  // receivers on A0..A7 (pins 54..61), each its own analog input; modules D34 / D35; MPU6050 on the Mega hardware I2C pins D20 / D21
+  for (int k = 0; k < 8; k++) CHECK(PIN_RECV[k] == A0 + k && PIN_RECV[k] >= 54 && PIN_RECV[k] <= 61);
+  CHECK(PIN_RECV[0] == A0 && PIN_RECV[1] == A0 + 1 && A0 == 54);
+  CHECK(PIN_MOD[0] == 34 && PIN_MOD[1] == 35);
+  for (int i = 0; i < 4; i++) CHECK(digitalPinToTimer(WHEEL_PINS[i].en));                  // D5, D6, D9, D10 are PWM-capable
+  for (int k = 0; k < 2; k++) CHECK(PIN_MOD[k] != PIN_I2C_SDA && PIN_MOD[k] != PIN_I2C_SCL && PIN_MOD[k] != 0 && PIN_MOD[k] != 1);
+  for (int k = 0; k < 2; k++) for (int i = 0; i < 4; i++) CHECK(PIN_MOD[k] != WHEEL_PINS[i].in1 && PIN_MOD[k] != WHEEL_PINS[i].in2 && PIN_MOD[k] != WHEEL_PINS[i].en);
+  for (int k = 30; k <= 33; k++) { bool used = false; for (int i = 0; i < 4; i++) used |= k == WHEEL_PINS[i].in1 || k == WHEEL_PINS[i].in2 || k == WHEEL_PINS[i].en; CHECK(!used); }   // D30..D33 are free (no multiplexer)
+  CHECK(PIN_I2C_SDA == 20 && PIN_I2C_SCL == 21);
   setup();
   for (int w = 0; w < 4; w++) {
     for (int rev = 0; rev < 2; rev++) {
@@ -200,7 +242,7 @@ static void t_pinmap() {
 
 static void t_boot_safe() {
   // pins are LOW before anything else runs
-  for (int i = 0; i < 64; i++) g_pinLevel[i] = 1;     // pretend the pins floated high
+  for (int i = 0; i < 70; i++) g_pinLevel[i] = 1;     // pretend the pins floated high
   motorsPinsSafe();
   for (int i = 0; i < 4; i++) CHECK(g_pinLevel[WHEEL_PINS[i].in1] == 0 && g_pinLevel[WHEEL_PINS[i].in2] == 0 && g_pinLevel[WHEEL_PINS[i].en] == 0);
   CHECK(!g_motorsEnabled);
@@ -215,7 +257,6 @@ static void t_boot_safe() {
   CHECK(!anyWheelEverMoved);
   CHECK(!g_autoEnabled);
   CHECK(outHas("autonomous mode: DISABLED"));
-  CHECK(outHas("reset reason: POWERON"));
 }
 
 static void t_ramp() {
@@ -276,43 +317,59 @@ static void t_config() {
   Config d; cfgDefaults(d);
   c.ringSeen = 5000;               CHECK(cfgValidate(c, rep, sizeof(rep)) == 1 && c.ringSeen == d.ringSeen && strstr(rep, "ringseen"));
   c.maxAuto = 0;                   CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.maxAuto == d.maxAuto);
-  c.pwmFreq = 60000;               CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.pwmFreq == d.pwmFreq);
+  c.ringRailHi = 100;               CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ringRailHi == d.ringRailHi);   // below the allowed range
   c.reverse[2] = 7;                CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.reverse[2] == 0);
   c.ringBearing[4] = 400;          CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ringBearing[4] == d.ringBearing[4]);
-  c.ringSeen = 1600; c.ringNear = 1500; CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ringSeen < c.ringNear);   // "seen" above "very close" is impossible
+  c.ringSeen = 400; c.ringNear = 300; CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.ringSeen < c.ringNear);   // "seen" above "very close" is impossible
   c.minPwm = 200; c.maxManual = 100; CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.minPwm < c.maxManual);
   c.imuYawSign = 3;                CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.imuYawSign == -1);
   c.imuAddrPref = 0x30;            CHECK(cfgValidate(c, rep, sizeof(rep)) >= 1 && c.imuAddrPref == 0);
   CHECK(cfgValidate(c, rep, sizeof(rep)) == 0);
   // every default is inside its own declared range
-  for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(paramInRange(PARAMS[i], paramGet(d, PARAMS[i])));
-  // CRC / persistence
-  freshFs("config");
-  CHECK(fsInit());
-  Config s; cfgDefaults(s); s.maxAuto = 123; s.ringNear = 900; s.ringBearing[2] = 75;
+  for (size_t i = 0; i < PARAM_COUNT; i++) { ParamDef p; paramAt(i, &p); CHECK(paramInRange(p, paramGet(d, p))); }
+  // CRC / persistence in the EEPROM
+  freshEeprom("config");
+  Config l;
+  CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_NOFILE && l.maxAuto == d.maxAuto);            // erased EEPROM (0xFF) = no saved config
+  Config s; cfgDefaults(s); s.maxAuto = 123; s.ringNear = 300; s.ringBearing[2] = 75;
   CHECK(cfgSave(s));
-  Config l; CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_OK);
-  CHECK(l.maxAuto == 123 && l.ringNear == 900 && l.ringBearing[2] == 75);
-  // corrupt one byte in the middle -> CRC failure -> defaults + reported
-  { std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "r+b"); fseek(f, 40, SEEK_SET); fputc(0xAB, f); fclose(f); }
+  CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_OK);
+  CHECK(l.maxAuto == 123 && l.ringNear == 300 && l.ringBearing[2] == 75);
+  EEPROM.mem[40] ^= 0xAB; EEPROM.flush();                                                // corrupt one byte -> CRC failure -> defaults
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADCRC && l.maxAuto == d.maxAuto);
-  // wrong version
-  { Config v; cfgDefaults(v); v.version = 99; cfgSeal(v); std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
+  { Config v; cfgDefaults(v); v.version = 99; cfgSeal(v); EEPROM.put(0, v); }
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADVERSION);
-  { Config v; cfgDefaults(v); v.magic = 1; cfgSeal(v); std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
+  { Config v; cfgDefaults(v); v.magic = 1; cfgSeal(v); EEPROM.put(0, v); }
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADMAGIC);
-  { std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite("short", 1, 5, f); fclose(f); }
-  CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_BADSIZE && l.maxAuto == d.maxAuto);
-  // valid CRC but invalid field -> repaired, others kept
-  { Config v; cfgDefaults(v); v.maxManual = 111; v.ringSeen = 5000; cfgSeal(v); std::string p = g_fsDir + "/config.bin"; FILE* f = fopen(p.c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
+  { Config v; cfgDefaults(v); v.maxManual = 111; v.ringSeen = 5000; cfgSeal(v); EEPROM.put(0, v); }   // valid CRC but an invalid field -> repaired, others kept
   CHECK(cfgLoad(l, rep, sizeof(rep)) == CL_REPAIRED && l.maxManual == 111 && l.ringSeen == d.ringSeen && strstr(rep, "ringseen"));
   // never persist invalid settings
   Config bad; cfgDefaults(bad); bad.ringSeen = 5000;
   CHECK(!cfgSave(bad));
   // pins are not part of the configuration: no parameter name can touch them
-  for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(strstr(PARAMS[i].name, "gpio") == nullptr && strncmp(PARAMS[i].name, "pin", 3) != 0);
-  // and no ParamDef offset can reach outside the Config struct
-  for (size_t i = 0; i < PARAM_COUNT; i++) CHECK(PARAMS[i].off + 1 <= offsetof(Config, crc));
+  for (size_t i = 0; i < PARAM_COUNT; i++) { ParamDef p; paramAt(i, &p); CHECK(strstr(p.name, "gpio") == nullptr && strncmp(p.name, "pin", 3) != 0); }
+  // and no ParamDef offset can reach outside the Config struct (and every name fits the 16-byte field)
+  for (size_t i = 0; i < PARAM_COUNT; i++) { ParamDef p; paramAt(i, &p); CHECK(p.off + 1u <= offsetof(Config, crc) && strlen(p.name) < sizeof(p.name)); }
+  CHECK(sizeof(Config) < 400);                                   // the EEPROM image and the RAM copy stay small
+}
+
+// A "reboot" (power cycle): the EEPROM image survives, everything else restarts from setup(). Settings, calibrations and mounting angles come back;
+// autonomy and the motors are off again.
+static void t_config_survives_reboot() {
+  bootCal();
+  simRun(300);
+  send(":set maxauto 133\n"); send(":rev BL 1\n"); send(":mok FL\n"); send(":ring bearing 1 25\n"); send(":ring on 4\n"); send(":mod level 1 high\n"); send(":set ringnear 300\n");
+  send(":save\n");
+  simRun(300);
+  startAuto();
+  CHECK(g_autoEnabled);
+  EEPROM.reset();                                           // power cycle: RAM is gone, the EEPROM file stays
+  g_autoEnabled = false; g_navState = NAV_IDLE;             // (the host process keeps its statics: emulate the RAM reset of the autonomy flag)
+  ballGone(); setup();
+  CHECK(!g_autoEnabled && g_navState == NAV_IDLE && allWheelsStopped());
+  CHECK(g_cfg.maxAuto == 133 && g_cfg.reverse[2] == 1 && (g_cfg.motorVerified & 1));
+  CHECK(g_cfg.ringBearing[1] == 25 && ringEnabled(g_cfg, 4) && g_cfg.ringNear == 300 && g_cfg.ringCalDone == 1 && (g_cfg.modActiveLow & 2) == 0);
+  CHECK(outHas("config: loaded OK"));
 }
 
 static void t_imu_integrate() {
@@ -447,7 +504,7 @@ static void t_safe_stop_moving() {
   ballAt(0);
   simRun(2500);
   CHECK(!allWheelsStopped());
-  for (int i = 0; i < 16; i++) g_mockRingBase[i] = 4095;    // whole ring at the top of the range: sensing lost
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;    // whole ring at the top of the range: sensing lost
   uint64_t t0 = g_mockUs;
   while (g_cond != COND_SAFE_STOP && g_mockUs - t0 < 30000000ULL) { loop(); mockAdvance(50); }
   CHECK(g_cond == COND_SAFE_STOP);
@@ -478,45 +535,8 @@ static void t_loop_stall() {
   CHECK(!g_autoEnabled);                                    // explicit 'a' still required
 }
 
-static void t_resets() {
-  g_mockReset = ESP_RST_BROWNOUT;
-  setup();
-  CHECK(faultActive(F_BROWNOUT_RESET));
-  CHECK(!g_autoEnabled && g_navState == NAV_IDLE && allWheelsStopped());
-  CHECK(outHas("BROWNOUT"));
-  CHECK(g_cond == COND_NORMAL);                             // a warning, not a degradation
-  simRun(5000);
-  CHECK(!g_autoEnabled && allWheelsStopped());
-  send(":recover\n"); simRun(100);
-  CHECK(!faultActive(F_BROWNOUT_RESET));
-}
 
-static void t_fault_report_format() {
-  bootCal();
-  simRun(500);
-  Serial.out.clear();
-  g_mpu.mode = 1;
-  simRun(1500);
-  // timestamp, severity, component, code, evidence, certainty, action, mode, recovery
-  CHECK(outHas("IMU_TIMEOUT sev=DEGRADED comp=MPU6050 evidence=\""));
-  CHECK(outHas("certainty=\"bus errors observed; cause unproven\""));
-  CHECK(outHas("action=\"heading hold disabled, retrying init\" mode=DEGRADED recovery=automatic when verified"));
-  size_t p = Serial.out.find("IMU_TIMEOUT sev=");
-  CHECK(p != std::string::npos && Serial.out.rfind("[WARN] ", p) != std::string::npos);     // tag + timestamp prefix
-  // repeated identical warnings do not flood the port
-  simRun(20000);
-  CHECK(outCount("IMU_TIMEOUT sev=") == 1);
-  CHECK(outCount("IMU_TIMEOUT still active") <= 3);
-  // snapshot rows carry drop / write-failure counters
-  CHECK(g_logDropped == 0);
-}
 
-static void t_reset_wdt() {
-  g_mockReset = ESP_RST_TASK_WDT;
-  setup();
-  CHECK(faultActive(F_ABNORMAL_RESET) && !g_autoEnabled && allWheelsStopped());
-  CHECK(outHas("TASK_WDT"));
-}
 
 static void t_cli_manual() {
   bootCal();
@@ -612,10 +632,9 @@ static void t_diag_no_motion() {
   ballAt(0);
   simRunTracking(1500);
   CHECK(!anyWheelEverMoved);
-  CHECK(outHas("ball ring: CD74HC4067") && outHas("MPU6050"));
+  CHECK(outHas("ball receivers: ") && outHas("MPU6050"));
   CHECK(outHas("HARDWARE HEALTH REPORT"));
   CHECK(outHas("state=IDLE"));
-  CHECK(outHas("persist=ON"));
   CHECK(outHas("TEST MODE"));
   CHECK(outHas("commands (115200 baud)"));
   CHECK(outHas("signal STRENGTH"));
@@ -634,13 +653,13 @@ static void t_motor_test() {
   CHECK(outHas("LIFT THE WHEELS"));
   send(":confirm\n"); simRun(500);
   CHECK(wheelDir(W_FL) > 0 && wheelDir(W_FR) == 0 && wheelDir(W_BL) == 0 && wheelDir(W_BR) == 0);
-  CHECK(g_pwmDuty[23] > 0 && g_pwmDuty[23] <= g_cfg.testPwm);
+  CHECK(g_pwmDuty[WHEEL_PINS[W_FL].en] > 0 && g_pwmDuty[WHEEL_PINS[W_FL].en] <= g_cfg.testPwm);
   simRun(1300);                                             // pause then reverse
   simRun(800);
   CHECK(wheelDir(W_FL) < 0 && wheelDir(W_FR) == 0);
   simRun(4000);
   CHECK(allWheelsStopped() && g_mtest.state == 0 && g_navState == NAV_IDLE);
-  CHECK(outHas("Did the wheel turn FORWARD"));
+  CHECK(outHas("Did it turn FORWARD"));
   send(":mrev FL\n"); simRun(10);
   CHECK(g_cfg.reverse[0] == 1 && !(g_cfg.motorVerified & 1));
   send(":mok FL\n"); simRun(10);
@@ -658,7 +677,7 @@ static void t_motor_test() {
   send("s"); simRun(20);
   CHECK(allWheelsStopped() && g_mtest.state == 0);
   // motor test while in SAFE_STOP due to a sensing fault is allowed on the bench
-  for (int i = 0; i < 16; i++) g_mockRingBase[i] = 4095;    // ring wiring fault
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;    // ring wiring fault
   simRun(g_cfg.ringRailMs + 600);
   CHECK(g_cond == COND_SAFE_STOP);
   send(":mtest FR\n"); simRun(100); send(":confirm\n"); simRun(400);
@@ -686,85 +705,9 @@ static void t_drive_test() {
   CHECK(outHas("drivetrain test finished"));
 }
 
-static void t_fs_commands() {
-  freshFs("fscmd");
-  bootCal();
-  simRun(500);
-  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "w"); fputs("x", f); fclose(f); }
-  anyWheelEverMoved = false;
-  send(":fsformat\n"); simRunTracking(200);
-  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f != nullptr); if (f) fclose(f); }   // refused without CONFIRM
-  CHECK(outHas("ERASES"));
-  send(":fsformat confirm\n"); simRunTracking(200);          // wrong case: still refused
-  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f != nullptr); if (f) fclose(f); }
-  startAuto(); ballAt(0); simRun(2000);
-  CHECK(!allWheelsStopped());
-  int wd = g_wdtDeleted;
-  send(":fsformat CONFIRM\n"); simRun(300);
-  { std::string p = g_fsDir + "/keep.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f == nullptr); if (f) fclose(f); }
-  CHECK(g_wdtDeleted == (int)wd + 1);
-  CHECK(outHas("format OK"));
-  CHECK(!g_autoEnabled && allWheelsStopped());               // motors were stopped for the operation
-  CHECK(!faultActive(F_LOOP_STALL));
-  CHECK(g_logPersist);
-  // :logdel keeps the file being written
-  g_cfg.flushMs = 500; g_cfg.fileMaxBytes = 4096; g_cfg.snapshotMs = 50;
-  for (int i = 0; i < 40; i++) { send("f"); simRun(500); }   // keep moving so snapshots are written at the fast rate
-  send(":logdel\n"); simRun(100);
-  CHECK(outHas("deletes old log files"));
-  uint8_t before = 0; { LogFile lf[LOG_LIST_MAX]; before = logList(lf); }
-  CHECK(before >= 2);
-  send(":logdel CONFIRM\n"); simRun(100);
-  { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); CHECK(n >= 1 && n < before + 1); }
-}
 
-static void t_gpio_tamper() {
-  bootCal();
-  simRun(300);
-  anyWheelEverMoved = false;
-  const char* cmds[] = {":set gpio 3\n", ":set pin 5\n", ":set in1 4\n", ":set pwmpin 3\n", ":set en 12\n", ":set muxsig 35\n",
-                        ":rev ZZ 1\n", ":mtest XX\n", ":set pwmfreq 99999999\n", ":set maxauto -5\n",
-                        ":set maxauto 1e99\n", ":set maxauto 0x20\n", ":ring on 99\n", ":ring bearing 3 nan\n", ":set ringseen nan\n", ":set ringseen inf\n"};
-  for (const char* c : cmds) { send(c); simRunTracking(60); }
-  CHECK(!anyWheelEverMoved);
-  CHECK(outCount("unknown") + outCount("usage") + outCount("rejected") + outCount("must be a number") >= 12);
-  struct { int a, b, e; } spec[4] = {{18, 19, 23}, {25, 26, 33}, {21, 22, 5}, {27, 14, 32}};
-  for (int i = 0; i < 4; i++) CHECK(WHEEL_PINS[i].in1 == spec[i].a && WHEEL_PINS[i].in2 == spec[i].b && WHEEL_PINS[i].en == spec[i].e);
-  CHECK(g_cfg.maxAuto == 170 && g_cfg.pwmFreq == 5000);
-  CHECK(g_cfg.ringNear == 1500);
-  // the persisted blob cannot carry pins either: sizes/offsets of the pin tables are not part of Config
-  CHECK(sizeof(Config) < 700);
-}
 
-static void t_cfg_boot_corrupt() {
-  freshFs("cfgcorrupt");
-  CHECK(fsInit());
-  { Config v; cfgDefaults(v); v.maxAuto = 222; v.reverse[0] = 1; cfgSeal(v); v.crc ^= 0xDEADBEEF;            // CRC no longer matches
-    FILE* f = fopen((g_fsDir + "/config.bin").c_str(), "wb"); fwrite(&v, sizeof(v), 1, f); fclose(f); }
-  setup();
-  CHECK(g_cfg.maxAuto == 170 && g_cfg.reverse[0] == 0);                  // safe defaults, corrupt values NOT used
-  CHECK(faultActive(F_CFG_REPLACED));
-  CHECK(outHas("CRC mismatch"));
-  CHECK(g_cond == COND_NORMAL && !g_autoEnabled && allWheelsStopped());   // a warning, not a degradation or a motion
-  calibrateAll();
-  simRun(500);
-  startAuto(); ballAt(0); simRun(2500);
-  CHECK(g_navState == NAV_APPROACH);                                      // fully usable with defaults
-}
 
-static void t_cfg_save_fail() {
-  bootCal();
-  simRun(500);
-  startAuto(); ballAt(0); simRun(2000);
-  g_fsFailWrites = true;
-  Serial.out.clear();
-  send(":save\n"); simRun(200);
-  CHECK(outHas("save FAILED"));
-  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());               // control unaffected by the failed operation
-  g_fsFailWrites = false;
-  send(":save\n"); simRun(200);
-  CHECK(outHas("configuration saved"));
-}
 
 static void t_cfg_set() {
   bootCal();
@@ -776,14 +719,14 @@ static void t_cfg_set() {
   send(":set minpwm 119\n"); simRun(50);                    // would exceed the speed limits: cross-field
   CHECK(g_cfg.minPwm == 40);
   send(":set ringseen nan\n"); simRun(50);
-  CHECK(g_cfg.ringSeen == 80);
+  CHECK(g_cfg.ringSeen == 20);
   send(":set nonsense 3\n"); simRun(50);
   send(":rev FR 1\n"); simRun(50);
   CHECK(g_cfg.reverse[1] == 1);
   send(":roller O\n"); simRun(50);
   CHECK(g_cfg.rollerO == 1);
   send(":set ringnear 5000\n"); simRun(50);
-  CHECK(g_cfg.ringNear == 1500);                            // rejected (range 50..4095)
+  CHECK(g_cfg.ringNear == 375);                             // rejected (range 20..1023)
   send(":set ringnear 700\n"); simRun(50);
   CHECK(g_cfg.ringNear == 700);
   send(":save\n"); simRun(100);
@@ -794,195 +737,12 @@ static void t_cfg_set() {
   CHECK(g_cfg.maxAuto == 150 && g_cfg.reverse[1] == 1 && g_cfg.rollerO == 1 && g_cfg.ringNear == 700);
 }
 
-static void t_fs_missing() {
-  freshFs("fsmissing");
-  mkdir(g_fsDir.c_str(), 0755);
-  { std::string p = g_fsDir + "/precious.txt"; FILE* f = fopen(p.c_str(), "w"); fputs("keep me", f); fclose(f); }
-  g_fsMountOk = false;
-  bootCal();
-  CHECK(!g_fsMounted && !g_logPersist);
-  CHECK(faultActive(F_FS_UNAVAILABLE) && g_cond == COND_DEGRADED);
-  CHECK(outHas("persistent logging OFF"));
-  { std::string p = g_fsDir + "/precious.txt"; FILE* f = fopen(p.c_str(), "r"); CHECK(f != nullptr); if (f) fclose(f); }   // never formatted
-  // everything else still works
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(2500);
-  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());
-  CHECK(g_frCount > 10);                                    // RAM recorder still running
-  send("g"); simRun(300);
-  CHECK(outHas("persist=OFF"));
-  send(":xsel ring\n"); send("x"); simRun(3000);
-  CHECK(outHas("#BEGIN-EXPORT name=ring") && outHas("#END-EXPORT"));
-  g_fsMountOk = true;
-}
 
-static void t_fs_write_failure() {
-  freshFs("fsfail");
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(3000);
-  CHECK(g_logPersist && g_bytesWritten > 0);
-  g_fsFailWrites = true;
-  simRun(40000);                                            // keep logging into a dead filesystem
-  CHECK(g_fsFailTotal >= 1);
-  CHECK(faultActive(F_FS_WRITE) && g_cond == COND_DEGRADED);
-  CHECK(!g_logPersist);                                     // gave up after repeated failures
-  CHECK(g_stats.storageFailures >= 5);
-  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());   // robot unaffected
-  CHECK(g_cond != COND_SAFE_STOP);
-  CHECK(g_frCount > 10);
-  CHECK(outHas("FS_WRITE"));
-  g_fsFailWrites = false;
-}
 
-static void t_fs_full() {
-  freshFs("fsfull");
-  g_fsTotal = 60000;                                        // tiny partition: below reserve + record size quickly
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(30000);
-  CHECK(g_cond != COND_SAFE_STOP);
-  CHECK(g_fsFailTotal >= 1 || !g_logPersist);
-  CHECK(g_navState == NAV_APPROACH);
-  g_fsTotal = 1500000;
-}
 
-static void t_log_rotation() {
-  freshFs("rotate");
-  bootCal();
-  g_cfg.fileMaxBytes = 4096; g_cfg.maxFiles = 3; g_cfg.snapshotMs = 50; g_cfg.flushMs = 500; g_cfg.fsReserveBytes = 16384;
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(60000);
-  CHECK(g_logPersist && g_filesCreated >= 5);
-  CHECK(g_filesDeleted >= 2);
-  LogFile lf[LOG_LIST_MAX];
-  uint8_t n = logList(lf);
-  CHECK(n <= g_cfg.maxFiles);
-  CHECK(n >= 2);
-  for (uint8_t i = 0; i < n; i++) CHECK(lf[i].size <= g_cfg.fileMaxBytes + 300);
-  // every file: header, column row, constant column count
-  int expectCols = 0; for (const char* p = LOG_COLUMNS; *p; p++) if (*p == ',') expectCols++;
-  for (uint8_t i = 0; i < n; i++) {
-    std::string path = g_fsDir + lf[i].name;
-    FILE* f = fopen(path.c_str(), "r");
-    CHECK(f != nullptr);
-    if (!f) continue;
-    char line[400]; int ln = 0; bool ok = true;
-    while (fgets(line, sizeof(line), f)) {
-      ln++;
-      if (ln == 1) { ok = ok && strncmp(line, "#schema=2", 9) == 0; continue; }
-      if (ln == 2) { ok = ok && strncmp(line, "t_ms,sess", 9) == 0; continue; }
-      int cols = 0; for (char* p = line; *p; p++) if (*p == ',') cols++;
-      if (cols != expectCols) { ok = false; printf("  bad cols %d in %s: %s", cols, lf[i].name, line); }
-    }
-    fclose(f);
-    CHECK(ok);
-  }
-  // only our own log files are ever deleted
-}
 
-static void t_log_queue_overflow() {
-  bootCal();
-  uint32_t d0 = g_logDropped;
-  for (int i = 0; i < 2000; i++) logRow('S', "flood");     // 2000 rows into a 6 KB queue with no writer running
-  CHECK(g_logDropped > d0);
-  CHECK(logqUsed() < LOGQ_SIZE);
-  // serial queue flood is bounded and counted too
-  uint32_t o0 = g_outDropped;
-  g_bootPhase = false;
-  for (int i = 0; i < 2000; i++) say("INFO", "flooding the serial queue with a moderately long line number %d", i);
-  CHECK(g_outDropped > o0);
-  CHECK(outUsed() < OUTQ_SIZE);
-}
 
-static void t_flight_recorder() {
-  freshFs("fr");
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  simRun(6000);                                             // fill the ring with normal history
-  uint16_t pre = g_frCount;
-  CHECK(pre > 40);
-  Serial.out.clear();
-  g_mpu.mode = 1;                                           // IMU disconnect => trigger
-  simRun(500);
-  CHECK(g_frCapturing);
-  CHECK(faultActive(F_IMU_TIMEOUT));
-  simRun(g_cfg.frPostMs + 500);
-  CHECK(!g_frCapturing && g_frCaptures == 1);
-  CHECK(g_frFrozenCount >= pre);
-  CHECK(outHas("flight recorder captured"));
-  // frozen window holds records from BEFORE the event and AFTER it
-  uint32_t trig = 0;
-  for (int i = 0; i < g_frFrozenCount; i++) if (g_frFrozen[i].type == 'E' && strstr(g_frFrozen[i].note, "IMU")) { trig = g_frFrozen[i].t; break; }
-  CHECK(trig != 0);
-  int before = 0, after = 0;
-  for (int i = 0; i < g_frFrozenCount; i++) { if (g_frFrozen[i].t < trig) before++; else if (g_frFrozen[i].t > trig) after++; }
-  CHECK(before > 20 && after > 10);
-  // chronological order
-  for (int i = 1; i < g_frFrozenCount; i++) CHECK((int32_t)(g_frFrozen[i].t - g_frFrozen[i - 1].t) >= 0);
-  // ring is bounded
-  simRun(20000);
-  CHECK(g_frCount <= FR_N);
-  // dump reached the CSV queue / file as type B rows
-  simRun(5000);
-  bool foundB = false;
-  { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf);
-    for (uint8_t i = 0; i < n; i++) { std::string p = g_fsDir + lf[i].name; FILE* f = fopen(p.c_str(), "r"); char line[400]; while (f && fgets(line, sizeof(line), f)) { const char* c = line; int commas = 0; while (*c && commas < 3) { if (*c == ',') commas++; c++; } if (commas == 3 && *c == 'B') foundB = true; } if (f) fclose(f); } }
-  CHECK(foundB);
-  // a second trigger during capture is merged, not duplicated
-  uint32_t cap0 = g_frCaptures;
-  frTrigger("one"); frTrigger("two");
-  CHECK(g_frIgnored >= 1);
-  simRun(g_cfg.frPostMs + 200);
-  CHECK(g_frCaptures == cap0 + 1);
-}
 
-static void t_export() {
-  freshFs("export");
-  bootCal();
-  simRun(500);
-  startAuto();
-  ballAt(0);
-  g_cfg.flushMs = 500; g_cfg.snapshotMs = 100;
-  simRun(8000);
-  send("g"); simRun(500);
-  CHECK(outHas("[0] /L"));
-  g_hostWriterInline = false;                                // freeze the file so its line count can be compared exactly
-  logPump(g_cfg, millis() + 10000);
-  std::string newest; { LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf); uint32_t best = 0; for (uint8_t i = 0; i < n; i++) if (lf[i].key >= best) { best = lf[i].key; newest = lf[i].name; } }
-  int fileLines = 0; std::string firstLine, secondLine;
-  { FILE* f = fopen((g_fsDir + newest).c_str(), "r"); char ln[400]; while (f && fgets(ln, sizeof(ln), f)) { fileLines++; if (fileLines == 1) firstLine = ln; if (fileLines == 2) secondLine = ln; } if (f) fclose(f); }
-  CHECK(firstLine.rfind("#schema=2;fw=", 0) == 0);
-  CHECK(secondLine == std::string(LOG_COLUMNS) + "\n");
-  send(":xsel 0\n"); simRun(50);
-  Serial.out.clear();
-  send("x"); simRun(20000);
-  bool ok; int lines;
-  parseExportAndCrc(Serial.out, "#BEGIN-EXPORT", &ok, &lines);
-  CHECK(ok && lines > 20);
-  CHECK(lines == fileLines);                                 // exported row count == rows actually on flash
-  g_hostWriterInline = true;
-  CHECK(outHas("#BEGIN-EXPORT name=/L") && outHas("schema=2"));
-  // ring export matches the in-RAM data and its CRC verifies
-  Serial.out.clear();
-  send(":xsel ring\n"); send("x"); simRun(20000);
-  parseExportAndCrc(Serial.out, "#BEGIN-EXPORT name=ring", &ok, &lines);
-  CHECK(ok && lines > 20);
-  // export of a missing file is refused politely
-  Serial.out.clear();
-  send(":xsel 9\n"); send("x"); simRun(300);
-  CHECK(outHas("export unavailable"));
-}
 
 static void t_nonblocking() {
   bootCal();
@@ -1004,68 +764,14 @@ static void t_nonblocking() {
       mockAdvance(50);
     }
   }
-  CHECK(worst < 1500);                                      // never a wait on Serial (one ring channel scan, about 1 ms, runs in every iteration)
+  CHECK(worst < 700);                                       // never a wait on Serial (one analogRead of about 112 us per iteration)
   CHECK(g_outDropped > 0 || outUsed() > 0);                 // back-pressure shows up as drops/queueing, not blocking
   CHECK(g_navState == NAV_APPROACH);
   CHECK(g_ring[0].scans > 20);
-  // the writer can be arbitrarily slow without delaying the control loop: it lives outside loop()
-  freshFs("nb");
-  g_hostWriterInline = false;
-  g_cfg.snapshotMs = 50;
-  simRun(5000);
-  CHECK(logqUsed() > 0);                                    // data accumulates for the (separate) writer
-  CHECK(g_navState == NAV_APPROACH);
-  logPump(g_cfg, millis());                                 // the writer task would do this off-core
-  g_hostWriterInline = true;
 }
 
-static void t_reboot_phase1() {
-  freshFs("reboot");
-  bootCal();
-  simRun(300);
-  send(":set ringnear 600\n");
-  send(":set maxauto 133\n"); send(":rev BL 1\n"); send(":mok FL\n"); send(":save\n");
-  simRun(300);
-  startAuto();
-  CHECK(g_autoEnabled);
-  ballAt(0);
-  g_cfg.flushMs = 500;
-  simRun(5000);
-  CHECK(!allWheelsStopped());
-  CHECK(g_session == 1);
-  CHECK(g_bytesWritten > 0);
-  // the process now "loses power" while driving autonomously
-}
 
-static void t_reboot_phase2() {
-  g_fsDir = "/tmp/mockfs_reboot";
-  ballGone();
-  setup();
-  CHECK(!g_autoEnabled);                                    // reboot never resumes aggressive movement
-  CHECK(g_navState == NAV_IDLE && allWheelsStopped());
-  CHECK(g_cfg.maxAuto == 133 && g_cfg.reverse[2] == 1 && (g_cfg.motorVerified & 1));
-  CHECK(g_cfg.ringNear == 600 && g_cfg.ringCalDone == 1);              // the ring calibration survived the reboot
-  CHECK(g_session == 2);
-  LogFile lf[LOG_LIST_MAX]; uint8_t n = logList(lf);
-  bool hasSession1 = false;
-  for (uint8_t i = 0; i < n; i++) if (strncmp(lf[i].name, "/L00001_", 8) == 0) hasSession1 = true;
-  CHECK(hasSession1);                                       // previous session's log was not erased
-  ballAt(0);
-  anyWheelEverMoved = false;
-  simRunTracking(4000);
-  CHECK(!anyWheelEverMoved);                                // sees the ball, still does not move
-  send("a"); simRun(50);
-  CHECK(g_autoEnabled);                                     // only an explicit 'a'
-}
 
-static void t_cal_startup_defaults() {
-  ballGone(); setup();
-  CHECK(g_cfg.ringCalDone == 0 && g_cfg.ringEnable == 0x0FFF && g_cfg.modEnable == 1);
-  Serial.out.clear();
-  send("a"); simRun(50);
-  CHECK(!g_autoEnabled);                                    // an uncalibrated ring is never trusted for autonomy
-  CHECK(outHas("not calibrated"));
-}
 
 static void t_health_report_text() {
   bootCal();
@@ -1075,14 +781,11 @@ static void t_health_report_text() {
   CHECK(outHas("NOT MEASURABLE (no voltage monitor installed)"));
   CHECK(outHas("NOT MEASURABLE (no encoders, no current sensing)"));
   CHECK(outHas("NOT TESTED"));
-  CHECK(outHas("[Ring] CD74HC4067 on SIG GPIO34") && outHas("[Module 0] GPIO35") && outHas("[Module 1] GPIO36"));
-  CHECK(outHas("physical operation with the real ball"));
+  CHECK(outHas("[Ring] receivers on A0..A7") && outHas("[Module 0] D34") && outHas("[Module 1] D35") && !outHas("CD74"));
+  CHECK(outHas("physical response to the real ball"));
   CHECK(outHas("NOT TESTED (not calibrated)") == false);    // bootCal calibrated them
-  CHECK(outHas("MPU6050 @0x68 who=0x68: PASS"));
+  CHECK(outHas("MPU6050 @0x68 who=0x68: PASS") && outHas("Arduino Mega 2560"));
   CHECK(outHas("PWM shown is COMMANDED"));
-  CHECK(outHas("reset reason"));
-  CHECK(outHas(MOCK_CORE_V3 ? "Arduino-ESP32 core 3.0.7 |" : "Arduino-ESP32 core 2.0.17 |"));   // version string composed from MAJOR/MINOR/PATCH
-  CHECK(outHas(MOCK_CORE_V3 ? "Arduino-ESP32 core 3.0.7 |" : "Arduino-ESP32 core 2.0.17 |"));   // composed from MAJOR/MINOR/PATCH
   CHECK(!outHas("PASS (operator-confirmed") );             // nothing is claimed verified
 }
 
@@ -1122,73 +825,81 @@ static void t_imu_frozen_in_approach() {
 
 static void t_ring_pure_rules() {
   bootCal();
-  CHECK_NEAR(ringThreshold(g_cfg, 0), 80.0, 1e-3);                    // no noise floor: the fixed minimum
+  CHECK_NEAR(ringThreshold(g_cfg, 0), 20.0, 1e-3);                    // no noise floor: the fixed minimum
   g_cfg.ringNoise[0] = 100;
   CHECK_NEAR(ringThreshold(g_cfg, 0), 300.0, 1e-3);                   // noise 100 x 3.0
-  CHECK(!ringHyst(false, 79, 80) && ringHyst(false, 80, 80));
-  CHECK(ringHyst(true, 50, 80) && !ringHyst(true, 47, 80));           // off below 0.6 of the on level
-  // bearing from the seen channels (default placeholder layout: C0 = 0 deg, 30 deg apart, clockwise)
+  CHECK(!ringHyst(false, 19, 20) && ringHyst(false, 20, 20));
+  CHECK(ringHyst(true, 13, 20) && !ringHyst(true, 11, 20));           // off below 0.6 of the on level
+  // bearing from the seen receivers (test layout: A0 = 0 deg, 45 deg apart, clockwise)
   float amp[16] = {0}; bool seen[16] = {false};
   float b; uint8_t best;
   CHECK(!ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best));
   amp[0] = 100; seen[0] = true;
   CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && best == 0 && absf(b) < 0.01f);
-  amp[1] = 100; seen[1] = true;                                        // C1 = 30 deg, same strength: halfway
-  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && absf(b - 15.0f) < 0.5f);
+  amp[1] = 100; seen[1] = true;                                        // A1 = 45 deg, same strength: halfway
+  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && absf(b - 22.5f) < 0.5f);
   amp[1] = 50;
-  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && best == 0 && b > 5.0f && b < 12.0f);   // pulled towards the weaker one
-  amp[6] = 90; seen[6] = true;                                         // far side (180 deg) is outside the blend: ignored
-  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && b > 5.0f && b < 12.0f);
+  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && best == 0 && b > 8.0f && b < 18.0f);   // pulled towards the weaker one
+  amp[4] = 90; seen[4] = true;                                         // far side (180 deg) is outside the blend: ignored
+  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && b > 8.0f && b < 18.0f);
   memset(amp, 0, sizeof(amp)); memset(seen, 0, sizeof(seen));
-  amp[11] = 100; seen[11] = true; amp[0] = 100; seen[0] = true;        // C11 = -30 deg and C0: wraps correctly to -15
-  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && absf(b + 15.0f) < 0.5f);
+  amp[7] = 100; seen[7] = true; amp[0] = 100; seen[0] = true;          // A7 = -45 deg and A0: wraps correctly to -22.5
+  CHECK(ringBearingFrom(amp, seen, g_cfg.ringBearing, 16, 65, &b, &best) && absf(b + 22.5f) < 0.5f);
   // coverage
   uint8_t n;
   CHECK_NEAR(ringCoverageGap(g_cfg, &n), 0.0, 1e-3);
-  CHECK(n == 12);
-  g_cfg.ringEnable = 0x0FFF & ~((1u << 2) | (1u << 3) | (1u << 4));    // 60, 90, 120 deg off: C1 (30) and C5 (150) remain around the hole
-  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 30.0, 1e-3);
-  CHECK(ringInBlindSpot(g_cfg, 90.0f) && !ringInBlindSpot(g_cfg, 0.0f));
+  CHECK(n == 8);
+  g_cfg.ringEnable = 0x00FF & ~((1u << 2) | (1u << 3));               // 90 and 135 deg off: A1 (45) and A4 (180) remain around the hole
+  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 45.0, 1e-3);
+  CHECK(ringInBlindSpot(g_cfg, 112.0f) && !ringInBlindSpot(g_cfg, 0.0f));
   g_cfg.ringEnable = 0;
   CHECK_NEAR(ringCoverageGap(g_cfg, &n), 360.0, 1e-3);
 }
 
 static void t_ring_pins_and_isolation() {
-  bootCal();
-  simRun(200);
-  for (int k = 0; k < 4; k++) CHECK(g_pinMode[PIN_MUX_SEL[k]] == OUTPUT);                  // GPIO4, 13, 2, 15 are outputs only after boot
-  CHECK(g_pinMode[P_MUX_SIG] == INPUT && g_pinMode[PIN_MOD[0]] == INPUT && g_pinMode[PIN_MOD[1]] == INPUT);
+  ballGone(); setup();                                                   // default configuration: only A0 and A1
+  simRun(300);
+  CHECK(g_ring[0].scans > 0 && g_ring[1].scans > 0);
+  for (int ch = 2; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A2..A7 are not scanned until switched on
+  for (int k = 0; k < 8; k++) CHECK(g_pinMode[PIN_RECV[k]] == INPUT);   // analog inputs, no pull-up
+  CHECK(g_pinMode[PIN_MOD[0]] == INPUT && g_pinMode[PIN_MOD[1]] == INPUT);
   CHECK(allWheelsStopped());
-  // only C5 carries a signal: only C5 may see it, and the bearing is C5's
-  memset(g_mockRingAmp, 0, sizeof(g_mockRingAmp));
-  g_mockRingAmp[5] = 1000;
+  layout8(); calibrateAll();
   simRun(300);
-  CHECK(g_ball.seenMask == (1u << 5) && g_ball.bestCh == 5 && g_ball.bearingKnown && absf(g_ball.bearing - 150.0f) < 0.5f);
-  for (int ch = 0; ch < 12; ch++) CHECK(g_ring[ch].scans > 0);                                // every fitted channel is visited
-  for (int ch = 12; ch < 16; ch++) CHECK(g_ring[ch].scans == 0);                              // C12..C15 are not scanned until switched on
-  // the select lines address the channel that is being read: a signal on C9 must not appear on C8 or C10
+  for (int ch = 0; ch < 8; ch++) CHECK(g_ring[ch].scans > 0);           // every enabled receiver is visited
+  // only A3 carries a signal: only A3 may see it, and the bearing is A3's
   memset(g_mockRingAmp, 0, sizeof(g_mockRingAmp));
-  g_mockRingAmp[9] = 800;
+  g_mockRingAmp[3] = 250;
   simRun(300);
-  CHECK(g_ball.seenMask == (1u << 9));
+  CHECK(g_ball.seenMask == (1u << 3) && g_ball.bestCh == 3 && g_ball.bearingKnown && absf(g_ball.bearing - 135.0f) < 0.5f);
+  // each receiver has its own input: a signal on A5 must not appear on A4 or A6
+  memset(g_mockRingAmp, 0, sizeof(g_mockRingAmp));
+  g_mockRingAmp[5] = 200;
+  simRun(300);
+  CHECK(g_ball.seenMask == (1u << 5));
 }
 
-// The select pins are not touched before the ESP32 has been up for RING_BOOT_HOLDOFF_MS, and never before the motor pins are safe.
+// Start-up order on the Mega: the motor pins are made safe FIRST; afterwards only assigned pins are ever touched (the motor pins, the module pins and the
+// receiver analog inputs); D0/D1 (serial), D20/D21 (I2C, owned by Wire) and every other pin are left alone.
 static void t_ring_boot_sequence() {
   memset(g_pinFirstTouchMs, 0, sizeof(g_pinFirstTouchMs));
   g_mockUs = 0;                                                          // reset: the clock starts at zero
   ballGone(); setup();
-  uint32_t motorFirst = g_pinFirstTouchMs[P_FL_EN] ? g_pinFirstTouchMs[P_FL_EN] : 1u;
-  for (int k = 0; k < 4; k++) {
-    uint32_t t = g_pinFirstTouchMs[PIN_MUX_SEL[k]];
-    CHECK(t != 0);
-    CHECK(t - 1u >= RING_BOOT_HOLDOFF_MS);                               // not before the hold-off after reset
-    CHECK(t >= motorFirst);                                              // after the motor pins were made safe
-    CHECK(g_pinMode[PIN_MUX_SEL[k]] == OUTPUT && g_pinLevel[PIN_MUX_SEL[k]] <= 1);
+  uint32_t motorFirst = 0xFFFFFFFFu;
+  for (int i = 0; i < 4; i++) {
+    CHECK(g_pinFirstTouchMs[WHEEL_PINS[i].in1] != 0 && g_pinFirstTouchMs[WHEEL_PINS[i].en] != 0);
+    motorFirst = std::min(motorFirst, std::min(g_pinFirstTouchMs[WHEEL_PINS[i].in1], g_pinFirstTouchMs[WHEEL_PINS[i].en]));
   }
-  CHECK(g_pinFirstTouchMs[0] == 0 && g_pinFirstTouchMs[12] == 0);        // GPIO0 and GPIO12 are never used by the firmware
-  // the select line is made LOW in the output register before it becomes an output (no HIGH glitch): the first touch is a write, and the level stayed LOW until the first scan
+  for (int k = 0; k < 8; k++) CHECK(g_pinFirstTouchMs[PIN_RECV[k]] >= motorFirst);     // after the motor pins were made safe
+  for (int p = 0; p < 70; p++) {
+    bool assigned = p == PIN_MOD[0] || p == PIN_MOD[1] || p == PIN_I2C_SDA || p == PIN_I2C_SCL;   // the bus-recovery clocking touches SDA / SCL before Wire.begin()
+    for (int i = 0; i < 4; i++) assigned |= p == WHEEL_PINS[i].in1 || p == WHEEL_PINS[i].in2 || p == WHEEL_PINS[i].en;
+    for (int k = 0; k < 8; k++) assigned |= p == PIN_RECV[k];
+    if (!assigned) CHECK(g_pinFirstTouchMs[p] == 0);                     // no unassigned pin is touched (D30..D33 in particular: no multiplexer)
+  }
+  CHECK(g_pinFirstTouchMs[0] == 0 && g_pinFirstTouchMs[1] == 0 && g_pinFirstTouchMs[30] == 0 && g_pinFirstTouchMs[33] == 0);
   CHECK(allWheelsStopped());
+  CHECK(Wire.begun && Wire.clock == 400000 && Wire.timeoutUs > 0);       // hardware I2C (Wire) started at 400 kHz with a bounded timeout
 }
 
 static void t_ring_detect_and_bearing() {
@@ -1207,7 +918,7 @@ static void t_ring_detect_and_bearing() {
   ballAt(0, 0.25f); simRun(250);
   CHECK_NEAR(g_ball.strength, 0.25, 0.02);                              // strength follows the swing
   // steady light (DC) on one channel is not a ball
-  ballGone(); g_mockRingBase[3] = 3000; simRun(400);
+  ballGone(); g_mockRingBase[3] = 900; simRun(400);
   CHECK(!g_ball.valid && g_ball.seenMask == 0 && !g_ring[3].railFault);
   // lost: valid for lostHoldMs, then gone; the last bearing is remembered
   g_mockRingBase[3] = 300;
@@ -1219,37 +930,43 @@ static void t_ring_detect_and_bearing() {
   CHECK(!g_ball.valid && absf(g_lastBearing - 70.0f) < 8.0f);
 }
 
+// The scan window must span the gap between the ball's bursts (833 us period, 192 us burst): count how many scans of C0 see the swing.
+static void burstRun(uint16_t winUs, int* hits, int* total) {
+  g_cfg.ringWinUs = winUs;
+  *hits = 0; *total = 0;
+  uint32_t last = g_ring[0].scans;
+  for (int k = 0; k < 40000 && *total < 120; k++) {
+    loop(); mockAdvance((uint32_t)(20 + (k * 37) % 61));                  // irregular loop timing: a different phase against the burst period every time
+    if (g_ring[0].scans != last) { last = g_ring[0].scans; (*total)++; if (g_ring[0].amp >= 110) (*hits)++; }
+  }
+}
 static void t_ring_burst_window() {
   bootCal();
-  g_mockRingAmp[0] = 500; g_mockRingBase[0] = 300;
-  int hitsLong = 0, hitsShort = 0;
-  for (int k = 0; k < 60; k++) {
-    mockAdvance((uint32_t)((k * 137) % 833));                           // a different phase against the 833 us burst period every time
-    uint16_t lo, hi;
-    g_cfg.ringWinUs = 900; ringScanChannel(g_cfg, 0, &lo, &hi); if (hi - lo >= 450) hitsLong++;
-    mockAdvance((uint32_t)((k * 211) % 833));
-    g_cfg.ringWinUs = 100; ringScanChannel(g_cfg, 0, &lo, &hi); if (hi - lo >= 450) hitsShort++;
-  }
-  CHECK(hitsLong == 60);                                                 // a window of at least one burst period never misses a burst
-  CHECK(hitsShort > 0 && hitsShort < 60);                                // a window shorter than the gap between bursts does
-  // one scan stays bounded
+  g_cfg.ringEnable = 1;                                                  // only C0
+  g_mockRingAmp[0] = 125; g_mockRingBase[0] = 75;
+  int hitsLong, totalLong, hitsShort, totalShort;
+  burstRun(900, &hitsLong, &totalLong);
+  CHECK(totalLong >= 100 && hitsLong == totalLong);                      // a window of at least one burst period never misses a burst
+  burstRun(250, &hitsShort, &totalShort);
+  CHECK(totalShort >= 100 && hitsShort > 0 && hitsShort < totalShort);   // a window shorter than the gap between bursts does
   g_cfg.ringWinUs = 900;
-  uint32_t t0 = micros(); uint16_t lo, hi; ringScanChannel(g_cfg, 0, &lo, &hi);
-  CHECK((uint32_t)(micros() - t0) < 1100);
+  ringResetStats();                                                      // (setup() itself blocks for the gyro calibration)
+  simRun(400);
+  CHECK(g_ringScanMaxUs < 1400);                                         // one channel takes about the window plus a conversion
 }
 
 static void t_ring_noise_and_threshold() {
   bootCal();
-  g_mockRingNoise = 15;                                                  // +-15 counts of jitter on every conversion
+  g_mockRingNoise = 3;                                                   // +-3 counts of jitter on every conversion
   simRun(1200);
   CHECK(g_ball.seenMask == 0 && !g_ball.valid);                          // jitter alone is no ball
-  ballAt(0, 40.0f / 1500.0f); simRun(600);                               // a 40-count swing: below the 80-count minimum
+  ballAt(0, 10.0f / 375.0f); simRun(600);                                // a 10-count swing: below the 20-count minimum
   CHECK(g_ball.seenMask == 0);
-  ballAt(0, 200.0f / 1500.0f); simRun(600);                              // 200 counts: clearly a ball
+  ballAt(0, 50.0f / 375.0f); simRun(600);                                // 50 counts: clearly a ball
   CHECK((g_ball.seenMask & 1u) && g_ball.valid);
-  ballAt(0, 60.0f / 1500.0f); simRun(600);                               // weaker, but above 0.6 x threshold: hysteresis keeps it
+  ballAt(0, 15.0f / 375.0f); simRun(600);                                // weaker, but above 0.6 x threshold: hysteresis keeps it
   CHECK(g_ball.seenMask & 1u);
-  ballAt(0, 20.0f / 1500.0f); simRun(600);
+  ballAt(0, 3.0f / 375.0f); simRun(600);
   CHECK(g_ball.seenMask == 0);
   // noise calibration: measured with the ball off, stored per channel, and it raises the threshold of a noisy channel
   ballGone();
@@ -1258,35 +975,36 @@ static void t_ring_noise_and_threshold() {
   CHECK(g_ringCalActive && outHas("BALL MUST BE OFF"));
   simRun(2300);
   CHECK(!g_ringCalActive && g_cfg.ringCalDone == 1 && outHas("noise floor stored"));
-  for (int ch = 0; ch < 12; ch++) CHECK(g_cfg.ringNoise[ch] >= 10 && g_cfg.ringNoise[ch] <= 30);
-  g_cfg.ringNoise[0] = 100;
-  ballAt(0, 200.0f / 1500.0f); simRun(600);                              // C0 swing 200 < 100 x 3.0: C0 ignores it (its neighbours may see part of it)
+  for (int ch = 0; ch < 8; ch++) CHECK(g_cfg.ringNoise[ch] >= 1 && g_cfg.ringNoise[ch] <= 7);
+  g_cfg.ringNoise[0] = 30;
+  ballAt(0, 50.0f / 375.0f); simRun(600);                                // C0 swing 50 < 30 x 3.0: C0 ignores it (its neighbours may see part of it)
   CHECK(!(g_ball.seenMask & 1u));
 }
 
 static void t_ring_saturation_and_faults() {
   bootCal();
+  g_cfg.ringFovHalf = 60;                                                // wider assumed view so that the neighbours of A2 also see a ball at 90 deg
   ballAt(90, 0.6f);
   simRun(300);
   CHECK(g_ball.bearingKnown && absf(g_ball.bearing - 90.0f) < 8.0f);
-  g_mockRingBase[3] = 4095;                                              // C3 (90 deg) stuck at the top of the ADC range
+  g_mockRingBase[2] = 1023;                                              // A2 (90 deg) stuck at the top of the ADC range
   simRun(g_cfg.ringRailMs + 600);
-  CHECK(g_ring[3].railFault && faultActive(F_RING_CHANNEL) && g_cond == COND_DEGRADED);
-  CHECK(!(g_ball.seenMask & (1u << 3)));                                 // the excluded channel is not used,
+  CHECK(g_ring[2].railFault && faultActive(F_RING_CHANNEL) && g_cond == COND_DEGRADED);
+  CHECK(!(g_ball.seenMask & (1u << 2)));                                 // the excluded channel is not used,
   CHECK(g_ball.bearingKnown && absf(g_ball.bearing - 90.0f) < 25.0f);    // the neighbours still place the ball
-  g_mockRingBase[3] = 300;
+  g_mockRingBase[2] = 300;
   simRun(g_cfg.recoverVerifyMs + 1500);
-  CHECK(!g_ring[3].railFault && !faultActive(F_RING_CHANNEL) && g_cond == COND_NORMAL);
+  CHECK(!g_ring[2].railFault && !faultActive(F_RING_CHANNEL) && g_cond == COND_NORMAL);
   // a channel that is switched off is "not tested", never "failed"
-  g_cfg.ringEnable &= ~(1u << 3); g_mockRingBase[3] = 4095; simRun(g_cfg.ringRailMs + 600);
+  g_cfg.ringEnable &= ~(1u << 2); g_mockRingBase[2] = 1023; simRun(g_cfg.ringRailMs + 600);
   CHECK(!faultActive(F_RING_CHANNEL));
-  g_cfg.ringEnable |= (1u << 3); g_mockRingBase[3] = 300; simRun(1500);
+  g_cfg.ringEnable |= (1u << 2); g_mockRingBase[2] = 300; simRun(1500);
   // every channel saturated: no usable ring -> critical
-  for (int i = 0; i < 16; i++) g_mockRingBase[i] = 4095;
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;
   simRun(g_cfg.ringRailMs + 800);
   CHECK(faultActive(F_RING_NONE) && g_cond == COND_SAFE_STOP);
   // a stalled scan is critical too
-  for (int i = 0; i < 16; i++) g_mockRingBase[i] = 300;
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 300;
   simRun(g_cfg.recoverVerifyMs + 1500);
   CHECK(!faultActive(F_RING_NONE) && g_cond == COND_NORMAL);
   ringHealth(g_cfg, g_ringLastScanMs + 900);
@@ -1295,18 +1013,19 @@ static void t_ring_saturation_and_faults() {
 
 static void t_ring_coverage_gap() {
   bootCal();
+  g_cfg.ringMaxGap = 90;                                                 // the default (360) never raises RING_GAP: only two receivers are fitted
   simRun(300);
   CHECK(!faultActive(F_RING_GAP));
-  send(":ring off 2\n"); send(":ring off 3\n"); send(":ring off 4\n"); send(":ring off 5\n"); simRun(300);   // 60..150 deg off: C1 (30) .. C6 (180)
+  send(":ring off 2\n"); send(":ring off 3\n"); simRun(300);            // 90 and 135 deg off: A1 (45) .. A4 (180)
   uint8_t n;
-  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 60.0, 1e-3);
+  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 45.0, 1e-3);
   CHECK(!faultActive(F_RING_GAP));                                       // slight blind spot: tolerated (up to ringmaxgap = 90)
-  send(":ring off 6\n"); send(":ring off 7\n"); simRun(300);             // C1 (30) .. C8 (240)
-  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 120.0, 1e-3);
+  send(":ring off 4\n"); send(":ring off 5\n"); simRun(300);            // A1 (45) .. A6 (270)
+  CHECK_NEAR(ringCoverageGap(g_cfg, &n), 135.0, 1e-3);
   CHECK(faultActive(F_RING_GAP) && g_cond == COND_DEGRADED);
-  send(":ring on 6\n"); send(":ring on 7\n"); simRun(g_cfg.recoverVerifyMs + 1000);
+  send(":ring on 4\n"); send(":ring on 5\n"); send(":ring on 2\n"); send(":ring on 3\n"); simRun(g_cfg.recoverVerifyMs + 1000);
   CHECK(!faultActive(F_RING_GAP));
-  // autonomy still starts when only the gap is wrong (the robot knows about its blind spot and searches)
+  // the default configuration (two receivers, ringmaxgap 360) never raises it
   CHECK(g_cond != COND_SAFE_STOP);
 }
 
@@ -1314,38 +1033,38 @@ static void t_ring_cli() {
   bootCal();
   simRun(300);
   Serial.out.clear();
-  send(":ring\n"); simRun(60);
-  CHECK(outHas("ball ring: CD74HC4067") && outHas("GPIO34") && outHas(" C0 ") && outHas("C11") && !outHas(" C12 "));
+  send(":ring\n"); simRun(600);
+  CHECK(outHas("ball receivers: 8 of 8") && outHas(" A0 ") && outHas(" A7 ") && !outHas("CD74") && !outHas("multiplex"));
   CHECK(outHas("coverage: largest arc"));
-  send(":ring on 12\n"); simRun(120);
-  CHECK(ringEnabled(g_cfg, 12) && g_ring[12].scans > 0);
-  Serial.out.clear(); send(":ring\n"); simRun(60);
-  CHECK(outHas(" C12 "));
-  send(":ring off 12\n"); simRun(20);
-  CHECK(!ringEnabled(g_cfg, 12));
+  send(":ring off 7\n"); simRun(120);
+  CHECK(!ringEnabled(g_cfg, 7));
+  Serial.out.clear(); send(":ring\n"); simRun(600);
+  CHECK(!outHas(" A7 "));                                                // a switched-off optional receiver is hidden
+  send(":ring on 7\n"); simRun(120);
+  CHECK(ringEnabled(g_cfg, 7) && g_ring[7].scans > 0);
   send(":ring bearing 3 45\n"); simRun(20);
   CHECK(g_cfg.ringBearing[3] == 45);
   send(":ring bearing 3 200\n"); simRun(20);
   CHECK(g_cfg.ringBearing[3] == 45);                                     // out of range: unchanged
-  send(":ring bearing 16 0\n"); send(":ring on 16\n"); send(":ring foo\n"); simRun(60);
+  send(":ring bearing 8 0\n"); send(":ring on 8\n"); send(":ring foo\n"); simRun(600);
   CHECK(outCount("usage: :ring") >= 3);
-  send(":set ringseen 5\n"); simRun(20);
-  CHECK(g_cfg.ringSeen == 80);                                           // below the allowed range
-  send(":set ringseen 120\n"); simRun(20);
-  CHECK(g_cfg.ringSeen == 120);
-  g_cfg.ringSeen = 80;
+  send(":set ringseen 2\n"); simRun(20);
+  CHECK(g_cfg.ringSeen == 20);                                           // below the allowed range
+  send(":set ringseen 30\n"); simRun(20);
+  CHECK(g_cfg.ringSeen == 30);
+  g_cfg.ringSeen = 20;
   // near calibration needs a ball in view
   Serial.out.clear(); send(":ring cal near\n"); simRun(30);
-  CHECK(outHas("no channel sees the ball") && g_cfg.ringNear == 1500);
+  CHECK(outHas("no channel sees the ball") && g_cfg.ringNear == 375);
   ballAt(0, 0.6f); simRun(300);
   send(":ring cal near\n"); simRun(30);
-  CHECK(g_cfg.ringNear >= 880 && g_cfg.ringNear <= 920);
+  CHECK(g_cfg.ringNear >= 220 && g_cfg.ringNear <= 230);
   send(":ring reset\n"); simRun(30);
   CHECK(g_ring[0].scans < 30);
   // the saved configuration carries the ring settings
   send(":ring bearing 7 -170\n"); simRun(20);
   send(":save\n"); simRun(200);
-  Config chk; char rep[64];
+  Config chk; char rep[40];
   CfgLoadResult r = cfgLoad(chk, rep, sizeof(rep));
   CHECK(r == CL_OK && chk.ringBearing[7] == -170 && chk.ringNear == g_cfg.ringNear);
 }
@@ -1376,26 +1095,27 @@ static void t_modules() {
   g_cfg.modEnable = 1; simRun(40);
   CHECK(!g_mod[1].active);                                               // switched off: never active
   // polarity is a setting, not an assumption
-  g_cfg.modActiveLow = 0; g_mockModActiveHigh = true; g_mockModDetect[0] = true; simRun(80);
+  g_cfg.modActiveLow = 2; g_mockModActiveHigh[0] = true; g_mockModDetect[0] = true; simRun(80);       // module 0 active-high, module 1 still active-low
   CHECK(g_mod[0].active);
   g_mockModDetect[0] = false; simRun(80);
   CHECK(!g_mod[0].active);
-  Serial.out.clear(); send(":mod\n"); send(":mod level low\n"); send(":mod off 0\n"); send(":mod on 0\n"); send(":mod foo\n"); simRun(60);
-  CHECK(outHas("IR module 0 GPIO35") && outHas("IR module 1 GPIO36") && g_cfg.modActiveLow == 1 && modEnabled(g_cfg, 0) && outHas("usage: :mod"));
+  Serial.out.clear(); send(":mod\n"); send(":mod level 0 low\n"); send(":mod level 1 high\n"); send(":mod off 0\n"); send(":mod on 0\n"); send(":mod foo\n"); simRun(60);
+  CHECK(outHas("IR module 0 D34") && outHas("IR module 1 D35") && g_cfg.modActiveLow == 1 && modEnabled(g_cfg, 0) && outHas("usage: :mod"));
+  g_mockModActiveHigh[0] = false;
 }
 
 static void t_ring_autonomy_refused() {
   ballGone(); setup();                                                   // defaults: noise floor not calibrated
   simRun(200);
   Serial.out.clear(); startAuto();
-  CHECK(!g_autoEnabled && outHas("noise floor is not calibrated"));
+  CHECK(!g_autoEnabled && outHas("noise floor not calibrated"));
   calibrateAll();
   g_cfg.modEnable = 0; Serial.out.clear(); startAuto();
   CHECK(!g_autoEnabled && outHas("IR module 0"));
   g_cfg.modEnable = 1;
   g_cfg.ringEnable = 0; Serial.out.clear(); startAuto();
   CHECK(!g_autoEnabled && outHas("no usable ball-ring channel"));
-  g_cfg.ringEnable = 0x0FFF; simRun(g_cfg.recoverVerifyMs + 1500);      // the "no usable channel" fault clears once the ring is back
+  g_cfg.ringEnable = 0x00FF; simRun(g_cfg.recoverVerifyMs + 1500);      // the "no usable channel" fault clears once the ring is back
   Serial.out.clear(); startAuto();
   CHECK(g_autoEnabled && g_navState == NAV_SEEK);
 }
@@ -1460,9 +1180,9 @@ static void t_nav_lost_search_reacquire() {
 // A ball that disappears is looked for where it can have gone: the way it was moving, else the nearest uncovered arc, else its last side.
 static void t_nav_blind_spot_search() {
   bootCal();
-  // Receivers at front (C0), right (C3 = 90 deg) and back (C6): the only uncovered arc is on the LEFT. A ball last seen by the front receiver alone
+  // Receivers at front (A0), right (A2 = 90 deg) and back (A4): the only uncovered arc is on the LEFT. A ball last seen by the front receiver alone
   // (which cannot say which side it is on) can only have slipped into that arc: search anticlockwise.
-  g_cfg.ringEnable = (1u << 0) | (1u << 3) | (1u << 6);
+  g_cfg.ringEnable = (1u << 0) | (1u << 2) | (1u << 4);
   simRun(300);
   startAuto();
   CHECK(g_autoEnabled);
@@ -1474,14 +1194,14 @@ static void t_nav_blind_spot_search() {
   simRun(1500);
   CHECK(g_navState == NAV_SEARCH && g_reqW < -0.1f);                       // and it really rotates that way
   // mirror image: the uncovered arc is on the RIGHT
-  g_cfg.ringEnable = (1u << 0) | (1u << 9) | (1u << 6);
+  g_cfg.ringEnable = (1u << 0) | (1u << 6) | (1u << 4);
   ballGone(); simRun(2000);
   startAuto();
   ballAt(0, 0.6f); simRun(300);
   ballGone(); simRun(g_cfg.lostHoldMs + 500);
   CHECK((g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE) && g_searchDir == 1);
   // full ring: a ball that was moving quickly to the LEFT while its last bearing is still slightly right left through the left
-  g_cfg.ringEnable = 0x0FFF;
+  g_cfg.ringEnable = 0x00FF;
   ballGone(); simRun(2000);
   startAuto(); ballAt(40, 0.5f); simRun(300);
   for (int k = 0; k <= 20; k++) { ballAt(40.0f - 1.75f * (float)k, 0.5f); simRun(20); }   // 40 -> 5 deg in 400 ms (about -88 deg/s)
@@ -1496,7 +1216,7 @@ static void t_nav_ring_fault_safe() {
   startAuto();
   ballFar(); simRun(500);
   CHECK(!allWheelsStopped());
-  for (int i = 0; i < 16; i++) g_mockRingBase[i] = 4095;                   // the whole ring reads the top of the range (SIG shorted to 3.3 V)
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;                   // the whole ring reads the top of the range (SIG shorted to 3.3 V)
   simRun(g_cfg.ringRailMs + 800);
   CHECK(faultActive(F_RING_NONE) && !g_autoEnabled && allWheelsStopped() && g_cond == COND_SAFE_STOP);
 }
@@ -1730,15 +1450,17 @@ static void t_old_hardware_removed() {
   CHECK(outCount("unknown word command") == 6);            // none of the earlier-era commands exists any more
   Serial.out.clear(); send("?"); simRun(50); send("h"); simRun(300); send("i"); simRun(50); send("d"); simRun(50);
   CHECK(!outHas("TSOP") && !outHas("emitter"));            // no emitter / digital-receiver hardware is described
-  CHECK(outHas("ball ring") || outHas("[Ring]"));
-  // pins: 12 motor + 2 I2C + 4 multiplexer selects as outputs; SIG and the two modules input-only
-  CHECK(__builtin_popcountll(OUTPUT_PIN_MASK) == 14 && __builtin_popcountll(ALL_OUT_MASK) == 18 && __builtin_popcountll(IN_ONLY_MASK) == 3);
-  CHECK(strstr(LOG_COLUMNS, "ringmask,ball,bearing_deg,strength,flags") != nullptr && strstr(LOG_COLUMNS, "irmask") == nullptr);
+  CHECK(outHas("ball receivers") || outHas("[Ring]"));
+  // pins: 8 direction + 4 PWM + 2 modules + 2 I2C + 2 serial, all distinct (the compile-time asserts in pins.h); the receivers on A0..A7
+  CHECK(__builtin_popcountll(ALL_DIGITAL_MASK) == 18 && __builtin_popcountll(RECV_MASK) == 8 && (MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0 && __builtin_popcountll(MEGA_PWM_MASK) == 15);
+  CHECK(outHas("ball receivers: ") && !outHas("GPIO") && !outHas("CD74") && !outHas("multiplex"));                    // no ESP32 pin names are left in the output
 }
 
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
+  T(t_minifmt),
+  T(t_report_paced),
   T(t_angles),
   T(t_timer_rollover),
   T(t_mecanum),
@@ -1746,6 +1468,7 @@ static const TestCase TESTS[] = {
   T(t_boot_safe),
   T(t_ramp),
   T(t_config),
+  T(t_config_survives_reboot),
   T(t_imu_integrate),
   T(t_imu_bias),
   T(t_imu_missing),
@@ -1754,30 +1477,13 @@ static const TestCase TESTS[] = {
   T(t_heading_hold),
   T(t_safe_stop_moving),
   T(t_loop_stall),
-  T(t_resets),
-  T(t_fault_report_format),
-  T(t_reset_wdt),
   T(t_cli_manual),
   T(t_cli_robust),
   T(t_diag_no_motion),
   T(t_motor_test),
   T(t_drive_test),
-  T(t_fs_commands),
-  T(t_gpio_tamper),
-  T(t_cfg_boot_corrupt),
-  T(t_cfg_save_fail),
   T(t_cfg_set),
-  T(t_fs_missing),
-  T(t_fs_write_failure),
-  T(t_fs_full),
-  T(t_log_rotation),
-  T(t_log_queue_overflow),
-  T(t_flight_recorder),
-  T(t_export),
   T(t_nonblocking),
-  T(t_reboot_phase1),
-  T(t_reboot_phase2),
-  T(t_cal_startup_defaults),
   T(t_health_report_text),
   T(t_imu_frozen_in_approach),
   T(t_ring_pure_rules),
@@ -1813,9 +1519,7 @@ int main(int argc, char** argv) {
   if (argc < 2) { fprintf(stderr, "usage: %s <test>|--list\n", argv[0]); return 2; }
   for (auto& t : TESTS) {
     if (strcmp(t.name, argv[1]) != 0) continue;
-    if (strncmp(t.name, "t_reboot", 8) != 0 && strcmp(t.name, "t_config") != 0 && strncmp(t.name, "t_fs_", 5) != 0 && strcmp(t.name, "t_cfg_boot_corrupt") != 0 &&
-        strcmp(t.name, "t_log_rotation") != 0 && strcmp(t.name, "t_flight_recorder") != 0 && strcmp(t.name, "t_export") != 0)
-      freshFs(t.name);
+    freshEeprom(t.name);
     t.fn();
     if (getenv("SHOW_OUT")) fwrite(Serial.out.data(), 1, Serial.out.size(), stdout);
     printf("%s %s (%d checks, %d failed)\n", g_fail ? "FAIL" : "PASS", t.name, g_checks, g_fail);

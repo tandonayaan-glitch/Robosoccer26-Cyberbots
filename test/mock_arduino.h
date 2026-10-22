@@ -1,9 +1,6 @@
-// mock_arduino.h - host-side stand-in for the Arduino-ESP32 core, used ONLY by the test harness.
-// API shapes were taken from the real core headers (arduino-esp32 2.0.17 and 3.0.7):
-//   2.x: ledcSetup(ch,freq,bits)/ledcAttachPin(pin,ch)/ledcWrite(ch,duty)
-//   3.x: ledcAttach(pin,freq,bits)/ledcWrite(pin,duty)
-// Build with -DMOCK_CORE_V3=1 or 0; only the matching API exists, so the wrong generation's
-// calls fail to compile. Time is virtual; the ring / module pins read values the tests set.
+// mock_arduino.h - host-side stand-in for the Arduino AVR core (Mega 2560), used ONLY by the test harness.
+// Time is virtual. The ring / module pins read values the tests set. API shapes follow the Arduino AVR core 1.8.x headers
+// (HardwareSerial, TwoWire, EEPROMClass, analogWrite/analogRead). Nothing here models the electrical behaviour of the real board.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -14,62 +11,39 @@
 #include <string>
 #include <vector>
 #include <deque>
-#include <memory>
 #include <algorithm>
-#include <dirent.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
-#ifndef MOCK_CORE_V3
-#define MOCK_CORE_V3 1
-#endif
-#if MOCK_CORE_V3
-  #define ESP_ARDUINO_VERSION_MAJOR 3
-  #define ESP_ARDUINO_VERSION_MINOR 0
-  #define ESP_ARDUINO_VERSION_PATCH 7
-#else
-  #define ESP_ARDUINO_VERSION_MAJOR 2
-  #define ESP_ARDUINO_VERSION_MINOR 0
-  #define ESP_ARDUINO_VERSION_PATCH 17
-#endif
-
-#define IRAM_ATTR
 #define HIGH 1
 #define LOW 0
-#define INPUT 1
-#define OUTPUT 3
-#define INPUT_PULLUP 5
-#define CHANGE 3
-#define pdTRUE 1
-#define pdFALSE 0
-#define pdMS_TO_TICKS(x) (x)
-typedef void* SemaphoreHandle_t;
-typedef void* TaskHandle_t;
-typedef int BaseType_t;
-static inline SemaphoreHandle_t xSemaphoreCreateMutex() { return (SemaphoreHandle_t)1; }
-static inline int xSemaphoreTake(SemaphoreHandle_t, uint32_t) { return pdTRUE; }
-static inline int xSemaphoreGive(SemaphoreHandle_t) { return pdTRUE; }
-static inline uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 4096; }
+#define INPUT 0
+#define OUTPUT 1
+#define INPUT_PULLUP 2
+
+// Mega 2560: A0 = pin 54; 16 analog inputs
+static const uint8_t A0 = 54, A1 = 55, A2 = 56, A3 = 57, A4 = 58, A5 = 59, A6 = 60, A7 = 61;
+#define NOT_ON_TIMER 0
+#define digitalPinToTimer(p) ((((p) >= 2 && (p) <= 13) || (p) == 44 || (p) == 45 || (p) == 46) ? 1 : 0)
+
+#include "../Robosoccer26_Cyberbots/compat.h"
 
 // ---- virtual time + signal model ------------------------------------------------------
 static uint64_t g_mockUs = 5000000ULL;   // start at 5 s so nothing depends on t=0
 
-// Sensor model. Ring: the analog line on GPIO34 reads the channel the firmware selected on S0..S3 (GPIO4/13/2/15): a DC level plus, while the simulated
-// ball burst is on (192 us of every 833 us, the RCJ ball's pattern), the channel's swing. Tests set g_mockRingAmp[] / g_mockRingBase[].
-// Modules: GPIO35 / GPIO36 digital, LOW when g_mockModDetect[] is set (active-low module).
-static uint16_t g_mockAnalog[64];
-static uint8_t g_pinLevel[64];
-static uint8_t g_pinMode[64];
+// Receivers: analog input An (pin 54+n) reads a DC level plus, while the simulated ball burst is on
+// (192 us of every 833 us, the RCJ ball's pattern as read from the ball firmware), that receiver's swing. Values are 10-bit (0..1023).
+// Modules: D34 / D35 digital, LOW when g_mockModDetect[] is set and the module is active-low (the default model).
+static uint16_t g_mockAnalog[70];
+static uint8_t g_pinLevel[70];
+static uint8_t g_pinMode[70];
 static uint16_t g_mockRingAmp[16], g_mockRingBase[16];
 static uint16_t g_mockRingNoise = 0;                 // +- counts of deterministic jitter added to every reading
 static bool g_mockModDetect[2];
-static bool g_mockModActiveHigh = false;
-static uint32_t g_mockEmitWrites[64];
+static bool g_mockModActiveHigh[2];
 static uint32_t g_mockAdcReads = 0;
 static uint32_t g_mockRng = 12345;
 
-// Serial TX model: 115200 8N1 ~ 11520 B/s, 2048 B buffer
-static double g_serialRoom = 2048;
+// Serial TX model: 115200 8N1 ~ 11520 B/s into the AVR's 64-byte transmit buffer
+static double g_serialRoom = 63;
 static bool g_serialUnlimited = false;
 static void mockAdvance(uint32_t us) {
   uint32_t left = us;
@@ -77,7 +51,7 @@ static void mockAdvance(uint32_t us) {
     uint32_t step = left > 10 ? 10 : left;
     left -= step;
     g_mockUs += step;
-    g_serialRoom = std::min(2048.0, g_serialRoom + step * 0.01152);
+    g_serialRoom = std::min(63.0, g_serialRoom + step * 0.01152);
   }
 }
 static inline uint32_t millis() { return (uint32_t)(g_mockUs / 1000ULL); }
@@ -86,41 +60,28 @@ static inline void delay(uint32_t ms) { mockAdvance(ms * 1000u); }
 static inline void delayMicroseconds(uint32_t us) { mockAdvance(us); }
 static inline void yield() {}
 
-// ---- GPIO --------------------------------------------------------------------------------
-static uint32_t g_pinFirstTouchMs[64];               // millis()+1 of the first pinMode / digitalWrite on each pin (0 = never touched)
+// ---- GPIO / ADC / PWM ----------------------------------------------------------------------
+static uint32_t g_pinFirstTouchMs[70];               // millis()+1 of the first pinMode / digitalWrite on each pin (0 = never touched)
+static uint32_t g_pwmDuty[70];
 static inline void mockTouch(uint8_t p) { if (!g_pinFirstTouchMs[p]) g_pinFirstTouchMs[p] = (uint32_t)(g_mockUs / 1000ULL) + 1u; }
 static inline void pinMode(uint8_t p, uint8_t m) { mockTouch(p); g_pinMode[p] = m; }
-static inline void digitalWrite(uint8_t p, uint8_t v) { mockTouch(p); g_pinLevel[p] = v ? 1 : 0; g_mockEmitWrites[p]++; }
-static inline int analogRead(uint8_t p);
+static inline void digitalWrite(uint8_t p, uint8_t v) { mockTouch(p); g_pinLevel[p] = v ? 1 : 0; }
+static inline void analogWrite(uint8_t p, int duty) { mockTouch(p); g_pwmDuty[p] = (uint32_t)(duty < 0 ? 0 : (duty > 255 ? 255 : duty)); }
 static inline int digitalRead(uint8_t p) {
-  if (p == 35 || p == 36) { bool d = g_mockModDetect[p - 35]; return (g_mockModActiveHigh ? d : !d) ? 1 : 0; }
-  if (p == 16 || p == 17) return 1;
+  if (p == 34 || p == 35) { bool d = g_mockModDetect[p - 34]; return (g_mockModActiveHigh[p - 34] ? d : !d) ? 1 : 0; }
+  if (p == 20 || p == 21) return 1;
   return g_pinLevel[p];
 }
 static inline int analogRead(uint8_t p) {
-  if (p != 34) return g_mockAnalog[p];
+  if (p < A0 || p > A0 + 7) return g_mockAnalog[p];
   g_mockAdcReads++;
-  mockAdvance(20);                                   // one conversion takes about 20 us
-  int ch = g_pinLevel[4] | (g_pinLevel[13] << 1) | (g_pinLevel[2] << 2) | (g_pinLevel[15] << 3);
+  mockAdvance(112);                                  // one conversion takes about 112 us at the default ADC clock (prescaler 128)
+  int ch = p - A0;
   bool burst = (uint32_t)(g_mockUs % 833ULL) < 192u;
   int v = (int)g_mockRingBase[ch] + (burst ? (int)g_mockRingAmp[ch] : 0);
   if (g_mockRingNoise) { g_mockRng = g_mockRng * 1664525u + 1013904223u; v += (int)((g_mockRng >> 16) % (2u * g_mockRingNoise + 1u)) - (int)g_mockRingNoise; }
-  return v < 0 ? 0 : (v > 4095 ? 4095 : v);
+  return v < 0 ? 0 : (v > 1023 ? 1023 : v);
 }
-
-// ---- LEDC -----------------------------------------------------------------------------------
-static uint32_t g_pwmDuty[64];
-static bool g_ledcFail = false;
-static uint32_t g_ledcFreq = 0;
-#if MOCK_CORE_V3
-static inline bool ledcAttach(uint8_t pin, uint32_t freq, uint8_t) { if (g_ledcFail) return false; g_ledcFreq = freq; g_pwmDuty[pin] = 0; return true; }
-static inline bool ledcWrite(uint8_t pin, uint32_t duty) { g_pwmDuty[pin] = duty; return true; }
-#else
-static uint8_t g_chPin[16];
-static inline uint32_t ledcSetup(uint8_t, uint32_t freq, uint8_t) { if (g_ledcFail) return 0; g_ledcFreq = freq; return freq; }
-static inline void ledcAttachPin(uint8_t pin, uint8_t ch) { g_chPin[ch] = pin; }
-static inline void ledcWrite(uint8_t ch, uint32_t duty) { g_pwmDuty[g_chPin[ch]] = duty; }
-#endif
 
 // ---- Serial -----------------------------------------------------------------------------------
 struct MockSerial {
@@ -128,12 +89,11 @@ struct MockSerial {
   std::deque<uint8_t> in;
   bool begun = false;
   void begin(unsigned long) { begun = true; }
-  size_t setTxBufferSize(size_t n) { return n; }
   int availableForWrite() { return g_serialUnlimited ? 4096 : (int)g_serialRoom; }
-  size_t write(const uint8_t* b, size_t n) {
-    out.append((const char*)b, n);
-    if (!g_serialUnlimited) g_serialRoom = std::max(0.0, g_serialRoom - (double)n);
-    return n;
+  size_t write(uint8_t b) {
+    out.push_back((char)b);
+    if (!g_serialUnlimited) g_serialRoom = std::max(0.0, g_serialRoom - 1.0);
+    return 1;
   }
   int available() { return (int)in.size(); }
   int read() { if (in.empty()) return -1; int v = in.front(); in.pop_front(); return v; }
@@ -161,19 +121,21 @@ struct MockWire {
   uint8_t regPtr = 0;
   bool begun = false;
   int beginCalls = 0;
-  bool begin(int, int, uint32_t) { begun = true; beginCalls++; return true; }
+  uint32_t clock = 0, timeoutUs = 0;
+  void begin() { begun = true; beginCalls++; }
   void end() { begun = false; }
-  void setTimeOut(uint16_t) {}
+  void setClock(uint32_t f) { clock = f; }
+  void setWireTimeout(uint32_t t = 25000, bool = false) { timeoutUs = t; }
   void beginTransmission(uint8_t a) { cur = a; tx.clear(); }
   size_t write(uint8_t b) { tx.push_back(b); return 1; }
-  uint8_t endTransmission(bool stop = true) {
+  uint8_t endTransmission(uint8_t stop = 1) {
     if (!g_mpu.present || cur != g_mpu.addr || g_mpu.mode == 1) return 2;
     if (tx.size() >= 2) { g_mpu.regs[tx[0] & 127] = tx[1]; g_mpu.initWrites++; }
     else if (tx.size() == 1) regPtr = tx[0];
     (void)stop;
     return 0;
   }
-  size_t requestFrom(uint8_t a, size_t n, bool) {
+  uint8_t requestFrom(uint8_t a, uint8_t n, uint8_t) {
     rx.clear(); rxPos = 0;
     if (!g_mpu.present || a != g_mpu.addr || g_mpu.mode == 1) return 0;
     if (regPtr == 0x75) { rx.push_back(g_mpu.whoami); }
@@ -200,136 +162,23 @@ struct MockWire {
 };
 static MockWire Wire;
 
-// ---- ESP / system -------------------------------------------------------------------------------
-typedef enum { ESP_RST_UNKNOWN, ESP_RST_POWERON, ESP_RST_EXT, ESP_RST_SW, ESP_RST_PANIC, ESP_RST_INT_WDT, ESP_RST_TASK_WDT,
-               ESP_RST_WDT, ESP_RST_DEEPSLEEP, ESP_RST_BROWNOUT, ESP_RST_SDIO } esp_reset_reason_t;
-static esp_reset_reason_t g_mockReset = ESP_RST_POWERON;
-static inline esp_reset_reason_t esp_reset_reason() { return g_mockReset; }
-static inline uint32_t esp_random() { return 12345; }
-struct MockEsp {
-  const char* getChipModel() { return "ESP32-MOCK"; }
-  int getChipRevision() { return 1; }
-  uint32_t getCpuFreqMHz() { return 240; }
-  uint32_t getFlashChipSize() { return 4194304; }
-  uint32_t getFreeHeap() { return 200000; }
-  const char* getSdkVersion() { return "mock-idf"; }
+// ---- EEPROM (4 KB, optionally persisted to a host file so a "reboot" = re-running the process keeps the settings) ----
+static std::string g_eepromPath;
+struct MockEEPROM {
+  uint8_t mem[4096];
+  bool loaded = false;
+  void ensure() {
+    if (loaded) return;
+    loaded = true;
+    memset(mem, 0xFF, sizeof(mem));                       // erased EEPROM reads 0xFF
+    if (!g_eepromPath.empty()) { FILE* f = fopen(g_eepromPath.c_str(), "rb"); if (f) { if (fread(mem, 1, sizeof(mem), f) == 0) {} fclose(f); } }
+  }
+  void flush() { if (g_eepromPath.empty()) return; FILE* f = fopen(g_eepromPath.c_str(), "wb"); if (f) { fwrite(mem, 1, sizeof(mem), f); fclose(f); } }
+  void reset() { loaded = false; }
+  uint16_t length() { return 4096; }
+  template <typename T> T& get(int addr, T& t) { ensure(); memcpy(&t, mem + addr, sizeof(T)); return t; }
+  template <typename T> const T& put(int addr, const T& t) { ensure(); memcpy(mem + addr, &t, sizeof(T)); flush(); return t; }
+  uint8_t read(int a) { ensure(); return mem[a]; }
+  void update(int a, uint8_t v) { ensure(); mem[a] = v; flush(); }
 };
-static MockEsp ESP;
-typedef int esp_err_t;
-#define ESP_OK 0
-static int g_wdtResets = 0;
-#if MOCK_CORE_V3
-typedef struct { uint32_t timeout_ms; uint32_t idle_core_mask; bool trigger_panic; } esp_task_wdt_config_t;
-static inline esp_err_t esp_task_wdt_init(const esp_task_wdt_config_t*) { return ESP_OK; }
-static inline esp_err_t esp_task_wdt_reconfigure(const esp_task_wdt_config_t*) { return ESP_OK; }
-#else
-static inline esp_err_t esp_task_wdt_init(uint32_t, bool) { return ESP_OK; }
-#endif
-static inline esp_err_t esp_task_wdt_add(TaskHandle_t) { return ESP_OK; }
-static int g_wdtDeleted = 0;
-static inline esp_err_t esp_task_wdt_delete(TaskHandle_t) { g_wdtDeleted++; return ESP_OK; }
-static inline esp_err_t esp_task_wdt_reset() { g_wdtResets++; return ESP_OK; }
-
-// ---- LittleFS backed by a host directory (so "reboots" = re-running the process keep data) ----------
-static std::string g_fsDir = "/tmp/mockfs";
-static bool g_fsMountOk = true;
-static bool g_fsFailWrites = false;
-static int g_fsShortWrite = 0;               // >0: next writes return half the bytes
-static size_t g_fsTotal = 1500000;
-static uint32_t g_fsWriteCalls = 0;
-static uint32_t g_fsWriteStallUs = 0;        // virtual time consumed inside each write (models a flash erase/GC stall)
-static std::string fsPath(const char* p) { return g_fsDir + (p[0] == '/' ? "" : "/") + p; }
-
-struct FileImpl {
-  FILE* fp = nullptr;
-  bool dir = false;
-  std::vector<std::string> names;
-  size_t idx = 0;
-  std::string name;
-  size_t sz = 0;
-  ~FileImpl() { if (fp) fclose(fp); }
-};
-class File {
-  std::shared_ptr<FileImpl> d;
- public:
-  File() {}
-  explicit File(std::shared_ptr<FileImpl> i) : d(i) {}
-  operator bool() const { return (bool)d && (d->fp || d->dir); }
-  size_t write(const uint8_t* b, size_t n) {
-    if (!d || !d->fp) return 0;
-    g_fsWriteCalls++;
-    if (g_fsWriteStallUs) mockAdvance(g_fsWriteStallUs);
-    if (g_fsFailWrites) return 0;
-    if (g_fsShortWrite > 0) { g_fsShortWrite--; n = n / 2; }
-    return fwrite(b, 1, n, d->fp);
-  }
-  size_t read(uint8_t* b, size_t n) { return (d && d->fp) ? fread(b, 1, n, d->fp) : 0; }
-  size_t readBytes(char* b, size_t n) { return read((uint8_t*)b, n); }
-  size_t readBytesUntil(char term, char* b, size_t n) {
-    size_t i = 0;
-    while (i < n) { int c = d && d->fp ? fgetc(d->fp) : EOF; if (c == EOF || c == term) break; b[i++] = (char)c; }
-    return i;
-  }
-  int available() { if (!d || !d->fp) return 0; long p = ftell(d->fp); fseek(d->fp, 0, SEEK_END); long e = ftell(d->fp); fseek(d->fp, p, SEEK_SET); return (int)(e - p); }
-  size_t size() const { if (!d) return 0; return d->dir ? 0 : d->sz; }
-  void close() { if (d && d->fp) { fclose(d->fp); d->fp = nullptr; } }
-  const char* name() const { return d ? d->name.c_str() : ""; }
-  bool isDirectory() { return d && d->dir; }
-  File openNextFile() {
-    if (!d || !d->dir || d->idx >= d->names.size()) return File();
-    std::string nm = d->names[d->idx++];
-    auto i = std::make_shared<FileImpl>();
-    i->name = nm;
-    struct stat st;
-    if (stat(fsPath(nm.c_str()).c_str(), &st) == 0) i->sz = (size_t)st.st_size;
-    i->fp = fopen(fsPath(nm.c_str()).c_str(), "rb");
-    return File(i);
-  }
-};
-class LittleFSClass {
- public:
-  bool begin(bool = false, const char* = "/littlefs", uint8_t = 10, const char* = "spiffs") {
-    if (!g_fsMountOk) return false;
-    mkdir(g_fsDir.c_str(), 0755);
-    return true;
-  }
-  void end() {}
-  bool format() {
-    DIR* dd = opendir(g_fsDir.c_str());
-    if (!dd) return false;
-    while (dirent* e = readdir(dd)) if (e->d_name[0] != '.') ::remove(fsPath(e->d_name).c_str());
-    closedir(dd);
-    return true;
-  }
-  File open(const char* path, const char* mode = "r") {
-    auto i = std::make_shared<FileImpl>();
-    if (strcmp(path, "/") == 0) {
-      i->dir = true;
-      DIR* dd = opendir(g_fsDir.c_str());
-      if (dd) { while (dirent* e = readdir(dd)) if (e->d_name[0] != '.') i->names.push_back(e->d_name); closedir(dd); }
-      std::sort(i->names.begin(), i->names.end());
-      return File(i);
-    }
-    const char* m = mode[0] == 'w' ? "wb" : (mode[0] == 'a' ? "ab" : "rb");
-    if (g_fsFailWrites && m[0] != 'r') return File();
-    i->fp = fopen(fsPath(path).c_str(), m);
-    if (!i->fp) return File();
-    i->name = path[0] == '/' ? path + 1 : path;
-    struct stat st;
-    if (stat(fsPath(path).c_str(), &st) == 0) i->sz = (size_t)st.st_size;
-    return File(i);
-  }
-  bool exists(const char* p) { struct stat st; return stat(fsPath(p).c_str(), &st) == 0; }
-  bool remove(const char* p) { return ::remove(fsPath(p).c_str()) == 0; }
-  bool rename(const char* a, const char* b) { return ::rename(fsPath(a).c_str(), fsPath(b).c_str()) == 0; }
-  size_t totalBytes() { return g_fsTotal; }
-  size_t usedBytes() {
-    size_t t = 0;
-    DIR* dd = opendir(g_fsDir.c_str());
-    if (!dd) return 0;
-    while (dirent* e = readdir(dd)) { if (e->d_name[0] == '.') continue; struct stat st; if (stat(fsPath(e->d_name).c_str(), &st) == 0) t += (size_t)((st.st_size + 4095) / 4096 * 4096); }
-    closedir(dd);
-    return t;
-  }
-};
-static LittleFSClass LittleFS;
+static MockEEPROM EEPROM;

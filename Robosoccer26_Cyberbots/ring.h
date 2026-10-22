@@ -1,13 +1,15 @@
-// ring.h - ball sensing: a ring of phototransistors on the CD74HC4067 (one analog line) plus two digital IR obstacle modules.
+// ring.h - ball sensing: phototransistor receivers, each on its own analog input (A0, A1, ...), plus two digital IR obstacle modules.
+// (The word "ring" in the names is historical: it is the set of ball receivers, two fitted today, up to eight supported.)
 //
-//   ring    C0..C11 (+ optional C12..C15): phototransistors that see the BALL'S OWN infrared emission. Each channel gives a signal STRENGTH;
-//           the bearing of the ball is estimated from which channels see it and the mounting angle configured for each (ringBearing).
-//   module 0  (GPIO35, front): digital "something is in front, at the distance set by its trimmer" = the ball is in the shooting position.
-//   module 1  (GPIO36, position undecided): read and logged only.
+//   receivers  A0 (receiver 0), A1 (receiver 1) and optionally A2..A7: phototransistors that see the BALL'S OWN infrared emission. Each gives a signal STRENGTH;
+//           the bearing of the ball is estimated from which receivers see it and the mounting angle configured for each (ringBearing).
+//   module 0  (D34, front): digital "something is in front, at the distance set by its trimmer" = the ball is in the shooting position.
+//   module 1  (D35, second module): read and logged only.
 //
-// Reading one channel: switch the multiplexer, wait ringSettleUs, then sample the analog line for ringWinUs and keep the PEAK-TO-PEAK swing.
+// Reading one receiver (NON-BLOCKING state machine, one analogRead of about 112 us per call): one discarded conversion after the ADC input changes, then sample
+// the receiver's analog input (10-bit, 0..1023) for ringWinUs and keep the PEAK-TO-PEAK swing.
 // The ball emits bursts (the RCJ ball: a 40 kHz carrier gated into ~190 us bursts about every 830 us), so a short sample window can miss a burst;
-// the window must cover at least one burst period. The swing is also immune to steady light (sunlight, the modules' unmodulated LEDs): a constant
+// the window must cover at least one burst period. The swing is also immune to steady light (sunlight, the IR transmitter LEDs and the modules' unmodulated LEDs): a constant
 // level has no swing. What the phototransistor circuit does with the 40 kHz carrier (its response time vs. the load resistor) decides how much
 // swing arrives at the pin: that is measured on the robot, not assumed (docs/RING_AND_MODULES.md).
 #pragma once
@@ -18,7 +20,7 @@ static const uint32_t MOD_SAMPLE_MS = 5;
 
 struct RingCh {
   bool init;
-  uint16_t lo, hi;           // last window: lowest / highest reading
+  uint16_t lo, hi;           // last window: lowest / highest reading (0..1023)
   uint16_t amp;              // last peak-to-peak swing
   float avg;                 // smoothed swing
   float s;                   // strength: avg / ringNear (1.0 = "very close")
@@ -57,11 +59,18 @@ static Ball g_ball;
 static float g_lastBearing = 0.0f, g_bearingRate = 0.0f;   // last seen bearing, and how fast it was changing (deg/s, + = moving to the right)
 static uint32_t g_lastBearingMs = 0, g_rateRefMs = 0;
 static float g_rateRef = 0.0f;
+static float g_bHist[3];                       // bearing history, one sample per 50 ms (see ringUpdateBall)
+static uint32_t g_bHistMs = 0;
 static uint32_t g_ringLastScanMs = 0;                       // last completed channel scan (for the freshness checks)
 static uint32_t g_ringCycleMs = 0, g_ringCycles = 0;        // last completed full pass over the enabled channels
 static uint8_t g_ringNext = 0;                              // next channel to scan
 static uint32_t g_modLastMs = 0;
 static uint32_t g_ringScanMaxUs = 0, g_ringScanLastUs = 0;
+enum RingPhase : uint8_t { RP_IDLE, RP_SAMPLE };
+static uint8_t g_ringPhase = RP_IDLE;                       // state of the non-blocking channel scan
+static uint32_t g_ringT0 = 0, g_ringScanT0 = 0;             // micros() when the window opened / when the receiver's scan began
+static uint16_t g_ringLo = 0, g_ringHi = 0;
+static uint8_t g_ringNSamp = 0;
 
 // ---- noise calibration (':ring cal noise') ----------------------------------------------------------------------
 static bool g_ringCalActive = false;
@@ -125,45 +134,17 @@ static bool ringInBlindSpot(const Config& c, float deg) {
 }
 
 // ---- hardware ---------------------------------------------------------------------------------------------------
-static inline void ringSelect(uint8_t ch) {
-  for (uint8_t k = 0; k < 4; k++) digitalWrite(PIN_MUX_SEL[k], ((ch >> k) & 1u) ? HIGH : LOW);
-}
-
-// Start-up sequence of the multiplexer (called once from setup(), AFTER the motor pins are safe, the filesystem and PWM are up):
-//   1. wait until RING_BOOT_HOLDOFF_MS after reset has passed. By then the ROM and the bootloader are long finished and the strapping pins have
-//      been sampled; a software delay does NOT make the strapping levels safe, it only guarantees the firmware has not touched the select pins before.
-//   2. up to this point the four select pins are untouched inputs (the multiplexer sees whatever the pins' own pull resistors give: channel 0..15, harmless).
-//   3. each select pin gets its LOW level in the output register first and is switched to output afterwards, so there is no glitch to HIGH.
-//   4. SIG and the modules become plain inputs; the scan starts with the first ringService() call.
-// EN is wired to GND, so the multiplexer cannot be disabled by software; no spare output-capable GPIO exists to control it.
+// Start-up (called once from setup(), after the motor pins are safe): the receiver pins are plain analog inputs (no pull-up), the module pins plain digital inputs.
 static void ringBegin() {
-  while (millis() < RING_BOOT_HOLDOFF_MS) delay(1);
-  for (uint8_t k = 0; k < 4; k++) { digitalWrite(PIN_MUX_SEL[k], LOW); pinMode(PIN_MUX_SEL[k], OUTPUT); }
-  pinMode(P_MUX_SIG, INPUT);
-  for (uint8_t i = 0; i < MOD_COUNT; i++) pinMode(PIN_MOD[i], INPUT);
+  for (uint8_t i = 0; i < RING_CH_MAX; i++) pinMode(PIN_RECV[i], INPUT);   // analog inputs: no pull-up (an open input floats and reads random values: wire every fitted receiver)
+  for (uint8_t i = 0; i < MOD_COUNT; i++) pinMode(PIN_MOD[i], INPUT);      // plain inputs: the module output drives the line
   memset(g_ring, 0, sizeof(g_ring));
   memset(g_mod, 0, sizeof(g_mod));
   memset(&g_ball, 0, sizeof(g_ball));
-  g_lastBearing = 0; g_bearingRate = 0; g_lastBearingMs = 0; g_rateRefMs = 0; g_rateRef = 0;
+  g_lastBearing = 0; g_bearingRate = 0; g_lastBearingMs = 0; g_rateRefMs = 0; g_rateRef = 0; g_bHistMs = 0;
   g_ringNext = 0; g_ringLastScanMs = 0; g_ringCycleMs = 0; g_ringCycles = 0; g_modLastMs = 0;
   g_ringCalActive = false;
-}
-
-// One channel: select, settle, sample for the window, keep lowest and highest. Bounded: ringWinUs + settle + one conversion.
-static void ringScanChannel(const Config& c, uint8_t ch, uint16_t* lo, uint16_t* hi) {
-  ringSelect(ch);
-  delayMicroseconds(c.ringSettleUs);
-  (void)analogRead(P_MUX_SIG);                          // discard the first conversion after the switch (sample-and-hold still holds the previous channel)
-  uint32_t t0 = micros();
-  uint16_t mn = 4095, mx = 0;
-  uint16_t n = 0;
-  do {
-    uint16_t v = (uint16_t)analogRead(P_MUX_SIG);
-    if (v < mn) mn = v;
-    if (v > mx) mx = v;
-    n++;
-  } while ((uint32_t)(micros() - t0) < c.ringWinUs && n < 4000);
-  *lo = mn; *hi = mx;
+  g_ringPhase = RP_IDLE;
 }
 
 static void ringStep(const Config& c, uint8_t ch, uint16_t lo, uint16_t hi, uint32_t nowMs) {
@@ -211,14 +192,18 @@ static void ringUpdateBall(const Config& c, uint32_t nowMs) {
     g_ball.bearing = brg; g_ball.bestCh = best; g_ball.strength = g_ring[best].s;
     // Last bearing and its rate (where the ball went when it disappears) only from a healthy signal: near the detection threshold channels drop out
     // one by one and the bearing drifts. angDiffDeg(a, b) = a - b; the rate is deg/s, + = towards the right.
-    if (g_ring[best].avg >= 2.0f * ringThreshold(c, best)) {
+    if (g_ring[best].avg >= 3.0f * ringThreshold(c, best)) {
       if (!g_rateRefMs || elapsedMs(nowMs, g_lastBearingMs) > 500) { g_rateRef = brg; g_rateRefMs = nowMs ? nowMs : 1u; g_bearingRate = 0; }
       else if (elapsedMs(nowMs, g_rateRefMs) >= 60) {
         float dt = (float)elapsedMs(nowMs, g_rateRefMs) * 0.001f;
         g_bearingRate = 0.6f * g_bearingRate + 0.4f * (angDiffDeg(brg, g_rateRef) / dt);
         g_rateRef = brg; g_rateRefMs = nowMs ? nowMs : 1u;
       }
-      g_lastBearing = brg; g_lastBearingMs = nowMs ? nowMs : 1u;
+      // g_lastBearing is the bearing as it was about 100-150 ms earlier: when the ball disappears its signal fades receiver by receiver, and the bearing
+      // computed during the fade drifts towards the receiver that fades last. A sample from before the fade is the honest "last known" direction.
+      if (!g_bHistMs || elapsedMs(nowMs, g_lastBearingMs) > 500) { g_bHist[0] = g_bHist[1] = g_bHist[2] = brg; g_bHistMs = nowMs ? nowMs : 1u; }
+      else if (elapsedMs(nowMs, g_bHistMs) >= 50) { g_bHist[2] = g_bHist[1]; g_bHist[1] = g_bHist[0]; g_bHist[0] = brg; g_bHistMs = nowMs ? nowMs : 1u; }
+      g_lastBearing = g_bHist[2]; g_lastBearingMs = nowMs ? nowMs : 1u;
     }
     g_ball.lastSeenMs = nowMs ? nowMs : 1u;
   } else g_ball.strength = 0.0f;
@@ -242,30 +227,46 @@ static void modService(const Config& c, uint32_t nowMs) {
     Module& m = g_mod[i];
     if (!modEnabled(c, i)) { m.raw = m.active = false; m.cnt = 0; continue; }
     bool level = digitalRead(PIN_MOD[i]) != 0;
-    m.raw = c.modActiveLow ? !level : level;
+    bool activeLow = ((c.modActiveLow >> i) & 1u) != 0;
+    m.raw = activeLow ? !level : level;
     m.samples++;
     if (m.raw != m.active) { if (++m.cnt >= c.modDebounce) { m.active = m.raw; m.cnt = 0; m.sinceMs = nowMs ? nowMs : 1u; } } else m.cnt = 0;
   }
 }
 
-// Every loop iteration: ONE ring channel (about ringWinUs long) when the previous scan has finished, and the modules every 5 ms.
+// Every loop iteration: the modules every 5 ms, and ONE step of the receiver scan (at most one analogRead, about 112 us). The scan never waits:
+//   IDLE   -> pick the next enabled receiver; discard one conversion (the ADC sample-and-hold still holds the previous input) and open the window
+//   SAMPLE -> one conversion per call into the window's lowest / highest; when the window (ringwinus, at least 2 samples) has elapsed, finish the receiver
 static void ringService(const Config& c, uint32_t nowMs) {
   modService(c, nowMs);
-  uint8_t tries = 0;
-  while (tries++ < RING_CH_MAX && !ringEnabled(c, g_ringNext)) g_ringNext = (uint8_t)((g_ringNext + 1) % RING_CH_MAX);
-  if (ringEnabled(c, g_ringNext)) {
+  if (g_ringPhase == RP_IDLE) {
+    uint8_t tries = 0;
+    while (tries++ < RING_CH_MAX && !ringEnabled(c, g_ringNext)) g_ringNext = (uint8_t)((g_ringNext + 1) % RING_CH_MAX);
+    if (ringEnabled(c, g_ringNext)) {
+      g_ringScanT0 = micros();
+      (void)analogRead(PIN_RECV[g_ringNext]);
+      g_ringT0 = micros();
+      g_ringLo = 1023; g_ringHi = 0; g_ringNSamp = 0;
+      g_ringPhase = RP_SAMPLE;
+    }
+  } else {
     uint8_t ch = g_ringNext;
-    uint32_t t0 = micros();
-    uint16_t lo, hi;
-    ringScanChannel(c, ch, &lo, &hi);
-    g_ringScanLastUs = (uint32_t)(micros() - t0);
-    if (g_ringScanLastUs > g_ringScanMaxUs) g_ringScanMaxUs = g_ringScanLastUs;
-    ringStep(c, ch, lo, hi, nowMs);
-    if (g_ringCalActive && (uint16_t)(hi - lo) > g_ringCalMax[ch]) g_ringCalMax[ch] = (uint16_t)(hi - lo);
-    g_ringLastScanMs = nowMs ? nowMs : 1u;
-    uint8_t nx = (uint8_t)((ch + 1) % RING_CH_MAX);
-    if (nx <= ch) { g_ringCycleMs = nowMs ? nowMs : 1u; g_ringCycles++; }          // wrapped round
-    g_ringNext = nx;
+    uint16_t v = (uint16_t)analogRead(PIN_RECV[ch]);
+    if (v < g_ringLo) g_ringLo = v;
+    if (v > g_ringHi) g_ringHi = v;
+    if (g_ringNSamp < 255) g_ringNSamp++;
+    uint32_t t = micros();
+    if (((uint32_t)(t - g_ringT0) >= c.ringWinUs && g_ringNSamp >= 2) || g_ringNSamp >= 250) {
+      g_ringScanLastUs = (uint32_t)(t - g_ringScanT0);
+      if (g_ringScanLastUs > g_ringScanMaxUs) g_ringScanMaxUs = g_ringScanLastUs;
+      ringStep(c, ch, g_ringLo, g_ringHi, nowMs);
+      if (g_ringCalActive && (uint16_t)(g_ringHi - g_ringLo) > g_ringCalMax[ch]) g_ringCalMax[ch] = (uint16_t)(g_ringHi - g_ringLo);
+      g_ringLastScanMs = nowMs ? nowMs : 1u;
+      uint8_t nx = (uint8_t)((ch + 1) % RING_CH_MAX);
+      if (nx <= ch) { g_ringCycleMs = nowMs ? nowMs : 1u; g_ringCycles++; }          // wrapped round
+      g_ringNext = nx;
+      g_ringPhase = RP_IDLE;
+    }
   }
   ringUpdateBall(c, nowMs);
 }
@@ -273,26 +274,26 @@ static void ringService(const Config& c, uint32_t nowMs) {
 // 20 Hz: wiring / coverage faults. A channel that is switched off is "not tested", never "failed".
 static void ringHealth(const Config& c, uint32_t nowMs) {
   uint8_t nUse = ringCountUsable(c), nEn = ringCountEnabled(c);
-  char ev[72];
-  snprintf(ev, sizeof(ev), "no usable ring channel (%u enabled, %u excluded)", (unsigned)nEn, (unsigned)(nEn - nUse));
+  char ev[48];
+  snprintf(ev, sizeof(ev), "no usable receiver (%u on, %u excluded)", (unsigned)nEn, (unsigned)(nEn - nUse));
   faultUpdate(F_RING_NONE, nUse == 0, c.recoverVerifyMs, ev);
-  snprintf(ev, sizeof(ev), "no completed ring scan for %lu ms (cycles=%lu)", UL(elapsedMs(nowMs, g_ringLastScanMs)), UL(g_ringCycles));
+  snprintf(ev, sizeof(ev), "no ring scan for %lu ms (cycles=%lu)", UL(elapsedMs(nowMs, g_ringLastScanMs)), UL(g_ringCycles));
   faultUpdate(F_RING_STALL, nEn > 0 && g_ringLastScanMs != 0 && elapsedMs(nowMs, g_ringLastScanMs) > 600, c.recoverVerifyMs, ev);
-  char list[52] = "";
+  char list[40] = "";
   bool any = false;
   for (uint8_t i = 0; i < RING_CH_MAX; i++) {
     if (!ringEnabled(c, i) || !g_ring[i].railFault) continue;
     char one[12];
-    snprintf(one, sizeof(one), "%sC%u", any ? " " : "", (unsigned)i);
+    snprintf(one, sizeof(one), "%sA%u", any ? " " : "", (unsigned)i);
     if (strlen(list) + strlen(one) < sizeof(list)) strcat(list, one);
     any = true;
   }
-  char evc[72];
+  char evc[48];
   snprintf(evc, sizeof(evc), "saturated: %s", list);
   faultUpdate(F_RING_CHANNEL, any, c.recoverVerifyMs, evc);
   uint8_t nU2;
   float gap = ringCoverageGap(c, &nU2);
-  snprintf(ev, sizeof(ev), "uncovered arc ~%.0f deg > %u (config bearings, fov +-%u)", (double)gap, (unsigned)c.ringMaxGap, (unsigned)c.ringFovHalf);
+  snprintf(ev, sizeof(ev), "gap ~%.0f deg > %u (fov +-%u)", (double)gap, (unsigned)c.ringMaxGap, (unsigned)c.ringFovHalf);
   faultUpdate(F_RING_GAP, nU2 > 0 && gap > (float)c.ringMaxGap, c.recoverVerifyMs, ev);
 }
 
