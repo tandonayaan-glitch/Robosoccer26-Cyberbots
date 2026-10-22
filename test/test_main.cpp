@@ -134,6 +134,138 @@ static void t_report_paced() {
   CHECK(outHas("ball receivers: 8 of 8") && outHas("IR module 1 D35") && outHas("a module reacts to ANY reflective object"));
 }
 
+// ---- event records in the EEPROM ------------------------------------------------------------------------------
+static std::vector<std::string> outLinesWith(const char* marker) {      // all output lines containing `marker`
+  std::vector<std::string> v; size_t p = 0;
+  while (p < Serial.out.size()) { size_t e = Serial.out.find('\n', p); if (e == std::string::npos) e = Serial.out.size(); std::string l = Serial.out.substr(p, e - p); if (l.find(marker) != std::string::npos) v.push_back(l); p = e + 1; }
+  return v;
+}
+static void t_records() {
+  bootCal();
+  simRun(500);
+  CHECK(g_recCount >= 1);                                                // the BOOT record of this start
+  uint16_t base = g_recCount;
+  recAdd(REC_NOTE, 77);
+  startAuto(); ballFar(); simRun(500);                                   // SEEK -> APPROACH transitions are recorded
+  ballGone(); simRun(g_cfg.lostHoldMs + 600);                            // ball lost, search
+  CHECK(g_recCount > base + 2);
+  send(":save\n"); simRun(200);
+  // dump: complete, in order, once, from the first marker to the end marker
+  Serial.out.clear();
+  send(":log\n"); simRun(3000);
+  CHECK(outCount("#RECORDS") == 1 && outCount("#END-RECORDS") == 1);
+  CHECK(outHas(",BOOT,0") && outHas(",NOTE,77") && outHas(",NAV,IDLE>SEEK") && outHas(",NAV,SEEK>APPROACH") && outHas(",BALL_LOST,last_bearing_deg=") && outHas(",CFG_SAVED,0"));
+  // power cycle: the records survive, the sequence numbers continue, a new BOOT record is added
+  uint16_t before = g_recCount, seqBefore = g_recSeq;
+  EEPROM.reset(); g_autoEnabled = false; g_navState = NAV_IDLE; ballGone(); setup();
+  CHECK(g_recCount == before + 1 && g_recSeq == (uint16_t)(seqBefore + 1));
+  Serial.out.clear(); send(":log\n"); simRun(3000);
+  CHECK(outCount(",BOOT,0") == 2 && outHas(",NOTE,77"));
+  // the user's marker and clear
+  send(":log note 5\n"); simRun(50);
+  send(":log clear\n"); simRun(50);
+  CHECK(g_recCount == 0);
+  Serial.out.clear(); send(":log\n"); simRun(1000);
+  CHECK(outHas("#RECORDS 0 stored") && outHas("#END-RECORDS"));
+}
+
+// More events than slots: the ring overwrites the oldest, keeps the order, and the dump lists exactly REC_SLOTS records oldest-first.
+static void t_records_wrap() {
+  bootCal();
+  simRun(300);
+  recClear();
+  for (int i = 0; i < REC_SLOTS * 2 + 17; i++) recAdd(REC_FAULT, (uint16_t)(i % F_COUNT));
+  CHECK(g_recCount == REC_SLOTS);
+  Serial.out.clear();
+  send(":log\n");
+  for (int k = 0; k < 40000 && !outHas("#END-RECORDS"); k++) { loop(); mockAdvance(100); }
+  std::vector<std::string> lines = outLinesWith(",FAULT,");
+  CHECK((int)lines.size() == REC_SLOTS);
+  long prev = -1; bool inOrder = true;
+  for (auto& l : lines) { size_t c = l.find(']'); long seq = atol(l.c_str() + (c == std::string::npos ? 0 : c + 1)); (void)seq; }
+  for (auto& l : lines) { long seq = atol(l.c_str()); if (seq <= prev) inOrder = false; prev = seq; }
+  CHECK(inOrder);
+  CHECK(prev == REC_SLOTS * 2 + 17);                                     // the newest record is the last one written
+  CHECK(outCount("#END-RECORDS") == 1);
+  // a routine-record flood is limited (6 per second) and counted
+  recClear(); g_recDropped = 0;
+  uint32_t t0 = g_recCount;
+  for (int i = 0; i < 50; i++) recAdd(REC_NOTE, (uint16_t)i);
+  CHECK(g_recCount - t0 <= 6 && g_recDropped >= 44);
+  // important records are never dropped by the flood guard
+  recAdd(REC_FAULT, 1); recAdd(REC_SAFE_STOP, 0);
+  CHECK(g_recCount - t0 <= 8);
+}
+
+// Parts that are missing: the robot still starts, reports it, and can be driven by hand; nothing blocks.
+static void t_missing_hardware() {
+  g_mpu.present = false;                                                 // no MPU6050 on the bus
+  ballGone(); setup(); layout8(); calibrateAll();
+  CHECK(g_navState == NAV_IDLE && g_cond == COND_DEGRADED && !g_imu.present);   // it booted; the IMU fault only degrades
+  simRun(300);
+  send(":status\n"); simRun(800);
+  CHECK(outHas("IMU MISSING") && outHas("condition DEGRADED"));
+  Serial.out.clear(); send(":raw\n"); simRun(800);
+  CHECK(outHas("IMU: NOT FOUND") && outHas("raw analog"));
+  send("f"); simRun(200);
+  CHECK(wheelDir(W_FL) > 0 && wheelDir(W_FR) > 0);                       // manual driving works without the IMU
+  send("s"); simRun(100);
+  startAuto(); ballFar(); simRun(600);
+  CHECK(g_autoEnabled && g_navState == NAV_APPROACH && g_reqVy > 0.1f);  // autonomy works without heading hold
+  CHECK(isnan(g_hdgErr) && !imuHeadingUsable(g_cfg, millis()));
+  send("s"); simRun(100);
+  // no receivers enabled at all: SAFE_STOP (sensing), autonomy refused, manual driving still allowed
+  g_cfg.ringEnable = 0; simRun(g_cfg.ringRailMs + 1500);
+  CHECK(faultActive(F_RING_NONE) && g_cond == COND_SAFE_STOP);
+  Serial.out.clear(); startAuto();
+  CHECK(!g_autoEnabled && outHas("REFUSED"));
+  send("f"); simRun(200);
+  CHECK(wheelDir(W_FL) > 0);
+  send("!"); simRun(50);
+  CHECK(allWheelsStopped());
+  // modules: an active-LOW module gets the internal pull-up (a missing wire reads "nothing detected"), an active-HIGH one does not
+  g_mpu.present = true;
+  bootCal(); g_cfg.modEnable = 3; simRun(100);
+  CHECK(g_pinMode[PIN_MOD[0]] == INPUT_PULLUP && g_pinMode[PIN_MOD[1]] == INPUT_PULLUP);
+  CHECK(!g_mod[0].active && !g_mod[1].active);
+  send(":mod level 0 high\n"); simRun(50);
+  CHECK(g_pinMode[PIN_MOD[0]] == INPUT && g_pinMode[PIN_MOD[1]] == INPUT_PULLUP);
+}
+
+// Every command answers; the status and diagnosis commands show what is there.
+static void t_commands() {
+  bootCal();
+  simRun(500);
+  Serial.out.clear(); send(":status\n"); simRun(800);
+  CHECK(outHas("uptime") && outHas("receivers: 8 on") && outHas("IMU present") && outHas("records"));
+  Serial.out.clear(); send(":pins\n"); simRun(800);
+  CHECK(outHas("FR: IN1 D22 IN2 D23 ENA D5") && outHas("BL: IN3 D28 IN4 D29 ENB D10") && outHas("front D34, second D35") && outHas("SDA D20 SCL D21"));
+  Serial.out.clear(); send(":raw\n"); simRun(800);
+  CHECK(outHas("raw analog") && outHas("A0=") && outHas("A7=") && outHas("raw module 0 (D34)") && outHas("raw module 1 (D35)") && outHas("IMU: present"));
+  Serial.out.clear(); send(":ver\n"); simRun(100);
+  CHECK(outHas("Arduino Mega 2560"));
+  send(":auto on\n"); simRun(100);
+  CHECK(g_autoEnabled);
+  send(":auto off\n"); simRun(100);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  send(":auto on\n"); simRun(100); send(":stop\n"); simRun(100);
+  CHECK(!g_autoEnabled);
+  send(":auto on\n"); simRun(100); send(":estop\n"); simRun(100);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  send(":manual l\n"); simRun(200);
+  CHECK(wheelsMatchStrafeRight() == false && wheelDir(W_FL) < 0);        // strafe left
+  send(":manual x\n"); simRun(50);
+  CHECK(outHas("usage: :manual"));
+  send(":log live on\n"); simRun(50);
+  Serial.out.clear(); recAdd(REC_SAFE_STOP, 9); simRun(100);
+  CHECK(outHas(",SAFE_STOP,9"));                                              // printed the moment it was recorded
+  send(":log live off\n"); simRun(50);
+  Serial.out.clear(); send("g"); simRun(100);
+  CHECK(outHas("records in the EEPROM"));
+  Serial.out.clear(); send(":help\n"); simRun(2500);
+  for (const char* w : {":log", ":status", ":raw", ":pins", ":auto on|off", ":manual", ":set", ":ring", ":mod", ":save", ":goal", ":mtest", ":recover", ":diag"}) CHECK(outHas(w));
+}
+
 static void t_angles() {
   CHECK_NEAR(angDiffDeg(359, 1), -2, 1e-4);
   CHECK_NEAR(angDiffDeg(1, 359), 2, 1e-4);
@@ -862,7 +994,7 @@ static void t_ring_pins_and_isolation() {
   CHECK(g_ring[0].scans > 0 && g_ring[1].scans > 0);
   for (int ch = 2; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A2..A7 are not scanned until switched on
   for (int k = 0; k < 8; k++) CHECK(g_pinMode[PIN_RECV[k]] == INPUT);   // analog inputs, no pull-up
-  CHECK(g_pinMode[PIN_MOD[0]] == INPUT && g_pinMode[PIN_MOD[1]] == INPUT);
+  CHECK(g_pinMode[PIN_MOD[0]] == INPUT_PULLUP && g_pinMode[PIN_MOD[1]] == INPUT);   // active-LOW front module: internal pull-up; the disabled second module is left alone
   CHECK(allWheelsStopped());
   layout8(); calibrateAll();
   simRun(300);
@@ -1461,6 +1593,10 @@ struct TestCase { const char* name; void (*fn)(); };
 static const TestCase TESTS[] = {
   T(t_minifmt),
   T(t_report_paced),
+  T(t_records),
+  T(t_records_wrap),
+  T(t_missing_hardware),
+  T(t_commands),
   T(t_angles),
   T(t_timer_rollover),
   T(t_mecanum),

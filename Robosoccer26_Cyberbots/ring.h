@@ -41,6 +41,7 @@ struct Module {
   uint32_t sinceMs, samples;
 };
 static Module g_mod[MOD_COUNT];
+static uint8_t g_modPinMode[MOD_COUNT];            // INPUT or INPUT_PULLUP currently set on each module pin
 
 struct Ball {
   bool valid;                // the ring sees the ball, or did within lostHoldMs
@@ -137,7 +138,7 @@ static bool ringInBlindSpot(const Config& c, float deg) {
 // Start-up (called once from setup(), after the motor pins are safe): the receiver pins are plain analog inputs (no pull-up), the module pins plain digital inputs.
 static void ringBegin() {
   for (uint8_t i = 0; i < RING_CH_MAX; i++) pinMode(PIN_RECV[i], INPUT);   // analog inputs: no pull-up (an open input floats and reads random values: wire every fitted receiver)
-  for (uint8_t i = 0; i < MOD_COUNT; i++) pinMode(PIN_MOD[i], INPUT);      // plain inputs: the module output drives the line
+  for (uint8_t i = 0; i < MOD_COUNT; i++) { pinMode(PIN_MOD[i], INPUT); g_modPinMode[i] = INPUT; }   // pull-up chosen per module polarity in modService()
   memset(g_ring, 0, sizeof(g_ring));
   memset(g_mod, 0, sizeof(g_mod));
   memset(&g_ball, 0, sizeof(g_ball));
@@ -226,8 +227,12 @@ static void modService(const Config& c, uint32_t nowMs) {
   for (uint8_t i = 0; i < MOD_COUNT; i++) {
     Module& m = g_mod[i];
     if (!modEnabled(c, i)) { m.raw = m.active = false; m.cnt = 0; continue; }
-    bool level = digitalRead(PIN_MOD[i]) != 0;
     bool activeLow = ((c.modActiveLow >> i) & 1u) != 0;
+    // An active-LOW module gets the ATmega's internal pull-up: a module that is not connected (or whose wire fell off) then reads HIGH = "nothing detected"
+    // instead of random noise. A real module output overrides the weak pull-up. (There is no pull-down on the AVR: an active-HIGH module that is missing floats.)
+    uint8_t want = activeLow ? INPUT_PULLUP : INPUT;
+    if (g_modPinMode[i] != want) { pinMode(PIN_MOD[i], want); g_modPinMode[i] = want; }
+    bool level = digitalRead(PIN_MOD[i]) != 0;
     m.raw = activeLow ? !level : level;
     m.samples++;
     if (m.raw != m.active) { if (++m.cnt >= c.modDebounce) { m.active = m.raw; m.cnt = 0; m.sinceMs = nowMs ? nowMs : 1u; } } else m.cnt = 0;

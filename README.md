@@ -7,8 +7,8 @@ Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers,
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 77,154 B flash (30 %), 3,519 B static RAM (42 %), 4,673 B left for the stack |
-> | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM) | 53 test cases, 2,238 checks, all pass, ASan/UBSan clean |
+> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 83,928 B flash (33 %), 3,573 B static RAM (43 %), 4,619 B left for the stack |
+> | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM) | 57 test cases, 2,292 checks, all pass, ASan/UBSan clean |
 > | Upload / run on a Mega | **not done**: the firmware has never run on the board |
 > | Receivers, modules, motors, power, MPU6050 wiring on the real robot | **not done**: the pinout, junction voltages, response to the ball, mounting angles, polarity, reset states and the power supply are unverified |
 >
@@ -51,6 +51,30 @@ Battery + goes through the power switch to both L298N motor-supply inputs; **all
 ball lost (`losthold` 300 ms) → SEARCH (rotate towards where it went, pause, reverse direction, wait; bounded). With `:set shootenable 1`, a registered goal heading and the ball ready: aim at the goal heading, reverse a little, drive forward at full power (no kicker).
 Motor commands are ramped; faults stop or degrade the robot; the MPU6050 failing disables heading hold and the shot. Motors stay off at boot and after every reset.
 
+## What happens when something is missing
+
+The firmware starts and keeps running; it tells you what is missing instead of stopping (`:status` and `:raw` show it at any time).
+
+| Missing | What happens |
+|---|---|
+| **MPU6050** (or its wiring) | boots; `IMU_MISSING` → DEGRADED (reduced speed). Manual driving and autonomy work; no heading hold, no goal heading, **no shot**. It retries every few seconds. |
+| **A receiver / its wiring** | an open analog input floats and reads random values, so **a missing receiver cannot be detected reliably** (the firmware has no way to tell a floating input from a quiet one). `:raw` shows it (random numbers instead of ~0 in the dark); `:ring cal noise` then stores that input's noise and raises its threshold. Switch an unused receiver off: `:ring off <n>`. |
+| **All receivers** (none enabled) | `RING_NONE` → SAFE_STOP; autonomy refused, manual driving still allowed. |
+| **A module / its wiring** | an active-LOW module (the default) has the internal pull-up, so a missing wire reads "nothing detected": no shot, the robot keeps approaching slowly (it never sees "ball in place"). Active-HIGH modules have no pull-down on the AVR and would float. |
+| **Serial / USB** | nothing waits for it; the robot runs normally, output is dropped when nobody reads it. |
+| **Saved settings** (blank or corrupt EEPROM) | defaults are used and reported; autonomy still needs `:ring cal noise` first. |
+| **Motors / L298N** | cannot be detected (no feedback): the PWM shown is the commanded value. |
+
+## Records: how to see and download them
+
+The robot keeps its own event log in the Mega's EEPROM (about 300 records, survives power-off): boot, faults and recoveries, navigation transitions, ball losses, shots, SAFE_STOP, configuration saves. You do not have to do anything to write them; they are written by themselves.
+
+* **See them:** open the Serial Monitor (115200 baud) and type `:log` + Enter. The newest are at the bottom; `t_ms` counts from the `BOOT` line above it. `:log live on` prints each new record the moment it happens; `:log note 5` adds a marker of your own; `:log clear` erases them.
+* **Download them to `records.txt` on the PC:** close the Serial Monitor, then run
+  `pip install pyserial` (once) and `python3 tools/get_records.py` (it finds the Mega; or `python3 tools/get_records.py COM5`). It writes `records.txt` next to where you run it. Opening the port restarts the Mega (as when uploading): nothing is lost, one more `BOOT` record is added, and the robot does not move.
+  `python3 tools/get_records.py --follow` instead saves **everything** the robot prints (with PC time stamps) until Ctrl-C: use it during a run; `:diag on` additionally prints one CSV status row every 250 ms.
+* The Mega cannot create files itself; `records.txt` is made by the PC tool from what the robot prints. Not tested on a real Mega.
+
 ## Repository layout
 
 | Path | Contents |
@@ -59,6 +83,7 @@ Motor commands are ramped; faults stop or degrade the robot; the MPU6050 failing
 | `Robosoccer26_Cyberbots/*.h` | Modules, one translation unit: `compat` `pins` `util` `config` `storage` `health` `motors` `ring` `imu` `logger` `nav` `report` `ringcli` `cli` |
 | `test/` | Host test harness: `mock_arduino.h`, `test_main.cpp`, `run_tests.sh`, `static_analysis.sh` |
 | `tools/avr_build.sh` | Real ATmega2560 compile (avr-gcc + the Arduino AVR core) and flash/RAM report |
+| `tools/get_records.py` | Saves the robot's EEPROM event records (or everything it prints) to `records.txt` on the PC |
 | `docs/WIRING_MEGA.md` | Components, pin map, receiver / LED / module / MPU6050 circuits, voltage checks, power and ground, boot safety |
 | `docs/BALL_SENSING.md` | Receivers and modules in the firmware, bearing, blind spots, calibration, open questions |
 | `docs/HEALTH_AND_LOGGING.md` | Health monitor, fault codes, Serial CSV |
@@ -100,13 +125,21 @@ Single keys act immediately. Words start with `:` and end with Enter.
 | `a` | enable autonomous ball seeking (refused if SAFE_STOP, noise floor not calibrated, or the front module off) |
 | `h` | full hardware-health report |
 | `d` | navigation state, ball state, heading, request, four commanded PWM values |
-| `g` | diagnostics status (CSV on/off, dropped lines, free RAM) |
+| `g` | diagnostics status (CSV on/off, record count, dropped lines, free RAM) |
 | `?` | command list |
 | `x` | not available on the Mega (no flash log); prints a message |
 
-Word commands: `:set <name> <v>`, `:get [name]`, `:save` / `:load` / `:defaults` (EEPROM), `:rev <FL|FR|BL|BR> <0|1>`, `:roller <X|O>`,
-`:ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset]`, `:mod [on|off <0|1> | level <0|1> low|high]`, `:goal [set|clear]`, `:zero`, `:gcal`, `:diag <on|off>` (CSV rows over Serial),
-`:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`, `:mrev <wheel>`, `:recover`. Not available on the Mega (answer with a message): `:xsel`, `:fsformat`, `:logdel`.
+Word commands (`:help` lists them on the robot):
+
+| Group | Commands |
+|---|---|
+| Records / diagnosis | `:log` (show records) · `:log clear` · `:log live on\|off` · `:log note <n>` · `:status` (one screen) · `:raw` (raw A0–A7, module pins, IMU) · `:pins` · `:ver` · `:diag on\|off` (CSV rows over Serial) |
+| Control | `:auto on\|off` · `:stop` · `:estop` · `:manual f\|b\|l\|r\|q\|e` · `:goal [set\|clear]` · `:zero` · `:gcal` · `:recover` |
+| Motor tests | `:mtest <wheel>` · `:dtest` · `:confirm` · `:mok <wheel>` · `:mrev <wheel>` |
+| Settings (EEPROM) | `:set <name> <v>` · `:get [name]` · `:save` · `:load` · `:defaults` · `:rev <FL\|FR\|BL\|BR> <0\|1>` · `:roller <X\|O>` |
+| Receivers / modules | `:ring [on\|off <0-7> \| bearing <0-7> <deg> \| cal noise \| cal near \| reset]` · `:mod [on\|off <0\|1> \| level <0\|1> low\|high]` |
+
+Not available on the Mega (they answer with a message): `:xsel`, `:fsformat`, `:logdel`, `x`.
 
 Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited warning); `:` lines are limited to 63 characters, rejected if too long or containing control characters, and abandoned after 4 s without Enter.
 Diagnostic commands never start motors; motor tests require `:mtest`/`:dtest` **and** `:confirm`. Long reports are printed in passes as the small output queue drains.

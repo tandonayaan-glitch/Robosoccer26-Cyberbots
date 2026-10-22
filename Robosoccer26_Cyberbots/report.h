@@ -127,9 +127,39 @@ static void printHealth(const Config& c, uint32_t now, PGM_P tag) {
   sayT(tag, "========================================================");
 }
 
+// ':raw' - what the hardware actually delivers right now, to find a missing or mis-wired part: every analog input, both module pins, the IMU, free RAM.
+static void printRaw(const Config& c) {
+  char line[100]; size_t n = 0; line[0] = 0;
+  for (uint8_t i = 0; i < RING_CH_MAX; i++) n += (size_t)snprintf(line + n, sizeof(line) - n, "A%u=%u ", (unsigned)i, (unsigned)analogRead(PIN_RECV[i]));
+  (void)analogRead(PIN_RECV[g_ringNext]);                            // leave the ADC on the input the running scan expects
+  say("INFO", "raw analog (0..1023): %s", line);
+  say("INFO", "  an input with nothing connected floats and shows random values; a receiver in the dark sits near 0, in strong light up to ~960");
+  for (uint8_t i = 0; i < MOD_COUNT; i++)
+    say("INFO", "raw module %u (D%u): pin %S | enabled %S | active when %S | decoded %S", (unsigned)i, (unsigned)PIN_MOD[i], digitalRead(PIN_MOD[i]) ? PSTR("HIGH") : PSTR("LOW"),
+        modEnabled(c, i) ? PSTR("yes") : PSTR("no"), ((c.modActiveLow >> i) & 1u) ? PSTR("LOW") : PSTR("HIGH"), g_mod[i].active ? PSTR("DETECTING") : PSTR("clear"));
+  say("INFO", "IMU: %S%S | free RAM %d B | EEPROM records %u", g_imu.present ? PSTR("present at 0x") : PSTR("NOT FOUND (no answer on D20/D21 at 0x68/0x69)"), g_imu.present ? (g_imu.addr == 0x69 ? PSTR("69") : PSTR("68")) : PSTR(""), freeRam(), (unsigned)g_recCount);
+}
+
+// ':pins' - the compiled pin map.
+static void printPins() {
+  say("INFO", "motors  FR: IN1 D%u IN2 D%u ENA D%u | BR: IN3 D%u IN4 D%u ENB D%u (right L298N)", (unsigned)P_FR_IN1, (unsigned)P_FR_IN2, (unsigned)P_FR_EN, (unsigned)P_BR_IN1, (unsigned)P_BR_IN2, (unsigned)P_BR_EN);
+  say("INFO", "motors  FL: IN1 D%u IN2 D%u ENA D%u | BL: IN3 D%u IN4 D%u ENB D%u (left L298N)", (unsigned)P_FL_IN1, (unsigned)P_FL_IN2, (unsigned)P_FL_EN, (unsigned)P_BL_IN1, (unsigned)P_BL_IN2, (unsigned)P_BL_EN);
+  say("INFO", "receivers A0..A7 (A0, A1 fitted) | modules: front D%u, second D%u | MPU6050 SDA D%u SCL D%u | serial D0/D1", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_SDA, (unsigned)P_SCL);
+}
+
+// ':status' - one screen: is everything there, and what is the robot doing.
+static void printStatus(const Config& c, uint32_t now) {
+  say("INFO", "uptime %lu s | condition %S | nav %S | autonomous %S | free RAM %d B", UL(now / 1000), condName(g_cond), (PGM_P)NAV_NAME[g_navState], g_autoEnabled ? PSTR("ENABLED") : PSTR("disabled"), freeRam());
+  say("INFO", "receivers: %u on, %u usable, noise floor %S | ball %S | modules: front %S, second %S | IMU %S%S", (unsigned)ringCountEnabled(c), (unsigned)ringCountUsable(c),
+      c.ringCalDone ? PSTR("calibrated") : PSTR("NOT calibrated"), g_ball.valid ? PSTR("seen") : PSTR("not seen"),
+      !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")), !modEnabled(c, 1) ? PSTR("off") : (g_mod[1].active ? PSTR("DETECTING") : PSTR("clear")),
+      g_imu.present ? PSTR("present") : PSTR("MISSING"), g_imu.present ? (imuHeadingUsable(c, now) ? PSTR(", heading usable") : PSTR(", heading NOT usable")) : PSTR(""));
+  say("INFO", "active faults: %u (mask 0x%X) | shots %lu | ball losses %lu | records %u | output lines dropped %lu", (unsigned)popcount16(faultMask()), (unsigned)faultMask(), UL(g_stats.shots), UL(g_stats.ballLossEvents), (unsigned)g_recCount, UL(g_outDropped));
+}
+
 // ---- paced reports -----------------------------------------------------------------------------------
 // Every long report is requested with reportRequest() and printed by reportService() from the main loop in as many passes as the small output queue needs.
-enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY };
+enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY, REP_LOG, REP_RAW, REP_PINS, REP_STATUS };
 static uint8_t g_repKind = REP_NONE;
 static void printHelp();
 static void cmdTestModeText();
@@ -143,6 +173,10 @@ static void reportRun(uint8_t kind, const Config& c, uint32_t now) {
     case REP_TEST: cmdTestModeText(); break;
     case REP_MOD: printModSnapshot(c); break;
     case REP_RINGONLY: printRingSnapshot(c); break;
+    case REP_LOG: recDump(); break;
+    case REP_RAW: printRaw(c); break;
+    case REP_PINS: printPins(); break;
+    case REP_STATUS: printStatus(c, now); break;
     default: break;
   }
 }

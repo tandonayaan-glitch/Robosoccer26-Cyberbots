@@ -54,6 +54,10 @@ struct Stats {
 };
 static Stats g_stats;
 
+// Event records kept in the EEPROM (logger.h): what happened, in order, survives a power cycle.
+enum RecType : uint8_t { REC_BOOT = 1, REC_FAULT, REC_RECOVER, REC_NAV, REC_BALL_LOST, REC_SHOT, REC_SAFE_STOP, REC_CFG_SAVED, REC_NOTE };
+static void recAdd(uint8_t type, uint16_t arg);
+
 // Implemented later (logger.h / nav.h).
 static void logEvent(const char* type, const char* note);
 static void onCondChange(Cond from, Cond to);
@@ -101,6 +105,7 @@ static void faultRaiseV(FaultCode c, PGM_P fmt, va_list ap) {
     char note[40];
     snprintf(note, sizeof(note), "%S;%s", faultCode((uint8_t)c), f.evidence);
     logEvent("F", note);
+    recAdd(REC_FAULT, (uint16_t)c);
     if (faultSev((uint8_t)c) == SEV_CRITICAL) g_stats.safetyStops++;
     condEvaluate();
     // severity, component, code, evidence, certainty, action, current mode, recovery
@@ -128,6 +133,7 @@ static void faultClear(FaultCode c, const char* how) {
   char note[40];
   snprintf(note, sizeof(note), "%S;%s", faultCode((uint8_t)c), how);
   logEvent("R", note);
+  recAdd(REC_RECOVER, (uint16_t)c);
   condEvaluate();
 }
 

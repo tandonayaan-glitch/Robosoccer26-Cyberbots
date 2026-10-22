@@ -60,3 +60,97 @@ static void logService(const Config& c, uint32_t nowMs) {
   logRow('S', "");
   g_loopMaxUs = 0;
 }
+
+// ---- event records in the EEPROM ("records") -----------------------------------------------------------------------------------
+// The Mega has no filesystem, but its 4 KB EEPROM can keep a few hundred short event records across power cycles: boot, faults, recoveries, navigation
+// transitions, ball losses, shots, SAFE_STOP, configuration saves. They are read back with ':log' (and saved to records.txt on the PC with tools/get_records.py).
+// Layout: bytes 0..511 hold the configuration, bytes 512..4095 a ring of 12-byte records. A record is only written when something happens (a few per
+// second at most), each EEPROM cell is rewritten once per full turn of the ring (about 300 events), so wear is not a concern.
+#define REC_BASE 512
+#define REC_BYTES 12
+#define REC_SLOTS ((4096 - REC_BASE) / REC_BYTES)
+struct Rec { uint8_t magic, type; uint16_t arg; uint32_t t; uint16_t seq, chk; };
+static uint16_t g_recNext = 0, g_recSeq = 1, g_recCount = 0;
+static uint32_t g_recDropped = 0, g_recWindowMs = 0;
+static uint8_t g_recInWindow = 0;
+static bool g_recLive = false;
+
+static uint16_t recChk(const Rec& r) { return (uint16_t)(0x5A5Au ^ r.type ^ r.arg ^ (uint16_t)r.t ^ (uint16_t)(r.t >> 16) ^ r.seq); }
+static bool recRead(uint16_t slot, Rec* r) {
+  EEPROM.get(REC_BASE + (int)slot * REC_BYTES, *r);
+  return r->magic == 0xA5 && r->chk == recChk(*r);
+}
+static void recInit() {                       // find the newest record after a power cycle
+  uint16_t best = 0, bestSeq = 0, n = 0;
+  bool any = false;
+  for (uint16_t s = 0; s < REC_SLOTS; s++) {
+    Rec r;
+    if (!recRead(s, &r)) continue;
+    n++;
+    if (!any || (int16_t)(r.seq - bestSeq) > 0) { best = s; bestSeq = r.seq; any = true; }
+  }
+  g_recCount = n;
+  g_recNext = any ? (uint16_t)((best + 1) % REC_SLOTS) : 0;
+  g_recSeq = any ? (uint16_t)(bestSeq + 1) : 1;
+}
+
+static PGM_P recName(uint8_t t) {
+  switch (t) {
+    case REC_BOOT: return PSTR("BOOT");
+    case REC_FAULT: return PSTR("FAULT");
+    case REC_RECOVER: return PSTR("RECOVER");
+    case REC_NAV: return PSTR("NAV");
+    case REC_BALL_LOST: return PSTR("BALL_LOST");
+    case REC_SHOT: return PSTR("SHOT");
+    case REC_SAFE_STOP: return PSTR("SAFE_STOP");
+    case REC_CFG_SAVED: return PSTR("CFG_SAVED");
+    default: return PSTR("NOTE");
+  }
+}
+// One record as a text line: "seq,t_ms,EVENT,detail" (no tag, so a saved dump is a plain CSV-like text file).
+static void recPrint(const Rec& r) {
+  char b[OUT_LINE_MAX];
+  int p = snprintf(b, sizeof(b), "%u,%lu,%S,", (unsigned)r.seq, UL(r.t), recName(r.type));
+  char* d = b + p; size_t room = sizeof(b) - (size_t)p - 2;
+  switch (r.type) {
+    case REC_FAULT: case REC_RECOVER: snprintf(d, room, "%S", r.arg < F_COUNT ? faultCode((uint8_t)r.arg) : PSTR("?")); break;
+    case REC_NAV: { uint8_t f = (uint8_t)(r.arg >> 8), to = (uint8_t)r.arg; snprintf(d, room, "%S>%S", f < 10 ? (PGM_P)NAV_NAME[f] : PSTR("?"), to < 10 ? (PGM_P)NAV_NAME[to] : PSTR("?")); break; }
+    case REC_BALL_LOST: snprintf(d, room, "last_bearing_deg=%d", (int)(int16_t)r.arg); break;
+    case REC_SHOT: snprintf(d, room, "shot_number=%u", (unsigned)r.arg); break;
+    default: snprintf(d, room, "%u", (unsigned)r.arg); break;
+  }
+  size_t l = strlen(b); b[l] = '\n'; b[l + 1] = 0;
+  outPutLine(b);
+}
+static void recAdd(uint8_t type, uint16_t arg) {
+  uint32_t now = millis();
+  if (type != REC_BOOT && type != REC_SAFE_STOP && type != REC_FAULT) {         // flood guard: at most 6 routine records per second
+    if (elapsedMs(now, g_recWindowMs) >= 1000) { g_recWindowMs = now; g_recInWindow = 0; }
+    if (g_recInWindow >= 6) { g_recDropped++; return; }
+    g_recInWindow++;
+  }
+  Rec r; memset(&r, 0, sizeof(r));
+  r.magic = 0xA5; r.type = type; r.arg = arg; r.t = now; r.seq = g_recSeq++;
+  r.chk = recChk(r);
+  EEPROM.put(REC_BASE + (int)g_recNext * REC_BYTES, r);
+  g_recNext = (uint16_t)((g_recNext + 1) % REC_SLOTS);
+  if (g_recCount < REC_SLOTS) g_recCount++;
+  if (g_recLive) recPrint(r);
+}
+static void recClear() {
+  Rec r; memset(&r, 0xFF, sizeof(r));
+  for (uint16_t s = 0; s < REC_SLOTS; s++) EEPROM.put(REC_BASE + (int)s * REC_BYTES, r);
+  g_recNext = 0; g_recSeq = 1; g_recCount = 0;
+}
+// The dump (oldest first), as a paced report: skipped lines cost nothing (see report.h).
+static void recDump() {
+  say("LOG", "#RECORDS %u stored, %u slots, oldest first. Columns: seq,t_ms,event,detail (t_ms counts from the last BOOT line above it)", (unsigned)g_recCount, (unsigned)REC_SLOTS);
+  for (uint16_t i = 0; i < g_recCount; i++) {
+    Rec r;
+    uint16_t slot = (uint16_t)((g_recNext + REC_SLOTS - g_recCount + i) % REC_SLOTS);
+    if (!recRead(slot, &r)) continue;
+    if (g_repActive) { if (g_repOverflow) return; if (g_repLine < g_repSkip) { g_repLine++; continue; } }   // printed by an earlier pass: no formatting work
+    recPrint(r);
+  }
+  say("LOG", "#END-RECORDS");
+}

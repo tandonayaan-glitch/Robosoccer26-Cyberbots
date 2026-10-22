@@ -73,6 +73,7 @@ static void navSetState(NavState s, PGM_P why) {
   say("NAV", "%S -> %S (%S)", (PGM_P)NAV_NAME[g_navState], (PGM_P)NAV_NAME[s], why);
   char note[28];
   snprintf(note, sizeof(note), "%S>%S", (PGM_P)NAV_NAME[g_navState], (PGM_P)NAV_NAME[s]);
+  recAdd(REC_NAV, (uint16_t)(((uint16_t)g_navState << 8) | (uint8_t)s));
   g_navState = s;
   g_navSince = now;
   logEvent("N", note);
@@ -101,6 +102,7 @@ static void navMarkLoss(PGM_P where) {
   g_lostPending = true;
   say("NAV", "ball lost (%S): loss #%lu, last bearing %.0f deg%s, moving %.0f deg/s", where, UL(g_stats.ballLossEvents), (double)g_lastBearing, ringInBlindSpot(g_cfg, g_lastBearing) ? " (inside a blind arc)" : "", (double)g_bearingRate);
   logEvent("N", "ball_lost");
+  recAdd(REC_BALL_LOST, (uint16_t)(int16_t)g_lastBearing);
 }
 
 static bool navEnableAuto(const Config& c, uint32_t now) {
@@ -285,7 +287,7 @@ static void navTick(const Config& c, uint32_t now) {
       }
             motorsDrive(c, vx, vy, w, limit);
       if (g_shootPhase == 2 && g_shootLaunched && el >= c.shootDriveMs) {
-        g_lastShotMs = now; g_shotDone = true; g_needRelease = true; g_stats.shots++;
+        g_lastShotMs = now; g_shotDone = true; g_needRelease = true; g_stats.shots++; recAdd(REC_SHOT, (uint16_t)g_stats.shots);
         say("NAV", "shot %lu: held-to-launch %lu ms, drive %lu ms, heading error at launch within +-%.1f deg", UL(g_stats.shots), UL(elapsedMs(g_shotLaunchMs, g_shotT0)), UL(el), (double)(0.5f * shootAimTolDeg(c)));
         navSetState(NAV_SEEK, PSTR("shot finished"));
       }
@@ -429,6 +431,7 @@ static void onCondChange(Cond from, Cond to) {
     motorsStopNow();
     say("SAFETY", "SAFE_STOP entered: autonomous movement disabled, motors stopped. Diagnostics stay available ('h' for cause).");
     logEvent("E", "safe_stop");
+    recAdd(REC_SAFE_STOP, 0);
     navSetState(NAV_SAFE_STOP, PSTR("critical fault"));
   } else if (from == COND_SAFE_STOP) {
     say("SAFETY", "SAFE_STOP cleared (%S). Autonomous remains DISABLED: send 'a' after reviewing 'h'.", condName(to));

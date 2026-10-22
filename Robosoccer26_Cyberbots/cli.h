@@ -20,12 +20,18 @@ static void printHelp() {
   say("INFO", "--- commands (115200 baud). Single keys act at once; words start with ':' and end with Enter ---");
   say("INFO", "f b l r : manual forward/back/strafe-left/strafe-right   q e : rotate CCW/CW   (each key moves ~%u ms, repeat to continue)", (unsigned)g_cfg.manualHoldMs);
   say("INFO", "s : stop + disable autonomy    ! : emergency stop    a : ENABLE autonomous ball seeking (refused if unsafe)");
-  say("INFO", "i : ring + module snapshot   I : toggle live ring view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
-  say("INFO", "g : diagnostics status   t : test mode help   ? : this help   (x, :xsel, :fsformat, :logdel: not available on the Mega)");
-  say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ring [on|off <ch> | bearing <ch> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
-  say("INFO", ":goal [set|clear] | :zero | :gcal | :diag <on|off> (CSV rows over Serial) | :recover");
+  say("INFO", "i : receivers + modules   I : live receiver view   m : IMU   d : nav/ball/PWM   h : health report   g : diagnostics   t : test mode help   ? : this help");
+  say("INFO", "--- records (events kept in the EEPROM) ---");
+  say("INFO", ":log = show all records | :log clear | :log live on|off (print each new record at once) | :log note <n> (add a marker record)");
+  say("INFO", "PC: tools/get_records.py saves the records to records.txt (see README)");
+  say("INFO", "--- status / diagnosis (use these when something may be missing) ---");
+  say("INFO", ":status = one-screen summary | :raw = raw A0..A7, module pins, IMU | :pins = pin map | :ver | :diag on|off = CSV rows over Serial");
+  say("INFO", "--- control ---");
+  say("INFO", ":auto on|off (= a / s) | :stop | :estop | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel>");
+  say("INFO", "--- settings (EEPROM) ---");
+  say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
+  say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach.");
 }
 
@@ -101,7 +107,7 @@ static void cmdRecover(const Config& c, uint32_t now) {
 }
 
 static void cmdSave() {
-  if (cfgSave(g_cfg)) say("INFO", "configuration saved to EEPROM (CRC protected)");
+  if (cfgSave(g_cfg)) { say("INFO", "configuration saved to EEPROM (CRC protected)"); recAdd(REC_CFG_SAVED, 0); }
   else say("INFO", "save FAILED (invalid settings or EEPROM verify error)");
 }
 
@@ -163,6 +169,29 @@ static void cliExecLine(char* line, uint32_t now) {
     say("INFO", "CSV rows over Serial %S (every %u ms)", g_csvOn ? PSTR("ON") : PSTR("OFF"), (unsigned)c.snapshotMs);
     if (g_csvOn) logHeader();
   }
+  else if (STREQ(cmd, "log")) {
+    if (!t[1]) reportRequest(REP_LOG);
+    else if (STREQ(t[1], "clear")) { recClear(); say("INFO", "records cleared"); }
+    else if (STREQ(t[1], "live")) { g_recLive = t[2] && STREQ(t[2], "on"); say("INFO", "live records %S", g_recLive ? PSTR("ON: each new record is printed as it happens") : PSTR("OFF")); }
+    else if (STREQ(t[1], "note")) { float v = 0; parseF(t[2], &v); recAdd(REC_NOTE, (uint16_t)v); say("INFO", "marker record %u added", (unsigned)v); }
+    else say("WARN", "usage: :log | :log clear | :log live on|off | :log note <n>");
+  }
+  else if (STREQ(cmd, "raw")) reportRequest(REP_RAW);
+  else if (STREQ(cmd, "pins")) reportRequest(REP_PINS);
+  else if (STREQ(cmd, "status")) reportRequest(REP_STATUS);
+  else if (STREQ(cmd, "ver")) say("INFO", "Robosoccer26_Cyberbots %s, Arduino Mega 2560 (ATmega2560), built %s %s", FW_VERSION, __DATE__, __TIME__);
+  else if (STREQ(cmd, "auto")) {
+    if (t[1] && STREQ(t[1], "on")) { if (navEnableAuto(c, now)) say("NAV", "autonomous ball seeking ENABLED. 's' or any manual key stops it."); }
+    else if (t[1] && STREQ(t[1], "off")) { navStop(PSTR("operator :auto off")); say("SAFETY", "stopped; autonomy disabled"); }
+    else say("WARN", "usage: :auto on|off");
+  }
+  else if (STREQ(cmd, "stop")) { navStop(PSTR("operator stop")); say("SAFETY", "stopped; autonomy disabled"); }
+  else if (STREQ(cmd, "estop")) { navStop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP"); }
+  else if (STREQ(cmd, "manual")) {
+    char k1 = t[1] ? t[1][0] : 0;
+    if (t[1] && !t[1][1] && (k1 == 'f' || k1 == 'b' || k1 == 'l' || k1 == 'r' || k1 == 'q' || k1 == 'e')) navManual(c, k1, now);
+    else say("WARN", "usage: :manual f|b|l|r|q|e");
+  }
   else if (STREQ(cmd, "xsel") || STREQ(cmd, "fsformat") || STREQ(cmd, "logdel"))
     say("WARN", "':%s' is not available on the Arduino Mega: no flash filesystem (use ':diag on' to stream CSV rows over Serial)", cmd);
   else say("WARN", "unknown word command '%s' (':help')", cmd);
@@ -181,7 +210,7 @@ static void cliSingle(char ch, uint32_t now) {
     case 'h': reportRequest(REP_HEALTH); break;
     case 'I': g_streamIr = !g_streamIr; g_streamLastMs = now; say("INFO", "live ring view %S (every %u ms)", g_streamIr ? PSTR("ON") : PSTR("OFF"), (unsigned)c.streamMs); break;
     case 'd': reportRequest(REP_NAV); break;
-    case 'g': say("INFO", "diagnostics: CSV over Serial %S; no flash log on the Mega; %lu output lines dropped; free RAM %d B", g_csvOn ? PSTR("ON") : PSTR("OFF (':diag on')"), UL(g_outDropped), freeRam()); break;
+    case 'g': say("INFO", "diagnostics: CSV over Serial %S; %u records in the EEPROM (':log'); %lu output lines dropped; free RAM %d B", g_csvOn ? PSTR("ON") : PSTR("OFF (':diag on')"), (unsigned)g_recCount, UL(g_outDropped), freeRam()); break;
     case 'x': say("WARN", "'x' (log export) is not available on the Mega: no flash filesystem"); break;
     case '?': reportRequest(REP_HELP); break;
     default: sayRL(2, 2000, "WARN", "ignored unknown input 0x%02X ('?' for help)", (unsigned)(uint8_t)ch); break;

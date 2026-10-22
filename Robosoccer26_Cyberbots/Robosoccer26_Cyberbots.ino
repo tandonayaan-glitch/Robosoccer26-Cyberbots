@@ -51,6 +51,9 @@ void setup() {
   say("BOOT", "config: %S%s%s", cfgLoadText(cr), rep[0] ? " -> " : "", rep);
   if (cr != CL_OK && cr != CL_NOFILE) faultRaise(F_CFG_REPLACED, "%s", rep[0] ? rep : "config replaced");
 
+  recInit();
+  recAdd(REC_BOOT, 0);
+
   // Drivetrain PWM check (duty 0, outputs still disabled).
   bool pwmOk = motorsAttachPwm(g_cfg);
   say("BOOT", "motor PWM pins: %S (D%u D%u D%u D%u)", pwmOk ? PSTR("OK") : PSTR("NOT PWM CAPABLE"), (unsigned)WHEEL_PINS[0].en, (unsigned)WHEEL_PINS[1].en, (unsigned)WHEEL_PINS[2].en, (unsigned)WHEEL_PINS[3].en);

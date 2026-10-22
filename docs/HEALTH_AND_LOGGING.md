@@ -37,7 +37,11 @@ Each fault prints its severity, component, evidence, certainty, action, mode and
 
 `i` / `:ring` prints every receiver (swing, smoothed swing, low/high reading, noise floor, threshold, strength, seen) and the ball state; `:mod` prints the two modules; `d` prints the navigation state; `I` toggles a live view. See `BALL_SENSING.md`.
 
-## 5. Output on the Mega (no flash logging)
+## 5. Records in the EEPROM (`:log`)
+
+About 298 twelve-byte records in EEPROM bytes 512–4095 (the configuration uses 0–511), written by the firmware itself, oldest overwritten first, surviving power-off. Types: `BOOT`, `FAULT` / `RECOVER` (code name), `NAV` (`FROM>TO`), `BALL_LOST` (last bearing), `SHOT` (number), `SAFE_STOP`, `CFG_SAVED`, `NOTE` (your `:log note <n>`). Routine records are limited to 6 per second (dropped ones are counted); faults, SAFE_STOP and BOOT are never dropped. `:log` prints them oldest first as `seq,t_ms,EVENT,detail` between `#RECORDS …` and `#END-RECORDS`; `tools/get_records.py` saves that to `records.txt`. Each EEPROM cell is rewritten once per ~300 events (the EEPROM is rated for about 100,000 writes per cell [2nd]).
+
+## 6. Output on the Mega (no flash logging)
 
 The ESP32 version wrote CSV files to flash with a RAM flight recorder. The Mega has 8 KB of RAM and no filesystem, so:
 
