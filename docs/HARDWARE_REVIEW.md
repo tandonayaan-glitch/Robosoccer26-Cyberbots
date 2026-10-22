@@ -12,8 +12,8 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 | 4 | yellow BO geared DC motor | stall current **[?]**; measure |
 | 4 | mecanum wheel | roller layout X or O: `:roller X|O`, tested with `:dtest` |
 | 1 | 3S 11.1 V 4500 mAh battery | 12.6 V when full: see the L298N regulator note below |
-| 1 | CD74HC4067 16-channel analog multiplexer (module or bare chip **[?]**) | EN tied to GND; S2/S3 sit on the strapping pins GPIO12/GPIO0 (§5); `docs/RING_AND_MODULES.md` |
-| 12 (+ up to 4) | 5 mm IR phototransistor (2-pin receiver) on multiplexer C0–C11 (C12–C15 optional) | the **ball ring**; **part number [?]**; each needs a load resistor (collector 3.3 V, emitter to the channel, R_L to GND, start 10 kΩ; `docs/RING_AND_MODULES.md` §4); they see the ball's own emission |
+| 1 | CD74HC4067 16-channel analog multiplexer (module or bare chip **[?]**) | EN tied to GND; S2/S3 on the strapping pins GPIO2/GPIO15 (the harmless pair, §5); `docs/RING_AND_MODULES.md` |
+| 12 (+ up to 4) | 5 mm IR phototransistor (2-pin receiver) on multiplexer C0–C11 (C12–C15 optional) | the **ball ring**; **part number [?]**; each needs the divider: collector 5 V, emitter → 6.8 kΩ → channel, 10 kΩ channel → GND (`docs/RING_AND_MODULES.md` §4); they see the ball's own emission; they see the ball's own emission |
 | 2 | IR obstacle module, 3-pin (VCC / GND / OUT, LM393 comparator, trimmer), 3.3 V supply | module 0 at the front (ball in the shooting position); module 1 position undecided; OUT = digital |
 | 1 | MPU6050 (gyro + accelerometer) breakout | |
 | 1 | breadboard, jumper wires, power wiring | |
@@ -41,11 +41,11 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 | Device | Pin on the device | ESP32 | Notes |
 |---|---|---|---|
 | CD74HC4067 SIG | common signal | **GPIO34** | input-only, ADC1_CH6, no internal pull; ring channels arrive here one at a time |
-| CD74HC4067 S0 / S1 / S2 / S3 | channel select | **GPIO4 / GPIO13 / GPIO12\* / GPIO0\*** | outputs after boot; \* strapping pins (§5); the chip's select inputs are high-impedance |
+| CD74HC4067 S0 / S1 / S2 / S3 | channel select | **GPIO4 / GPIO13 / GPIO2\* / GPIO15\*** | outputs after boot; \* strapping pins (§5); the chip's select inputs are high-impedance |
 | CD74HC4067 VCC / GND / EN | supply / return / enable | 3V3 / common GND / **GND** (always enabled) | |
-| Ring phototransistor n (C0–C11, optional C12–C15) | collector → 3.3 V; emitter → channel Cn with R_L to GND | via the multiplexer | **not a direct connection**; every channel voltage must stay within 0–3.3 V |
+| Ring phototransistor n (C0–C11, optional C12–C15) | collector → 5 V; emitter → 6.8 kΩ → channel Cn; 10 kΩ channel → GND | via the multiplexer | **not a direct connection**; every channel voltage must stay within 0–3.3 V |
 | IR obstacle module 0 (front, shooting position) | VCC 3.3 V · GND · OUT | **GPIO35** | input-only, ADC1_CH7, no internal pull; digital; `modactivelow` 1 by default [2nd] |
-| IR obstacle module 1 (undecided position) | VCC 3.3 V · GND · OUT | **GPIO36 – PROPOSAL** (you wrote "34 and 35": GPIO34 is SIG) | read and logged only |
+| IR obstacle module 1 (undecided position) | VCC 3.3 V · GND · OUT | **GPIO36** (approved) | read and logged only |
 | MPU6050 | SDA | **GPIO16** | explicit `Wire.begin(16, 17)`; address 0x68 or 0x69 auto-detected |
 | MPU6050 | SCL | **GPIO17** | |
 | MPU6050 | VCC / GND | 3.3 V (check your breakout's regulator) / GND | |
@@ -64,15 +64,14 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 | Used | GPIOs |
 |---|---|
 | Motors (12) | 18, 19, 21, 22, 23, 5 (left) · 25, 26, 27, 14, 33, 32 (right) |
-| Multiplexer select S0–S3 | 4, 13, 12, 0 |
+| Multiplexer select S0–S3 | 4, 13, 2, 15 |
 | Multiplexer SIG | 34 |
 | IR obstacle modules (2) | 35, 36 (36 proposed) |
 | I2C / MPU6050 (2) | 16, 17 |
 | Serial | 1, 3 |
 | Unusable | 6–11 (flash) |
 
-**Still free:** **GPIO39** (input-only, ADC1; no internal pull) · **GPIO2** and **GPIO15** (strapping pins: GPIO2 must not be pulled high at boot, GPIO15 silences the boot log when low; outputs are fine, avoid pull-ups on GPIO2).
-GPIO0 and GPIO12 are now the multiplexer's S3 and S2: see §5. GPIO32–39 are ADC1.
+**Still free:** **GPIO39** (input-only, ADC1; no internal pull). GPIO0 and GPIO12 are unused on purpose (§5). GPIO32–39 are ADC1.
 
 ## 4. Electrical notes
 
@@ -82,9 +81,9 @@ GPIO0 and GPIO12 are now the multiplexer's S3 and S2: see §5. GPIO32–39 are A
 | L298N inputs from 3.3 V | normally accepted [2nd]; remove the ENA/ENB jumpers |
 | L298N motor supply | 11.1 V nominal. The bipolar L298N drops about 2 V, so a motor sees about 9 V at full duty [2nd]; about 2 A per channel continuous [2nd] |
 | BO motor current **[?]** | measure the stall current; add current limiting/fuses if it exceeds the driver rating. Firmware limits: manual PWM ≤ 150/255, autonomous ≤ 170/255 (placeholders), the shot's drive phase uses `shootpwm` (255 by default: lower it if the driver or battery cannot take it) |
-| Ring channels | each phototransistor needs a load resistor; its supply must be 3.3 V so no channel can exceed the multiplexer's VCC. The multiplexer's on-resistance (about 100 Ω [2nd]) and the ADC sampling capacitor load the channel: R_L above about 10 kΩ is slow and picks up the previous channel. The firmware waits `ringsettle` and discards the first conversion after switching |
+| Ring channels | **collector on 5 V needs the 6.8 kΩ series resistor** (10 kΩ load kept): without it a lit channel reaches about 4.8 V, above the multiplexer's 3.3 V supply and GPIO34's limit. With it the worst case is about 3.0 V (computed; measure it). `docs/RING_AND_MODULES.md` §4 |
 | GPIO34 (SIG) | input-only, no pull. A disconnected multiplexer leaves SIG floating [2nd] (reads noise, not a stuck value): `:ring cal noise` then shows large swings on every channel and the autonomy refusal message points there |
-| IR obstacle modules | OUT is an LM393 output with the board's pull-up: its high level is the module's supply, so power the modules from **3.3 V** (not 5 V) or the pin sees 5 V. Their own IR LED is continuous [2nd] and may disturb nearby receivers |
+| IR obstacle modules | OUT is an LM393 output with the board's pull-up: its high level is the module's supply, so power the modules from **3.3 V** (not 5 V) or the pin sees 5 V; measure OUT in both states first. Their own IR LED is continuous [2nd] and may disturb nearby receivers |
 | Motor noise | the L298N drivers and brushed motors inject noise into supplies: decouple the sensor supply (100 nF close to the sensor), keep the sensor wires away from motor wires |
 | MPU6050 breakout **[?]** | GY-521-type boards carry a 3.3 V regulator and 4.7 kΩ pull-ups to the regulated rail; confirm yours does not pull SDA/SCL up to 5 V |
 | I2C on GPIO16/17 | free on a plain ESP-32S (WROOM) module; PSRAM modules use them |
@@ -96,7 +95,7 @@ GPIO0 and GPIO12 are now the multiplexer's S3 and S2: see §5. GPIO32–39 are A
 * **Which line matters**: with the L298N, EN low disables the outputs whatever IN1/IN2 are [2nd]. The protective element is a **pull-down on each EN line (ENA/ENB: GPIO23, 33, 5, 32)**; pull-downs on the IN lines are secondary protection. Use ≤ 10 kΩ (4.7 kΩ preferred): GPIO5's internal pull-up forms a divider with the external resistor.
 * **GPIO5** (back-left EN) is a strapping pin with an internal pull-up and is reported to emit a PWM signal during boot [2nd]: the back-left motor can twitch at every reset if the L298N inputs are not pulled low. **GPIO14** (back-right IN4) is reported to output PWM at boot [2nd]; harmless if its EN (GPIO32) is held low.
 * **Hung CPU / watchdog**: if the loop hangs, LEDC keeps its last duty until the 3 s watchdog fires; the motor power switch/fuse is the only protection for that time.
-* **GPIO12 (S2) and GPIO0 (S3)** are strapping pins: GPIO12 must be LOW at reset on a 3.3 V flash module, GPIO0 must be HIGH (LOW = serial bootloader) [2nd]. The firmware drives the select lines only after boot. A bare CD74HC4067's select inputs are high-impedance and do not disturb either level; a breakout board with a pull-up on S2 or a pull-down on S3 would. If the board does not boot or upload with the wires connected, unplug S2 / S3. Automatic upload (DTR/RTS toggling EN and GPIO0) needs S3 to stay high-impedance. [PHYS: reset five times and upload once with the multiplexer connected.]
+* **S2 = GPIO2, S3 = GPIO15** (both strapping pins, but the harmless ones). GPIO0 (LOW at reset = download mode) and GPIO12 (HIGH at reset = 1.8 V flash, no boot) are deliberately unused. The firmware touches the select pins only 500 ms after reset; the strapping *levels* at reset are set by the pins' own pulls, which the high-impedance select inputs do not change. A breakout with a pull-up on S2 could interfere with uploads: check with a meter. `docs/RING_AND_MODULES.md` §3.
 * **Verify before trusting [PHYS]**: with the motor supply disconnected, probe every L298N control input (12 lines) through repeated resets, brown-outs and a watchdog reset; require ≤ 0.8 V throughout.
 
 ## 6. Known limitations

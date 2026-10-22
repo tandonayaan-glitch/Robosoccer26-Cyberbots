@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 15
+#define CFG_VERSION 16
 
 struct Config {
   uint32_t magic;
@@ -41,7 +41,8 @@ struct Config {
   uint8_t ringFovHalf;           // ASSUMED half field of view of one receiver, degrees: used only for the coverage-gap estimate
   uint8_t ringBlend;             // channels within this many degrees of the strongest one are averaged into the bearing
   uint8_t ringMaxGap;            // largest tolerated uncovered arc in degrees (estimate from the configured bearings), above it: DEGRADED
-  uint16_t ringRailMs;           // a channel held saturated this long is excluded and reported (shorted to 3.3 V / sunlight saturation)
+  uint16_t ringRailMs;           // a channel held saturated this long is excluded and reported (shorted to a rail / sunlight saturation)
+  uint16_t ringRailHi;           // "saturated" = lowest reading of the window at or above this ADC value. With the 5 V-collector circuit (series 6.8 kΩ + 10 kΩ divider) a lit channel tops out near 3.0 V, so lower it (about 3500) to catch sunlight saturation; 4000 only catches a short to 3.3 V
   // ---- IR obstacle modules (digital OUT): module 0 = front, ball in the shooting position; module 1 = undecided position, logged only ----
   uint8_t modEnable;             // bit0: module 0 in use (default), bit1: module 1 in use
   uint8_t modActiveLow;          // 1 = OUT goes LOW when something is detected (typical for these modules; NOT assumed: check with ':mod')
@@ -134,6 +135,7 @@ static const ParamDef PARAMS[] = {
   PD("ringblend", PT_U8, ringBlend, 10, 120),
   PD("ringmaxgap", PT_U8, ringMaxGap, 30, 250),
   PD("ringrailms", PT_U16, ringRailMs, 200, 20000),
+  PD("ringrailhi", PT_U16, ringRailHi, 2000, 4095),
   PD("modenable", PT_U8, modEnable, 0, 3),
   PD("modactivelow", PT_U8, modActiveLow, 0, 1),
   PD("moddebounce", PT_U8, modDebounce, 1, 20),
@@ -241,7 +243,7 @@ static void cfgDefaults(Config& c) {
   }
   c.ringCalDone = 0;             // autonomy is refused until ':ring cal noise' has been run
   c.ringWinUs = 900; c.ringSettleUs = 30; c.ringSeen = 80; c.ringNoiseX10 = 30; c.ringNear = 1500; c.ringDebounce = 2;
-  c.ringFovHalf = 45; c.ringBlend = 65; c.ringMaxGap = 90; c.ringRailMs = 2000;
+  c.ringFovHalf = 45; c.ringBlend = 65; c.ringMaxGap = 90; c.ringRailMs = 2000; c.ringRailHi = 4000;
   c.modEnable = 1; c.modActiveLow = 1; c.modDebounce = 3; c.modNeedRing = 1;
   c.lostHoldMs = 300;
   c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;

@@ -7,14 +7,15 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 
 | Part | Wiring | Job |
 |---|---|---|
-| **CD74HC4067** 16-channel analog multiplexer | VCC → ESP32 3V3 · GND → common GND · **EN → GND** (always enabled) · **SIG → GPIO34** (analog input) · **S0 → GPIO4 · S1 → GPIO13 · S2 → GPIO12\* · S3 → GPIO0\*** (\* strapping pins, §3) | one analog line for the whole ring |
-| **12 phototransistors** on **C0–C11** | each through its own load resistor (circuit in §4), front and back of the robot | see the **ball's own infrared emission** (a bearing and a strength) |
+| **CD74HC4067** 16-channel analog multiplexer | VCC → ESP32 3V3 · GND → common GND · **EN → GND** (always enabled) · **SIG → GPIO34** (analog input) · **S0 → GPIO4 · S1 → GPIO13 · S2 → GPIO2\* · S3 → GPIO15\*** (\* strapping pins, the two harmless ones, §3) | one analog line for the whole ring |
+| **12 phototransistors** on **C0–C11** | collector → **5 V**, emitter → own channel, **10 kΩ to GND** at the channel plus a **6.8 kΩ series resistor** (§4: required for voltage safety), front and back of the robot | see the **ball's own infrared emission** (a bearing and a strength) |
 | **C12–C15** (optional) | not fitted yet; planned: extra receivers looking **left and right** | `:ring on <ch>` once they are fitted |
 | **IR obstacle module 0** (3-pin VCC / GND / OUT, blue board with trimmer) | VCC → 3.3 V · OUT → **GPIO35** | at the **front**: "the ball is in the right position to shoot" |
-| **IR obstacle module 1** | VCC → 3.3 V · OUT → **GPIO36** (*proposal*) | position **not decided yet** ("maybe the back"): read and logged only |
+| **IR obstacle module 1** | VCC → 3.3 V · OUT → **GPIO36** (approved) | position **not decided yet** ("maybe the back"): read and logged only |
 
-**About the module pins.** You wrote "34 and 35". GPIO34 is the multiplexer's SIG line, so two things cannot share it. The firmware uses **GPIO35 for module 0 and GPIO36 for module 1**
-(both input-only ADC1 pins with no pull resistors, which suits a push-pull module output). If your wiring differs, tell me the pins; they are compile-time constants in `pins.h`.
+**Module pins:** GPIO35 for module 0 and GPIO36 for module 1 (approved by you). Both are input-only pins with no pull resistors, so each module output must drive its line by itself (§7).
+
+**S2/S3 moved from GPIO12/GPIO0 to GPIO2/GPIO15.** This is the one pin change I made, and it is not a motor or MPU6050 pin: the four output-capable GPIOs that were free (0, 2, 12, 15) are all strapping pins, and GPIO0 and GPIO12 are the dangerous ones (§3). **You need to move two wires:** S2 to GPIO2, S3 to GPIO15.
 
 There is no emitter LED on the robot that the firmware controls: the ball is the emitter. The previous reflective emitter/receiver pair design is gone.
 
@@ -32,31 +33,54 @@ For one channel: set S0–S3, wait `ringsettle` (30 µs), discard one conversion
 * **Noise floor.** `:ring cal noise` (ball switched off or taken away, robot still) measures 2 s of swing on every enabled channel and stores the largest per channel. Autonomy is refused until it has been done.
 * `ringnear` (1500 counts) is a placeholder for "very close". `:ring cal near` with the ball in the shooting position sets it from the strongest channel's swing.
 
-## 3. The strapping pins (S2 = GPIO12, S3 = GPIO0)
+## 3. Boot-strapping pins: the risks and what was done
 
-* **GPIO0** must be HIGH at reset (LOW selects the serial bootloader). **GPIO12 (MTDI)** must be LOW at reset on a 3.3 V flash module (HIGH selects 1.8 V flash and the board will not boot). [2nd]
-* The CD74HC4067 select inputs are high-impedance CMOS and draw no current, so a bare chip does not disturb either level. A **breakout board** that has a pull-up on S2 or a pull-down on S3 would. If the board no longer boots or the upload stops working, unplug the S2 and S3 wires and retry. [PHYS]
-* The firmware drives S0–S3 only after boot (`ringBegin()`, called from `setup()` after the motor pins are safe), so nothing is driven on them while the chip samples its strapping pins.
-* Automatic upload (USB DTR/RTS toggling EN and GPIO0) works with a high-impedance select input on GPIO0. If you add a resistor or LED to S3, uploads can fail. [2nd]
+Free GPIOs after the motors, I²C, SIG and the modules: 0, 2, 12, 15 (output-capable, all strapping pins) and 39 (input-only). S2 and S3 need outputs, so a strapping pin is unavoidable. Ranked by risk [2nd, Espressif documentation as I know it; **check your module's datasheet**]:
 
-## 4. The receiver circuit (one per channel; values are starting points, not verified)
+| Pin | Reset-time role | Risk if the multiplexer disturbs it | Verdict |
+|---|---|---|---|
+| **GPIO15** (MTDO) | HIGH (internal pull-up) = boot log printed; LOW = log silenced | **none for booting**: only the boot messages change | **safest** → S3 |
+| **GPIO2** | must be LOW or floating to enter download mode; unused in normal boot | none for a normal boot; matters only while uploading, and only if driven HIGH | **safe** → S2 |
+| GPIO5 (already the back-left motor ENB, unchanged) | selects SDIO timing, no effect on normal boot | negligible | existing |
+| GPIO12 (MTDI) | **HIGH at reset selects 1.8 V flash: a 3.3 V flash module will not boot** | board bricked until the level is fixed | **avoid** |
+| GPIO0 | **LOW at reset = serial download mode**: the robot sits waiting instead of starting; also used by the USB auto-upload circuit | robot never starts after a power cycle | **avoid** |
 
-A 2-pin phototransistor **cannot connect to the multiplexer or a GPIO directly**: it is a light-controlled current source and gives no defined voltage on its own. Per channel (circuit A):
+* **Why a software delay is not the fix.** The strapping pins are sampled by hardware at reset. What matters is the *electrical level* of GPIO2 and GPIO15 during reset, which the multiplexer's select inputs do not change (they are high-impedance CMOS). The firmware simply never touches S0–S3 until the ESP32 has been running for `RING_BOOT_HOLDOFF_MS` (500 ms); that guarantees it does not fight the reset levels, it does not create them.
+* **What can still go wrong [PHYS]:** a multiplexer *breakout board* with pull-up or pull-down resistors on S0–S3. A pull-down on S3 (GPIO15) only silences the boot log. A pull-up on S2 (GPIO2) could matter during a USB upload (GPIO2 should not be forced high). Check the board with a meter: with the ESP32 unpowered or in reset, S2 and S3 should float (no resistor to a rail).
+* **Test before trusting:** disconnect and reconnect power five times and check the robot starts each time; upload over USB with the select wires connected. If an upload fails, unplug the S2 wire and retry.
+* **USB upload** uses only EN and GPIO0. GPIO0 is no longer connected to anything in this project, so the auto-upload circuit is untouched.
+
+**Initialisation sequence (`ringBegin()`, called once from `setup()`):** (1) the motor pins have already been made safe and the filesystem and PWM are up; (2) wait until 500 ms after reset; (3) for each select pin write LOW to the output register first, then switch it to output (no glitch to HIGH); (4) SIG and the modules become inputs; (5) the scan starts with the first `ringService()` call. Before step 3 the select pins are untouched inputs. `t_ring_boot_sequence` checks the order and that GPIO0 and GPIO12 are never touched. [V, host]
+
+**EN cannot be disabled by software.** You wired EN to GND, and no output-capable GPIO is left to control it, so the multiplexer is enabled from the moment it is powered. This is harmless: the analog switches only pass the selected channel, and the select inputs are not driven (high-impedance) until step 3.
+
+## 4. The receiver circuit: collector on 5 V, and why a series resistor is mandatory
+
+**As specified: collector → 5 V, emitter → its own channel, 10 kΩ from that node to GND, outputs never joined.** **Checked, and not safe on its own:**
+
+* The multiplexer runs from 3.3 V. The CD74HC4067 signal pins must stay between GND and its supply (the absolute maximum is about 0.5 V above VCC, with input clamp diodes beyond that) [2nd, datasheet: confirm]. SIG then goes into GPIO34, whose limit is about 3.6 V [2nd].
+* With the collector on 5 V, the emitter node is `Ic × 10 kΩ` and can rise up to about `5 V − 0.2 V = 4.8 V` as soon as the collector current exceeds about 0.5 mA. A 5 mm phototransistor in strong light, or close to the ball, can deliver several mA [2nd]. **So the node would exceed 3.3 V and be clamped through the multiplexer's input diodes into its 3.3 V rail** and the ESP32 pin would be overdriven. Do **not** connect it that way.
+
+**Fix (one extra resistor per channel, needed for safety):** keep the 10 kΩ from the channel node to GND exactly as specified and put a **6.8 kΩ in series between the emitter and the channel node**. The two resistors form a divider:
 
 ```
- 3.3 V ──── collector ┐
-                      │  5 mm phototransistor
-             emitter ─┴───┬──────── multiplexer channel Cn
-                          │
-                         R_L  (start 10 kΩ; lower for speed, higher if the signal is tiny)
-                          │
- GND ─────────────────────┘
+ 5 V ──── collector ┐
+                    │  phototransistor
+           emitter ─┴──[ 6.8 kΩ ]──┬──────── multiplexer channel Cn   (one circuit per channel, never joined)
+                                   │
+                                 10 kΩ  (the specified load resistor)
+                                   │
+ GND ──────────────────────────────┘
 ```
-* Keep the collector on **3.3 V**, so no channel can exceed 3.3 V (the ESP32 and the multiplexer run on 3.3 V). The multiplexer passes signals between GND and its VCC.
-* The multiplexer's on-resistance (about 100 Ω [2nd]) and the ADC's sampling capacitor load the node: R_L above about 10 kΩ is slow and sensitive to the channel switching. The firmware's settle time and the discarded first conversion help; a 100 nF capacitor on SIG to GND is optional but slows the response, so try without.
-* **Speed.** The response time of a phototransistor with R_L is roughly R_L × (junction capacitance); at 10 kΩ it is tens of microseconds [2nd]. The ball's burst is 192 µs, so R_L of 10 kΩ or less is the place to start. [PHYS]
-* **Lead order.** The collector and emitter are not marked on a 2-lead package; if the signal does not react to light, swap the leads (no damage expected at 3.3 V).
-* **Direct light.** Phototransistors saturate in sunlight; a short black tube or shroud in front of each limits the field of view *and* defines the bearing. A shroud also makes the field of view a known quantity (§6).
+* **Worst case:** emitter at most 5.25 V (5 V +5 %) − 0.2 V (saturation) = 5.05 V → channel node ≤ 5.05 × 10 / 16.8 = **3.0 V**, below 3.3 V with margin, so neither the multiplexer nor GPIO34 sees more than its supply. Computed, not measured: check every channel with a meter in strong light (flashlight at the lens) before connecting the multiplexer. [PHYS]
+* The ADC then sees at most about 3.0 V (readings up to roughly 3700 of 4095; the ESP32 ADC is non-linear near the top [2nd]). Source impedance seen by the ADC: 6.8 kΩ ∥ 10 kΩ ≈ 4 kΩ, acceptable [2nd]. The signal is 0.6 of the emitter voltage.
+* **Power sequencing:** if the 5 V rail is up while the multiplexer's 3.3 V is not, the channel node (≤ 3.0 V) is above the unpowered multiplexer and conducts through its input diodes: about (V − 0.6 V) / 6.8 kΩ ≈ 0.3–0.4 mA per lit channel back into the 3.3 V rail. Power the 5 V and 3.3 V rails together (one switch) and keep the receivers dark at power-up if you can.
+* **A simpler option I recommend if you are free to change it:** collector on **3.3 V** and no series resistor. The emitter then cannot exceed `3.3 V − 0.2 V = 3.1 V` and nothing more is needed. The 5 V collector gives no benefit I can see for the firmware (the swing is what is measured). It is your decision; the code works with either (`ringrailhi` below).
+* **Saturation detection:** `ringrailhi` (default 4000) flags a channel whose *lowest* reading in the window stays at or above it. With the divider a lit channel tops out near 3.0 V, so the default only catches a channel shorted to the 3.3 V rail; set `:set ringrailhi 3500` to flag sunlight saturation too (a saturated channel loses its swing). Tune with the real readings from `:ring` (low/high columns).
+* The multiplexer's on-resistance (about 100 Ω [2nd]) is small against 4 kΩ. A 100 nF capacitor on SIG is optional and slows the response, so try without.
+* **Speed.** The response time of a phototransistor with its load is roughly R × (junction capacitance), tens of µs at these values [2nd]; the ball's burst is 192 µs. [PHYS]
+* **Lead order.** The collector and emitter are not marked on a 2-lead package; if the signal does not react to light, swap the leads (no damage expected).
+* **Direct light.** A short black tube in front of each limits the field of view and defines the bearing.
 * The four spare channels C12–C15 need the same circuit.
 
 ## 5. Bearing and strength
@@ -90,6 +114,7 @@ The ring has "front and back, a slight blind spot" between receivers. The firmwa
 * **Module 0 detecting = `held`** (the ball is in the shooting position). With `modneedring` 1 (default) the ring must also see the ball **straight ahead** (|bearing| ≤ `centerdeg` 15°): `ready`. A module trips on *any* reflective object (a wall, another robot); requiring the ring's confirmation keeps it from shooting at them. `:set modneedring 0` makes the module alone decisive.
 * While `held`, the robot does not drive forward; if `ready` it also stops strafing. `ready` for `shoothold` ms + registered goal heading + `shootenable 1` → the shot (aim, reverse, full-power drive; see `README.md`).
 * **Module 1** is read, debounced and logged (`flags` column) and shown by `:mod`; **nothing in the navigation uses it** until you decide its role. Enable with `:mod on 1` (or `:set modenable 3`).
+* **Supply and levels (check before connecting).** These boards are normally specified for 3.3–5 V [2nd]. Power them from **3.3 V**: the LM393 output is pulled up to the module's own supply, so a 5 V module would put 5 V on GPIO35/36, which are not 5 V tolerant. Before connecting OUT, measure it with a meter against GND in both states (nothing in range / object in range): both readings must be ≤ 3.3 V. If a module must run from 5 V, put a divider (for example 10 kΩ + 20 kΩ) or a level shifter between OUT and the pin; that is a part I have *not* assumed.
 * **Interference.** The modules have their own IR LED (usually continuous, 940 nm [2nd]). A continuous light has no swing and is ignored by the ring's measurement; a *modulated* module LED (some boards) near a receiver would look like a ball. [PHYS]: with the ball off, `:ring cal noise` with the modules powered shows it. Mount the modules so their LEDs do not shine into ring receivers.
 
 ## 8. Behaviour of the robot
@@ -109,7 +134,7 @@ Faults (`HEALTH_AND_LOGGING.md`): `RING_NONE` and `RING_STALL` stop the robot (C
 
 ## 9. Calibration and testing (motors off, wheels lifted)
 
-1. **Before power:** build the receiver circuits (§4); check with a meter that every multiplexer output stays within 0–3.3 V in light and dark. Check that the board boots and uploads with the S2 and S3 wires connected (§3).
+1. **Before power:** build the receiver circuits (§4, **with the 6.8 kΩ series resistors**); with the multiplexer NOT yet connected, measure every channel node in the dark and with a flashlight on the lens: it must stay ≤ 3.3 V (expect ≤ 3.0 V). Check that the board boots and uploads with the S2 and S3 wires connected (§3).
 2. Power up. `i` (or `:ring`) lists C0–C11 with swing, low/high readings, threshold and bearing. `NOT CALIBRATED`; `a` is refused.
 3. **One channel at a time.** With the ball off, every swing should be small and steady (record them). Switch the ball on at 10 cm in front of **each** receiver in turn: only that channel (and its neighbours at an angle) should react. A channel that reacts to another channel's ball points to crosstalk through the multiplexer (R_L too large) or a wiring error. Record the swing at 5/10/20/40 cm.
 4. If a swing is 0 with the ball on: check lead order, R_L, the window (`ringwinus`), and that the ball is awake (in that source it sleeps after 60 s without vibration).
@@ -128,9 +153,11 @@ Faults (`HEALTH_AND_LOGGING.md`): `RING_NONE` and `RING_STALL` stop the robot (C
 4. **The ball:** the RCJ IR golf ball model and its burst pattern (the 192 µs / 833 µs figures come from the ball firmware source I read, not from a measurement of your ball).
 5. **Module 1's job** once you decide where it goes.
 6. **The multiplexer board:** a bare CD74HC4067 or a breakout (pull resistors on S0–S3?), see §3.
+7. **Module supply:** confirm they run from 3.3 V and measure OUT in both states (§7); confirm with a meter that the two S2/S3 wires are on GPIO2 and GPIO15.
 
 ## 11. Changes from the previous (two-sensor) design
 
+S2/S3 moved from GPIO12/GPIO0 to GPIO2/GPIO15; start-up sequence with a 500 ms hold-off; `ringrailhi`; the 5 V-collector circuit now has a mandatory series resistor.
 Removed: the reflective emitter/receiver pairs, `irEmit` pulsing, the proposed emitter pins (GPIO4/13 are the multiplexer's S0/S1 now), `:ir`, sensor calibration of clear/near per receiver, `ir2.h`, `ircli.h`.
 Added: `ring.h`, `ringcli.h` (`:ring`, `:mod`), 16 ring channel settings (`ringenable` mask and `ringBearing`/`ringNoise` tables via `:ring`), module settings, bearing-based approach, blind-spot search, fault codes `RING_NONE` / `RING_STALL` / `RING_CHANNEL` / `RING_GAP`,
 CSV columns `ringmask,ball,bearing_deg,strength,flags` (schema 2), config version 15 (saved configurations are reset once on upgrade). The motor pins and the MPU6050 pins are unchanged; `pins.h` asserts it.

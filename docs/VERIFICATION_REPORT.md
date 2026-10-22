@@ -10,7 +10,7 @@ Nothing here is a measurement of the physical robot.
 |---|---|
 | **REAL-BUILD**, Arduino-ESP32 **2.0.17**, FQBN `esp32:esp32:esp32`, `--warnings all` | builds, **0 warnings**, 417,461 B flash (31 %), 65,708 B RAM (20 %) |
 | **REAL-BUILD**, Arduino-ESP32 **3.0.7** | builds, **0 warnings**, 440,561 B flash (33 %), 64,440 B RAM (19 %) |
-| **HOST** (`test/run_tests.sh`): 66 test cases × 2 core API shapes (mock core v3 and v2) | **132/132 runs pass**, 4,776 checks, `-Wall -Wextra -Wshadow`, ASan + UBSan |
+| **HOST** (`test/run_tests.sh`): 67 test cases × 2 core API shapes (mock core v3 and v2) | **134/134 runs pass**, 4,826 checks, `-Wall -Wextra -Wshadow`, ASan + UBSan |
 | Pin map | `static_assert`s: 12 motor + 2 I2C + 4 multiplexer-select output pins all distinct (18); SIG (GPIO34) and the two module pins (GPIO35, GPIO36) distinct, none of them an output pin, all valid **input-only** GPIOs on the real SoC masks; no pin in the flash range GPIO6–11; the select pins are output-capable. The motor and MPU6050 pins are unchanged (`t_pinmap` compares them with an independent copy) |
 | Removed hardware | `test/run_tests.sh` greps the firmware sources for the TSOP receivers, the old scan engine and the emitter pulsing and fails if any reappears; `t_old_hardware_removed` checks that the old commands are gone |
 | STATIC | cppcheck: 1 style note (a never-used variable in `cli.h`, pre-existing); clang-tidy: no findings; Valgrind memcheck clean on 13 test cases |
@@ -30,7 +30,7 @@ Simulated shot timing (assumed rotation model of 180°/s at full rotation comman
 ## What was NOT verified
 
 * **The real phototransistors and circuit**: whether the ball's pulses reach the multiplexer pin as a usable swing, the load resistor, the response time, range, the real mounting angles and field of view of each receiver (the bearings are placeholders), lighting and motor-noise sensitivity (**PHYS**).
-* **The strapping pins**: whether the multiplexer breakout lets the ESP32 boot and upload with S2 on GPIO12 and S3 on GPIO0 (**PHYS**); the real ADC conversion time (the scan window is time-based, so it adapts, but the time per scan is unmeasured).
+* **The strapping pins**: whether the multiplexer breakout lets the ESP32 boot and upload with S2 on GPIO2 and S3 on GPIO15 (**PHYS**); that every channel stays ≤ 3.3 V with the 5 V collector + 6.8 kΩ/10 kΩ divider (computed 3.0 V worst case, **not measured**); the real ADC conversion time (the scan window is time-based, so it adapts, but the time per scan is unmeasured).
 * **The modules**: the pin of module 1 (GPIO36 is my proposal), the polarity and distance setting, whether their LEDs disturb the ring.
 * The ball's actual burst pattern (192 µs / 833 µs comes from the ball firmware source I read, not from a measurement of your ball).
 * The motors' direction and rotation, speeds, stall, the reset-state of the L298N inputs, the power supply (**PHYS**).

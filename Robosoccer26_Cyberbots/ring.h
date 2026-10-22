@@ -15,7 +15,6 @@
 #include "health.h"
 
 static const uint32_t MOD_SAMPLE_MS = 5;
-static const uint16_t RING_RAIL_HI = 4000;           // a minimum reading above this is a saturated channel
 
 struct RingCh {
   bool init;
@@ -130,9 +129,16 @@ static inline void ringSelect(uint8_t ch) {
   for (uint8_t k = 0; k < 4; k++) digitalWrite(PIN_MUX_SEL[k], ((ch >> k) & 1u) ? HIGH : LOW);
 }
 
+// Start-up sequence of the multiplexer (called once from setup(), AFTER the motor pins are safe, the filesystem and PWM are up):
+//   1. wait until RING_BOOT_HOLDOFF_MS after reset has passed. By then the ROM and the bootloader are long finished and the strapping pins have
+//      been sampled; a software delay does NOT make the strapping levels safe, it only guarantees the firmware has not touched the select pins before.
+//   2. up to this point the four select pins are untouched inputs (the multiplexer sees whatever the pins' own pull resistors give: channel 0..15, harmless).
+//   3. each select pin gets its LOW level in the output register first and is switched to output afterwards, so there is no glitch to HIGH.
+//   4. SIG and the modules become plain inputs; the scan starts with the first ringService() call.
+// EN is wired to GND, so the multiplexer cannot be disabled by software; no spare output-capable GPIO exists to control it.
 static void ringBegin() {
-  // The select pins go to outputs only here. GPIO12 and GPIO0 are strapping pins: nothing is driven on them before this point (boot has finished).
-  for (uint8_t k = 0; k < 4; k++) { pinMode(PIN_MUX_SEL[k], OUTPUT); digitalWrite(PIN_MUX_SEL[k], LOW); }
+  while (millis() < RING_BOOT_HOLDOFF_MS) delay(1);
+  for (uint8_t k = 0; k < 4; k++) { digitalWrite(PIN_MUX_SEL[k], LOW); pinMode(PIN_MUX_SEL[k], OUTPUT); }
   pinMode(P_MUX_SIG, INPUT);
   for (uint8_t i = 0; i < MOD_COUNT; i++) pinMode(PIN_MOD[i], INPUT);
   memset(g_ring, 0, sizeof(g_ring));
@@ -169,8 +175,8 @@ static void ringStep(const Config& c, uint8_t ch, uint16_t lo, uint16_t hi, uint
   if (!r.init) { r.init = true; r.avg = (float)r.amp; } else r.avg = 0.5f * r.avg + 0.5f * (float)r.amp;
   r.s = r.avg / (float)c.ringNear;
 
-  // Wiring/saturation: a channel whose LOWEST reading in the window stays at the top of the ADC range is shorted to 3.3 V, or blinded by steady light.
-  bool sat = lo >= RING_RAIL_HI;
+  // Wiring/saturation: a channel whose LOWEST reading in the window stays at/above ringrailhi is shorted to a supply rail, or blinded by steady light.
+  bool sat = lo >= c.ringRailHi;
   if (sat) {
     r.offRailSinceMs = 0;
     if (!r.railSinceMs) r.railSinceMs = nowMs ? nowMs : 1u;

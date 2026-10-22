@@ -37,17 +37,21 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
 };
 
 // ---- Ball ring: CD74HC4067 16-channel analog multiplexer, one analog line (SIG) ------------------------------
-// Wiring (as built): VCC -> ESP32 3V3, GND -> common GND, EN -> GND (always enabled), SIG -> GPIO34 (analog input), S0..S3 -> GPIO4/13/12/0.
+// Wiring: VCC -> ESP32 3V3, GND -> common GND, EN -> GND (always enabled), SIG -> GPIO34 (analog input), S0 -> GPIO4, S1 -> GPIO13, S2 -> GPIO2, S3 -> GPIO15.
 // C0..C11 = 12 phototransistor receivers (the ring, they see the ball's own infrared emission); C12..C15 = optional extra receivers
 // (planned: left / right looking), enabled with ':ring on <ch>' once fitted.
-// WARNING (strapping pins): S2 is on GPIO12 (MTDI: must be LOW at reset for 3.3 V flash) and S3 on GPIO0 (must be HIGH at reset, LOW = download mode).
-// The CD74HC4067 select inputs are high-impedance and draw no current, so a bare chip does not disturb either level, but a breakout board that
-// pulls S2 up or S3 down would. If the board will not boot or upload, unplug the S2 / S3 wire and retry (docs/RING_AND_MODULES.md).
+//
+// WHY S2/S3 ARE ON GPIO2 AND GPIO15 (and not on GPIO12 / GPIO0): the only free output-capable GPIOs are 0, 2, 12 and 15, and all four are boot-strapping pins.
+// GPIO0 = LOW at reset selects the serial bootloader (the robot would not start), GPIO12 = HIGH at reset selects 1.8 V flash (the board would not boot).
+// GPIO2 and GPIO15 are the harmless pair: GPIO15 only decides whether the boot ROM prints its log, and GPIO2 only matters in download mode and only
+// when it is driven high. The select inputs of the CD74HC4067 are high-impedance, so they leave the reset levels of these pins unchanged. See docs/RING_AND_MODULES.md.
+// The firmware does not touch any select pin until the ESP32 has finished booting (ringBegin(), after RING_BOOT_HOLDOFF_MS).
 #define P_MUX_S0 4
 #define P_MUX_S1 13
-#define P_MUX_S2 12
-#define P_MUX_S3 0
+#define P_MUX_S2 2
+#define P_MUX_S3 15
 #define P_MUX_SIG 34                               // ADC1_CH6, input-only, no pull resistors
+#define RING_BOOT_HOLDOFF_MS 500                   // select pins stay untouched (inputs) until this long after reset
 static const uint8_t PIN_MUX_SEL[4] = {P_MUX_S0, P_MUX_S1, P_MUX_S2, P_MUX_S3};
 static const uint8_t RING_CH_MAX = 16;             // the CD74HC4067 has 16 channels
 static const uint8_t RING_CH_FIXED = 12;           // C0..C11 are fitted; C12..C15 are optional
@@ -83,6 +87,7 @@ static_assert(__builtin_popcountll(ALL_OUT_MASK) == 18, "a multiplexer select pi
 #define IN_ONLY_MASK (PIN_BIT(P_MUX_SIG) | PIN_BIT(P_MOD0) | PIN_BIT(P_MOD1))
 static_assert(__builtin_popcountll(IN_ONLY_MASK) == 3, "the multiplexer SIG pin and the two module pins must all be different");
 static_assert((IN_ONLY_MASK & ALL_OUT_MASK) == 0, "SIG / module pins must not be motor, I2C or multiplexer select pins");
+static_assert((MUX_SEL_MASK & (PIN_BIT(0) | PIN_BIT(12))) == 0, "the multiplexer select pins must not be on GPIO0 (boot mode) or GPIO12 (flash voltage)");
 static_assert((ALL_OUT_MASK & (0x3FULL << 6)) == 0 && (IN_ONLY_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
 #ifdef SOC_GPIO_VALID_OUTPUT_GPIO_MASK   // only visible on the real toolchain
 static_assert((ALL_OUT_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");

@@ -88,7 +88,7 @@ void setup() {
   bool pwmOk = motorsAttachPwm(g_cfg);
   say("BOOT", "motor PWM init: %s (%u Hz, %u-bit)", pwmOk ? "OK" : "FAILED", (unsigned)g_cfg.pwmFreq, (unsigned)PWM_BITS);
 
-  // Ball ring (CD74HC4067 on GPIO34, select GPIO4/13/12/0) and the two IR modules (GPIO35 / GPIO36).
+  // Ball ring (CD74HC4067 on GPIO34, select GPIO4/13/2/15) and the two IR modules (GPIO35 / GPIO36).
   ringBegin();
   say("BOOT", "ball ring: %u of %u channels enabled, noise floor %s | IR modules: front GPIO%u %s, second GPIO%u %s", (unsigned)ringCountEnabled(g_cfg), (unsigned)RING_CH_MAX,
       g_cfg.ringCalDone ? "calibrated" : "NOT CALIBRATED", (unsigned)PIN_MOD[0], modEnabled(g_cfg, 0) ? "on" : "off", (unsigned)PIN_MOD[1], modEnabled(g_cfg, 1) ? "on" : "off");

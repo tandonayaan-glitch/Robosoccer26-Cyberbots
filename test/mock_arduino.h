@@ -54,7 +54,7 @@ static inline uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 4096; 
 // ---- virtual time + signal model ------------------------------------------------------
 static uint64_t g_mockUs = 5000000ULL;   // start at 5 s so nothing depends on t=0
 
-// Sensor model. Ring: the analog line on GPIO34 reads the channel the firmware selected on S0..S3 (GPIO4/13/12/0): a DC level plus, while the simulated
+// Sensor model. Ring: the analog line on GPIO34 reads the channel the firmware selected on S0..S3 (GPIO4/13/2/15): a DC level plus, while the simulated
 // ball burst is on (192 us of every 833 us, the RCJ ball's pattern), the channel's swing. Tests set g_mockRingAmp[] / g_mockRingBase[].
 // Modules: GPIO35 / GPIO36 digital, LOW when g_mockModDetect[] is set (active-low module).
 static uint16_t g_mockAnalog[64];
@@ -87,8 +87,10 @@ static inline void delayMicroseconds(uint32_t us) { mockAdvance(us); }
 static inline void yield() {}
 
 // ---- GPIO --------------------------------------------------------------------------------
-static inline void pinMode(uint8_t p, uint8_t m) { g_pinMode[p] = m; }
-static inline void digitalWrite(uint8_t p, uint8_t v) { g_pinLevel[p] = v ? 1 : 0; g_mockEmitWrites[p]++; }
+static uint32_t g_pinFirstTouchMs[64];               // millis()+1 of the first pinMode / digitalWrite on each pin (0 = never touched)
+static inline void mockTouch(uint8_t p) { if (!g_pinFirstTouchMs[p]) g_pinFirstTouchMs[p] = (uint32_t)(g_mockUs / 1000ULL) + 1u; }
+static inline void pinMode(uint8_t p, uint8_t m) { mockTouch(p); g_pinMode[p] = m; }
+static inline void digitalWrite(uint8_t p, uint8_t v) { mockTouch(p); g_pinLevel[p] = v ? 1 : 0; g_mockEmitWrites[p]++; }
 static inline int analogRead(uint8_t p);
 static inline int digitalRead(uint8_t p) {
   if (p == 35 || p == 36) { bool d = g_mockModDetect[p - 35]; return (g_mockModActiveHigh ? d : !d) ? 1 : 0; }
@@ -99,7 +101,7 @@ static inline int analogRead(uint8_t p) {
   if (p != 34) return g_mockAnalog[p];
   g_mockAdcReads++;
   mockAdvance(20);                                   // one conversion takes about 20 us
-  int ch = g_pinLevel[4] | (g_pinLevel[13] << 1) | (g_pinLevel[12] << 2) | (g_pinLevel[0] << 3);
+  int ch = g_pinLevel[4] | (g_pinLevel[13] << 1) | (g_pinLevel[2] << 2) | (g_pinLevel[15] << 3);
   bool burst = (uint32_t)(g_mockUs % 833ULL) < 192u;
   int v = (int)g_mockRingBase[ch] + (burst ? (int)g_mockRingAmp[ch] : 0);
   if (g_mockRingNoise) { g_mockRng = g_mockRng * 1664525u + 1013904223u; v += (int)((g_mockRng >> 16) % (2u * g_mockRingNoise + 1u)) - (int)g_mockRingNoise; }

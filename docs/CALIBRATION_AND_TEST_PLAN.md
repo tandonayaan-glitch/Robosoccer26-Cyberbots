@@ -8,7 +8,7 @@ Everything here is a **procedure for you to run**. No step has been performed on
 
 1. **Hardware first** (power off): remove the ENA/ENB jumpers on both L298N boards; add 4.7–10 kΩ pull-downs on all 12 L298N control inputs
    (IN1–IN4, ENA, ENB, both boards); common ground everywhere; a regulated 5 V for the ESP32 (not the L298N regulator when the pack is above 12 V);
-   the ring: each phototransistor with its load resistor into its multiplexer channel, the multiplexer on 3V3/GND/EN=GND, SIG→GPIO34, S0–S3→GPIO4/13/12/0, the two IR modules on 3.3 V (`RING_AND_MODULES.md` §1, §4; **the phototransistors cannot connect straight to a channel; confirm every channel voltage stays within 0–3.3 V with a meter before applying power**; check that the board still boots and uploads with the S2/S3 wires connected, §3); fuse the battery.
+   the ring: each phototransistor (collector 5 V) through the 6.8 kΩ series + 10 kΩ divider into its multiplexer channel, the multiplexer on 3V3/GND/EN=GND, SIG→GPIO34, S0→GPIO4, S1→GPIO13, S2→GPIO2, S3→GPIO15, the two IR modules on 3.3 V (`RING_AND_MODULES.md` §1, §4; **the phototransistors cannot connect straight to a channel; confirm every channel voltage stays within 0–3.3 V with a meter before applying power**; check that the board still boots and uploads with the S2/S3 wires connected, §3; GPIO0 and GPIO12 stay free); fuse the battery.
 2. **Wheels off the ground**, robot on a stand, motor battery connector reachable. First flash with the motor battery **disconnected** (USB only).
 3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, ball ring (`NOT CALIBRATED`) and modules, MPU6050 found at 0x68/0x69.
    Expect warnings: wheels NOT TESTED, sensors NOT TESTED. Confirm **no wheel moved** and autonomy is DISABLED.
@@ -53,7 +53,7 @@ Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues
 | 3 | Individual motor direction | §B 1–2 | each wheel forward = robot-forward | NOT TESTED |
 | 4 | Four mecanum motions | `:dtest` | motions match labels | NOT TESTED |
 | 5 | Ring wiring and raw swings | `RING_AND_MODULES.md` §9 steps 2–4 | quiet and steady with the ball off; only the channel(s) facing the ball react | NOT TESTED |
-| 6 | Strapping pins | reset five times and upload once with S2/S3 connected | boots and uploads every time | NOT TESTED |
+| 6 | Strapping pins | five power-off/on cycles and one upload with S2 (GPIO2) / S3 (GPIO15) connected | boots and uploads every time | NOT TESTED |
 | 7 | Mounting angles and bearing | ball around the robot at a fixed distance | printed bearing within a few degrees of the real angle; blind arcs recorded | NOT TESTED |
 | 8 | Module 0 distance and polarity | ball, hand and a wall in front of it | `DETECTING` exactly in the shooting position; polarity set | NOT TESTED |
 | 9 | Detection range of the ball | ball at 5/10/20/40 cm on several channels | range recorded; if too short, the search cannot find a distant ball | NOT TESTED |

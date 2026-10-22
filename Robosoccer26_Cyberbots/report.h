@@ -120,7 +120,7 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
     const char* w = ringCountEnabled(c) == 0 ? "OFF" : ringCountUsable(c) == 0 ? "FAIL (no usable channel)" : !c.ringCalDone ? "NOT TESTED (noise floor not calibrated)" : "calibrated (software: says nothing about the ball response)";
     say(tag, "[Ring] CD74HC4067 on SIG GPIO%u, S0..S3 = GPIO%u/%u/%u/%u: %u enabled, %u usable, %s", (unsigned)P_MUX_SIG, (unsigned)P_MUX_S0, (unsigned)P_MUX_S1, (unsigned)P_MUX_S2, (unsigned)P_MUX_S3, (unsigned)ringCountEnabled(c), (unsigned)ringCountUsable(c), w);
     for (uint8_t i = 0; i < RING_CH_MAX; i++)
-      if (ringEnabled(c, i) && g_ring[i].railFault) say(tag, "[Ring] C%u FAIL (saturated: swing cannot be measured; shorted to 3.3 V or steady light)", (unsigned)i);
+      if (ringEnabled(c, i) && g_ring[i].railFault) say(tag, "[Ring] C%u FAIL (saturated: swing cannot be measured; shorted to a supply rail or steady light)", (unsigned)i);
     say(tag, "[Ring] coverage gap ~%.0f deg (estimate from configured bearings; bearings are PLACEHOLDERS until set with ':ring bearing')", (double)gap);
     for (uint8_t i = 0; i < MOD_COUNT; i++)
       say(tag, "[Module %u] GPIO%u (%s): %s, %s", (unsigned)i, (unsigned)PIN_MOD[i], i == 0 ? "front, shooting position" : "position undecided", modEnabled(c, i) ? "on" : "off", !modEnabled(c, i) ? "-" : (g_mod[i].active ? "detecting now" : "clear now"));

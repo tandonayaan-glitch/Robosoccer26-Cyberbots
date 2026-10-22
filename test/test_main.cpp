@@ -164,8 +164,9 @@ static void t_pinmap() {
   for (int i = 0; i < 4; i++) {
     CHECK(WHEEL_PINS[i].in1 == spec[i].in1 && WHEEL_PINS[i].in2 == spec[i].in2 && WHEEL_PINS[i].en == spec[i].en);
   }
-  // multiplexer as wired by the operator: S0 GPIO4, S1 GPIO13, S2 GPIO12, S3 GPIO0, SIG GPIO34; modules on GPIO35 / GPIO36 (proposal)
-  CHECK(PIN_MUX_SEL[0] == 4 && PIN_MUX_SEL[1] == 13 && PIN_MUX_SEL[2] == 12 && PIN_MUX_SEL[3] == 0 && P_MUX_SIG == 34);
+  // multiplexer: S0 GPIO4, S1 GPIO13, S2 GPIO2, S3 GPIO15 (moved off the boot-critical GPIO12 / GPIO0), SIG GPIO34; modules on GPIO35 / GPIO36 (approved)
+  CHECK(PIN_MUX_SEL[0] == 4 && PIN_MUX_SEL[1] == 13 && PIN_MUX_SEL[2] == 2 && PIN_MUX_SEL[3] == 15 && P_MUX_SIG == 34);
+  for (int k = 0; k < 4; k++) CHECK(PIN_MUX_SEL[k] != 0 && PIN_MUX_SEL[k] != 12);          // never the boot-mode / flash-voltage strapping pins
   CHECK(PIN_MOD[0] == 35 && PIN_MOD[1] == 36);
   for (int k = 0; k < 4; k++) {
     for (int i = 0; i < 4; i++) CHECK(PIN_MUX_SEL[k] != WHEEL_PINS[i].in1 && PIN_MUX_SEL[k] != WHEEL_PINS[i].in2 && PIN_MUX_SEL[k] != WHEEL_PINS[i].en);
@@ -1155,7 +1156,7 @@ static void t_ring_pure_rules() {
 static void t_ring_pins_and_isolation() {
   bootCal();
   simRun(200);
-  for (int k = 0; k < 4; k++) CHECK(g_pinMode[PIN_MUX_SEL[k]] == OUTPUT);                  // GPIO4, 13, 12, 0 are outputs only after boot
+  for (int k = 0; k < 4; k++) CHECK(g_pinMode[PIN_MUX_SEL[k]] == OUTPUT);                  // GPIO4, 13, 2, 15 are outputs only after boot
   CHECK(g_pinMode[P_MUX_SIG] == INPUT && g_pinMode[PIN_MOD[0]] == INPUT && g_pinMode[PIN_MOD[1]] == INPUT);
   CHECK(allWheelsStopped());
   // only C5 carries a signal: only C5 may see it, and the bearing is C5's
@@ -1170,6 +1171,24 @@ static void t_ring_pins_and_isolation() {
   g_mockRingAmp[9] = 800;
   simRun(300);
   CHECK(g_ball.seenMask == (1u << 9));
+}
+
+// The select pins are not touched before the ESP32 has been up for RING_BOOT_HOLDOFF_MS, and never before the motor pins are safe.
+static void t_ring_boot_sequence() {
+  memset(g_pinFirstTouchMs, 0, sizeof(g_pinFirstTouchMs));
+  g_mockUs = 0;                                                          // reset: the clock starts at zero
+  ballGone(); setup();
+  uint32_t motorFirst = g_pinFirstTouchMs[P_FL_EN] ? g_pinFirstTouchMs[P_FL_EN] : 1u;
+  for (int k = 0; k < 4; k++) {
+    uint32_t t = g_pinFirstTouchMs[PIN_MUX_SEL[k]];
+    CHECK(t != 0);
+    CHECK(t - 1u >= RING_BOOT_HOLDOFF_MS);                               // not before the hold-off after reset
+    CHECK(t >= motorFirst);                                              // after the motor pins were made safe
+    CHECK(g_pinMode[PIN_MUX_SEL[k]] == OUTPUT && g_pinLevel[PIN_MUX_SEL[k]] <= 1);
+  }
+  CHECK(g_pinFirstTouchMs[0] == 0 && g_pinFirstTouchMs[12] == 0);        // GPIO0 and GPIO12 are never used by the firmware
+  // the select line is made LOW in the output register before it becomes an output (no HIGH glitch): the first touch is a write, and the level stayed LOW until the first scan
+  CHECK(allWheelsStopped());
 }
 
 static void t_ring_detect_and_bearing() {
@@ -1763,6 +1782,7 @@ static const TestCase TESTS[] = {
   T(t_imu_frozen_in_approach),
   T(t_ring_pure_rules),
   T(t_ring_pins_and_isolation),
+  T(t_ring_boot_sequence),
   T(t_ring_detect_and_bearing),
   T(t_ring_burst_window),
   T(t_ring_noise_and_threshold),

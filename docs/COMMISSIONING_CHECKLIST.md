@@ -6,7 +6,7 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 ## Phase 0 – Robot unpowered (no battery, no USB)
 - [ ] Identify the exact ESP32 module (can marking: WROOM or WROVER/PSRAM, flash size). PSRAM modules use GPIO16/17: then the IMU pins must change (document it; do not silently change pins).
 - [ ] **Identify the ring phototransistors (5 mm) and the multiplexer board** (bare CD74HC4067 or a breakout: pull resistors on S0–S3?): part numbers or photos (phototransistor: lead order, dark/light current, response time) and answer the questions in `docs/RING_AND_MODULES.md` §10 (mounting angles, module pins). **Do not finalise the circuit before this.**
-- [ ] Build one receiver circuit per channel (collector to 3.3 V, emitter to the multiplexer channel, load resistor to GND, start 10 kΩ, `RING_AND_MODULES.md` §4), the multiplexer wiring (3V3, GND, EN→GND, SIG→GPIO34, S0–S3→GPIO4/13/12/0) and the two IR modules (3.3 V, OUT→GPIO35 and GPIO36 (proposal; GPIO34 is SIG)).
+- [ ] Build one receiver circuit per channel (collector to 5 V, emitter → 6.8 kΩ → multiplexer channel, 10 kΩ channel → GND; the series resistor is mandatory, `RING_AND_MODULES.md` §4), the multiplexer wiring (3V3, GND, EN→GND, SIG→GPIO34, S0→GPIO4, S1→GPIO13, **S2→GPIO2, S3→GPIO15**) and the two IR modules (3.3 V, OUT→GPIO35 and GPIO36).
 - [ ] Check the MPU6050 breakout: regulator present? pull-ups to which rail? AD0 state?
 - [ ] Remove the ENA/ENB jumpers on both L298N boards; decide the logic-supply source (buck 5 V, not the L298N regulator if the pack is above 12 V).
 - [ ] Fit: 4.7–10 kΩ **pull-downs on all 12 L298N control inputs** (IN1–IN4, ENA, ENB, both boards); decoupling on the sensor supply; a **fuse** and a **motor-power switch** reachable at all times.
@@ -14,8 +14,8 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 
 ## Phase 1 – Electrical checks with a meter (battery disconnected from the motors)
 - [ ] Logic supply: 5 V and 3.3 V rails correct under load.
-- [ ] Every ring channel voltage (and SIG at GPIO34) stays within 0–3.3 V in every condition (ball off, ball in front, hand over it, bright light) – **never 5 V**; the module outputs at GPIO35/36 stay within 0–3.3 V (modules powered from 3.3 V).
-- [ ] **Strapping pins:** with S2 (GPIO12) and S3 (GPIO0) connected, GPIO12 reads LOW and GPIO0 HIGH while EN is released (before the firmware runs); the board boots after five resets and uploads over USB.
+- [ ] Every ring channel node (measured with the multiplexer NOT yet connected, then SIG at GPIO34) stays ≤ 3.3 V in every condition (ball off, ball in front, hand over it, flashlight on the lens; expect ≤ 3.0 V with the 6.8 kΩ + 10 kΩ divider) – **never 5 V**; each module OUT, measured before connecting, is ≤ 3.3 V in both states (modules powered from 3.3 V).
+- [ ] **Strapping pins:** the multiplexer board's S0–S3 inputs float (no resistor to a rail; meter, ESP32 unpowered); with S2 (GPIO2) and S3 (GPIO15) connected the board boots after five power-off/on cycles and uploads over USB; GPIO0 and GPIO12 carry no wire.
 - [ ] Motor supply polarity; both L298N boards receive Vs; motors **not** connected to the supply yet (or the supply switch off).
 
 ## Phase 2 – USB only, motor battery disconnected

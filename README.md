@@ -8,7 +8,7 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 > | Verified by | Result |
 > |---|---|
 > | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 19–20 % RAM |
-> | **Host simulation** (simulated sensor values, IMU, filesystem) | 66 test cases × 2 API shapes = 132 runs, 4,776 checks, all pass, ASan/UBSan clean |
+> | **Host simulation** (simulated sensor values, IMU, filesystem) | 67 test cases × 2 API shapes = 134 runs, 4,826 checks, all pass, ASan/UBSan clean |
 > | Requires the real sensors and the real ball | **not done**: the receivers' response to the real ball, the real mounting angles, the module distance setting and the strapping-pin behaviour of the multiplexer wiring are unknown to the firmware and untested |
 > | Requires electrical inspection and supervised robot tests | **not done**: pull-downs, reset-state voltages, motor directions, ramps, heading, autonomy, the shot |
 >
@@ -24,7 +24,7 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 | 4 | mecanum wheel |
 | 1 | 3S 11.1 V 4500 mAh battery |
 | 1 | CD74HC4067 16-channel analog multiplexer (EN tied to GND) |
-| 12 | 5 mm IR phototransistor on multiplexer C0–C11 (the ring; **part number not known**; each needs a load resistor, it cannot go straight to a channel: collector to 3.3 V, emitter to the channel and a resistor (start 10 kΩ) to GND; `docs/RING_AND_MODULES.md` §4) |
+| 12 | 5 mm IR phototransistor on multiplexer C0–C11 (the ring; **part number not known**; each needs a load resistor, it cannot go straight to a channel: collector to 5 V, emitter through a 6.8 kΩ series resistor to the channel, 10 kΩ from the channel to GND: the series resistor keeps every channel ≤ 3.0 V; `docs/RING_AND_MODULES.md` §4) |
 | 0–4 | optional extra phototransistors on C12–C15 (planned: looking left / right; you add them, `:ring on <ch>`) |
 | 2 | IR obstacle module, 3-pin (VCC / GND / OUT, trimmer), 3.3 V: module 0 front (shooting position), module 1 position not decided |
 | 1 | MPU6050 |
@@ -43,16 +43,16 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 | **23 / 5** | Left L298N ENA / ENB (PWM) |
 | | Left OUT1/OUT2 = **front-left** motor, OUT3/OUT4 = **back-left** motor |
 | **34** | CD74HC4067 **SIG** (analog input, input-only, ADC1) |
-| **4 / 13 / 12\* / 0\*** | CD74HC4067 **S0 / S1 / S2 / S3** (\* strapping pins: `docs/RING_AND_MODULES.md` §3) |
+| **4 / 13 / 2\* / 15\*** | CD74HC4067 **S0 / S1 / S2 / S3** (\* strapping pins, the harmless ones; GPIO0 and GPIO12 are deliberately NOT used: `docs/RING_AND_MODULES.md` §3) |
 | **35** | IR obstacle module 0 OUT (front, shooting position) |
-| *36* | *IR obstacle module 1 OUT: **my proposal** (you wrote "34 and 35", GPIO34 is SIG)* |
+| **36** | IR obstacle module 1 OUT (approved) |
 | **16 / 17** | MPU6050 SDA / SCL |
 | 1 / 3 | USB serial (115200 baud) |
 
 Battery + / − go to both L298N motor-supply and ground terminals (fuse and a switch within reach); **all grounds common**. How the ESP32 itself is powered is not specified in the project notes
 (do not feed it from the L298N regulator with a charged 3S pack, ~12.6 V). Full tables, electrical notes and the boot/reset analysis: `docs/HARDWARE_REVIEW.md`.
 
-**Free GPIOs:** 39 (input-only, ADC1) · 2 and 15 (strapping pins: usable as outputs, avoid pull-ups on GPIO2). GPIO0 and GPIO12 are the multiplexer's S3 and S2 (strapping pins). GPIO6–11 are the flash and cannot be used.
+**Free GPIOs:** 39 (input-only, ADC1). GPIO0 and GPIO12 are unused on purpose (boot mode and flash voltage). GPIO6–11 are the flash and cannot be used.
 
 ## How the ring and the modules are used (`docs/RING_AND_MODULES.md`)
 
