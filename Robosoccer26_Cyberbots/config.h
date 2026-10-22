@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 14
+#define CFG_VERSION 15
 
 struct Config {
   uint32_t magic;
@@ -27,27 +27,35 @@ struct Config {
   uint16_t reverseDeadMs;        // pause at zero when a wheel changes direction
   uint16_t manualHoldMs;         // manual motion auto-stops after this long without a repeated key
 
-  // ---- IR sensors: two 2-pin sensors at the front (sensor 0 = front centre on GPIO35, sensor 1 = front, offset, on GPIO36) ----
-  uint8_t irEnable;              // bit0: sensor 0 in use, bit1: sensor 1 in use
-  uint8_t irMode0, irMode1;      // how the pin is read: 0 = analog (ADC, 12 bit), 1 = digital (HIGH/LOW). NOT assumed: set to what your circuit is
-  uint16_t irClear0, irNear0;    // sensor 0 calibration (':ir cal'): raw value with nothing in front / with the ball in the shooting position
-  uint16_t irClear1, irNear1;    // sensor 1 calibration; clear and near must differ by >= 50 (digital: 0 and 4095), otherwise the sensor is "not calibrated"
-  uint8_t irSeenPct;             // a sensor "sees" the ball when its strength (percent of the clear -> near span) reaches this
-  uint8_t irNearPct;             // ... and reports "ball at the shooting position" at this strength
-  uint8_t irDebounce;            // consecutive 5 ms samples needed to change a sensor's state
-  int8_t irOffsetSide;           // sensor 1 is mounted to the RIGHT (+1) or LEFT (-1) of sensor 0 as seen from behind; 0 = not set: no sideways guidance
-  uint8_t irNeedBoth;            // 1: the shooting position also needs sensor 1 to see the ball (when sensor 1 is usable)
-  uint16_t irRailMs;             // an analog sensor held at the ADC end stop on its clear side this long is reported faulty (wiring); not checked while iremit = 1
-  uint8_t irEmit;                // 0 = emitters hard-wired (always on) or driven elsewhere: the firmware does not touch the emitter pins.
-                                 // 1 = the firmware pulses each emitter and subtracts the ambient light: signal = 2048 + (lit - dark), per pair
-  uint16_t irSettleUs;           // iremit = 1: wait this long after switching an emitter before reading its receiver
-
+  // ---- ball ring: 12 phototransistors (+ up to 4 extra) on the CD74HC4067, read on one analog line (GPIO34) ----
+  uint16_t ringEnable;           // bit n = multiplexer channel Cn is fitted and scanned. C0..C11 on by default; C12..C15 once you fit them
+  int16_t ringBearing[RING_CH_MAX]; // where each receiver looks, degrees: 0 = straight ahead, + clockwise (right), +-180 = behind. PLACEHOLDERS until you measure (':ring bearing')
+  uint16_t ringNoise[RING_CH_MAX];  // per-channel noise floor in ADC counts (peak-to-peak with no ball emitting), set by ':ring cal noise'
+  uint8_t ringCalDone;           // 1 = ':ring cal noise' has been run on this robot (autonomy is refused otherwise)
+  uint16_t ringWinUs;            // each channel is sampled this long (microseconds) and the peak-to-peak swing is taken: must cover one ball burst period
+  uint16_t ringSettleUs;         // wait after switching the multiplexer before the first sample
+  uint16_t ringSeen;             // a channel "sees" the ball at this peak-to-peak swing (ADC counts), or above its noise floor times ringnoisex, whichever is more
+  uint8_t ringNoiseX10;          // noise-floor multiplier x10 (30 = 3.0x)
+  uint16_t ringNear;             // swing at which the ball counts as "very close" (strength 1.0); ':ring cal near' sets it from the shooting position
+  uint8_t ringDebounce;          // consecutive scans needed to change a channel's state
+  uint8_t ringFovHalf;           // ASSUMED half field of view of one receiver, degrees: used only for the coverage-gap estimate
+  uint8_t ringBlend;             // channels within this many degrees of the strongest one are averaged into the bearing
+  uint8_t ringMaxGap;            // largest tolerated uncovered arc in degrees (estimate from the configured bearings), above it: DEGRADED
+  uint16_t ringRailMs;           // a channel held saturated this long is excluded and reported (shorted to 3.3 V / sunlight saturation)
+  // ---- IR obstacle modules (digital OUT): module 0 = front, ball in the shooting position; module 1 = undecided position, logged only ----
+  uint8_t modEnable;             // bit0: module 0 in use (default), bit1: module 1 in use
+  uint8_t modActiveLow;          // 1 = OUT goes LOW when something is detected (typical for these modules; NOT assumed: check with ':mod')
+  uint8_t modDebounce;           // consecutive 5 ms samples needed to change a module's state
+  uint8_t modNeedRing;           // 1 = the shooting position also needs the ring to see the ball near the front (a wall or a robot also trips the module)
   // ---- navigation ----
-  uint16_t lostHoldMs;           // ball stays "valid" this long after both sensors stopped seeing it
-  float centerBand;              // |offset| (0..1) below this counts as centred
+  uint16_t lostHoldMs;           // ball stays "valid" this long after the ring stopped seeing it
+  float centerDeg;               // ball bearing within +- this many degrees of straight ahead counts as centred
+  float turnDeg;                 // bearing beyond this: turn on the spot towards the ball before driving
+  float turnKp;                  // rotation request per degree of bearing error
+  float turnMax;                 // largest rotation request used to follow the ball
   float approachSpeed;           // 0..1 of maxAuto; forward speed while the ball is far
-  float slowSpeed;               // forward speed close to the ball, and while only one sensor sees it
-  float alignSpeed;              // largest sideways speed used to centre the ball
+  float slowSpeed;               // forward speed close to the ball
+  float alignSpeed;              // largest sideways speed used to centre the ball (strafe)
   float searchSpin;
   uint32_t searchTimeoutMs;
   uint8_t searchAttempts;
@@ -92,7 +100,7 @@ struct Config {
   uint16_t flushMs;
   uint16_t frPeriodMs;           // flight recorder sampling period
   uint16_t frPostMs;             // post-trigger capture time
-  uint16_t streamMs;             // 'I' live IR view period
+  uint16_t streamMs;             // 'I' live ring view period
 
   // ---- recovery ----
   uint16_t recoverVerifyMs;
@@ -115,23 +123,26 @@ static const ParamDef PARAMS[] = {
   PD("decel", PT_U16, decelPwmPerS, 50, 10000),
   PD("revdead", PT_U16, reverseDeadMs, 0, 500),
   PD("manualhold", PT_U16, manualHoldMs, 100, 5000),
-  PD("irenable", PT_U8, irEnable, 0, 3),
-  PD("irmode0", PT_U8, irMode0, 0, 1),
-  PD("irmode1", PT_U8, irMode1, 0, 1),
-  PD("irclear0", PT_U16, irClear0, 0, 4095),
-  PD("irnear0", PT_U16, irNear0, 0, 4095),
-  PD("irclear1", PT_U16, irClear1, 0, 4095),
-  PD("irnear1", PT_U16, irNear1, 0, 4095),
-  PD("irseen", PT_U8, irSeenPct, 5, 90),
-  PD("irnearpct", PT_U8, irNearPct, 20, 100),
-  PD("irdebounce", PT_U8, irDebounce, 1, 20),
-  PD("iroffset", PT_I8, irOffsetSide, -1, 1),
-  PD("irneedboth", PT_U8, irNeedBoth, 0, 1),
-  PD("irrailms", PT_U16, irRailMs, 200, 20000),
-  PD("iremit", PT_U8, irEmit, 0, 1),
-  PD("irsettle", PT_U16, irSettleUs, 20, 2000),
+  PD("ringenable", PT_U16, ringEnable, 0, 65535),
+  PD("ringwinus", PT_U16, ringWinUs, 200, 3000),
+  PD("ringsettle", PT_U16, ringSettleUs, 0, 500),
+  PD("ringseen", PT_U16, ringSeen, 10, 2000),
+  PD("ringnoisex", PT_U8, ringNoiseX10, 10, 100),
+  PD("ringnear", PT_U16, ringNear, 50, 4095),
+  PD("ringdebounce", PT_U8, ringDebounce, 1, 10),
+  PD("ringfov", PT_U8, ringFovHalf, 10, 90),
+  PD("ringblend", PT_U8, ringBlend, 10, 120),
+  PD("ringmaxgap", PT_U8, ringMaxGap, 30, 250),
+  PD("ringrailms", PT_U16, ringRailMs, 200, 20000),
+  PD("modenable", PT_U8, modEnable, 0, 3),
+  PD("modactivelow", PT_U8, modActiveLow, 0, 1),
+  PD("moddebounce", PT_U8, modDebounce, 1, 20),
+  PD("modneedring", PT_U8, modNeedRing, 0, 1),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
-  PD("center", PT_F32, centerBand, 0.1, 0.9),
+  PD("centerdeg", PT_F32, centerDeg, 3, 60),
+  PD("turndeg", PT_F32, turnDeg, 8, 90),
+  PD("turnkp", PT_F32, turnKp, 0.002, 0.05),
+  PD("turnmax", PT_F32, turnMax, 0.1, 0.6),
   PD("approach", PT_F32, approachSpeed, 0.15, 1.0),
   PD("slow", PT_F32, slowSpeed, 0.1, 0.6),
   PD("alignspeed", PT_F32, alignSpeed, 0.05, 0.5),
@@ -221,17 +232,19 @@ static void cfgDefaults(Config& c) {
   c.decelPwmPerS = 1200;
   c.reverseDeadMs = 60;
   c.manualHoldMs = 600;
-  c.irEnable = 3;
-  c.irMode0 = c.irMode1 = 0;     // analog: a guess for a 2-pin photodiode/phototransistor with a resistor; change with ':set irmode0 1' for a digital output
-  c.irClear0 = c.irNear0 = c.irClear1 = c.irNear1 = 0;   // NOT calibrated: autonomy is refused until ':ir cal' has been done for sensor 0
-  c.irSeenPct = 15; c.irNearPct = 70; c.irDebounce = 3;
-  c.irOffsetSide = 0;            // unknown mounting side: no sideways guidance until ':set iroffset 1|-1'
-  c.irNeedBoth = 1;
-  c.irRailMs = 2000;
-  c.irEmit = 0;                  // emitter control is OFF until you confirm how the LEDs are driven and set ':set iremit 1'
-  c.irSettleUs = 200;
+  c.ringEnable = 0x0FFF;
+  for (int i = 0; i < RING_CH_MAX; i++) {
+    // PLACEHOLDER layout: C0..C11 evenly spaced every 30 deg starting straight ahead, going clockwise. The real mounting angles are not known to the
+    // firmware: set them with ':ring bearing <ch> <deg>'. C12/C14 are guessed as right-looking, C13/C15 as left-looking (not fitted: disabled).
+    c.ringBearing[i] = (i < RING_CH_FIXED) ? (int16_t)(i <= 6 ? i * 30 : i * 30 - 360) : (int16_t)((i & 1) ? -90 : 90);
+    c.ringNoise[i] = 0;
+  }
+  c.ringCalDone = 0;             // autonomy is refused until ':ring cal noise' has been run
+  c.ringWinUs = 900; c.ringSettleUs = 30; c.ringSeen = 80; c.ringNoiseX10 = 30; c.ringNear = 1500; c.ringDebounce = 2;
+  c.ringFovHalf = 45; c.ringBlend = 65; c.ringMaxGap = 90; c.ringRailMs = 2000;
+  c.modEnable = 1; c.modActiveLow = 1; c.modDebounce = 3; c.modNeedRing = 1;
   c.lostHoldMs = 300;
-  c.centerBand = 0.35f;
+  c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;
   c.approachSpeed = 0.5f;
   c.slowSpeed = 0.25f;
   c.alignSpeed = 0.2f;
@@ -301,12 +314,14 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
   }
   if (c.testPwm < c.minPwm || c.testPwm > c.maxManual) { c.testPwm = d.testPwm; bad++; repNote(rep, repN, "testpwm"); }
   if (c.slowSpeed > c.approachSpeed) { c.slowSpeed = d.slowSpeed; c.approachSpeed = d.approachSpeed; bad++; repNote(rep, repN, "slow/approach"); }
-  if (c.irSeenPct >= c.irNearPct) { c.irSeenPct = d.irSeenPct; c.irNearPct = d.irNearPct; bad++; repNote(rep, repN, "irseen/irnearpct"); }
+  if (c.ringSeen >= c.ringNear) { c.ringSeen = d.ringSeen; c.ringNear = d.ringNear; bad++; repNote(rep, repN, "ringseen/ringnear"); }
+  if (c.centerDeg >= c.turnDeg) { c.centerDeg = d.centerDeg; c.turnDeg = d.turnDeg; bad++; repNote(rep, repN, "centerdeg/turndeg"); }
+  for (int i = 0; i < RING_CH_MAX; i++) {
+    if (c.ringBearing[i] < -180 || c.ringBearing[i] > 180) { c.ringBearing[i] = d.ringBearing[i]; bad++; repNote(rep, repN, "ringbearing"); }
+    if (c.ringNoise[i] > 4095) { c.ringNoise[i] = 0; bad++; repNote(rep, repN, "ringnoise"); }
+  }
+  if (c.ringCalDone > 1) { c.ringCalDone = 0; bad++; repNote(rep, repN, "ringcaldone"); }
   if (c.ballDiaMm * 2 >= c.goalWidthMm) { c.ballDiaMm = d.ballDiaMm; c.goalWidthMm = d.goalWidthMm; bad++; repNote(rep, repN, "balldia/goalwidth"); }
-  // A sensor whose clear and near values are (almost) equal has no usable range: that is "not calibrated" and is stored as 0/0
-  // so nothing can mistake it for a calibration.
-  if (c.irClear0 != c.irNear0 && (c.irClear0 > c.irNear0 ? c.irClear0 - c.irNear0 : c.irNear0 - c.irClear0) < 50) { c.irClear0 = c.irNear0 = 0; bad++; repNote(rep, repN, "ir0 calibration"); }
-  if (c.irClear1 != c.irNear1 && (c.irClear1 > c.irNear1 ? c.irClear1 - c.irNear1 : c.irNear1 - c.irClear1) < 50) { c.irClear1 = c.irNear1 = 0; bad++; repNote(rep, repN, "ir1 calibration"); }
   return bad;
 }
 

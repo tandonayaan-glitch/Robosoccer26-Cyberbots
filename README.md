@@ -1,15 +1,15 @@
 # Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware
 
-Firmware for an ESP32-S (38-pin) robot: four mecanum wheels on two L298N drivers, **two IR transmitter–receiver pairs at the front** (2 IR LEDs + 2 two-pin IR receivers, reflected-light ball detection; no multiplexer, no sensor ring),
+Firmware for an ESP32-S (38-pin) robot: four mecanum wheels on two L298N drivers, **a 12-channel IR phototransistor ring on a CD74HC4067 multiplexer** (sees the ball's own infrared emission; optional extra receivers on C12–C15 for left/right) and **two IR obstacle modules** (front: ball in the shooting position),
 an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder, and a Hardware Health Monitor that degrades or stops instead of guessing.
 
 > **Status – read this first.**
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 19 % RAM |
-> | **Host simulation** (simulated sensor values, IMU, filesystem) | 65 test cases × 2 API shapes = 130 runs, 4,656 checks, all pass, ASan/UBSan clean |
-> | Requires the real sensors and the real ball | **not done**: the sensors' type, polarity, range, field of view and response to the ball are unknown to the firmware and untested |
+> | **Real ESP32 compilation** (Arduino-ESP32 **2.0.17** and **3.0.7**, real Xtensa GCC, `--warnings all`) | builds, **0 warnings**, 31–33 % flash, 19–20 % RAM |
+> | **Host simulation** (simulated sensor values, IMU, filesystem) | 66 test cases × 2 API shapes = 132 runs, 4,776 checks, all pass, ASan/UBSan clean |
+> | Requires the real sensors and the real ball | **not done**: the receivers' response to the real ball, the real mounting angles, the module distance setting and the strapping-pin behaviour of the multiplexer wiring are unknown to the firmware and untested |
 > | Requires electrical inspection and supervised robot tests | **not done**: pull-downs, reset-state voltages, motor directions, ramps, heading, autonomy, the shot |
 >
 > **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md`. Details: `docs/VERIFICATION_REPORT.md`.
@@ -23,12 +23,14 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 | 4 | yellow BO geared DC motor |
 | 4 | mecanum wheel |
 | 1 | 3S 11.1 V 4500 mAh battery |
-| 2 | IR transmitter LED, 940 nm, 5 V supply (**part number not known**; through a low-side NPN transistor and a resistor, about 180 Ω for 20 mA with an assumed 1.3 V forward voltage; `docs/IR_SENSORS.md` §3) |
-| 2 | 5 mm IR phototransistor (2-pin receiver; **part number not known**; it needs a load resistor, it cannot go straight to a GPIO: collector to 3.3 V, emitter to the pin and a resistor (start 10 kΩ) to GND; see `docs/IR_SENSORS.md` §2.1) |
+| 1 | CD74HC4067 16-channel analog multiplexer (EN tied to GND) |
+| 12 | 5 mm IR phototransistor on multiplexer C0–C11 (the ring; **part number not known**; each needs a load resistor, it cannot go straight to a channel: collector to 3.3 V, emitter to the channel and a resistor (start 10 kΩ) to GND; `docs/RING_AND_MODULES.md` §4) |
+| 0–4 | optional extra phototransistors on C12–C15 (planned: looking left / right; you add them, `:ring on <ch>`) |
+| 2 | IR obstacle module, 3-pin (VCC / GND / OUT, trimmer), 3.3 V: module 0 front (shooting position), module 1 position not decided |
 | 1 | MPU6050 |
 | 1 | breadboard, jumper wires, power wiring |
 
-**Exactly 2 IR LEDs and 2 IR receivers. No multiplexer. No 12-sensor ring. No kicker or other shooting actuator** (none is assumed; the "shot" is a drive burst).
+**No emitter LEDs are controlled by the firmware** (the ball is the emitter). **No kicker or other shooting actuator** (none is assumed; the "shot" is a drive burst).
 
 ### Wiring (pins fixed in `pins.h`)
 
@@ -40,32 +42,30 @@ an MPU6050 for relative heading, LittleFS CSV logging with a RAM flight recorder
 | **18 / 19 / 21 / 22** | **Left** L298N IN1 / IN2 / IN3 / IN4 |
 | **23 / 5** | Left L298N ENA / ENB (PWM) |
 | | Left OUT1/OUT2 = **front-left** motor, OUT3/OUT4 = **back-left** motor |
-| **35** | IR receiver 0, **front centre** (input-only, ADC1), through a receiver circuit, not directly |
-| **36** | IR receiver 1, **front, slightly off-centre** (input-only, ADC1) |
-| *4 / 13* | *IR emitter drivers 0 / 1: **proposed, not from your notes**; used only after `:set iremit 1`, through a transistor driver* |
+| **34** | CD74HC4067 **SIG** (analog input, input-only, ADC1) |
+| **4 / 13 / 12\* / 0\*** | CD74HC4067 **S0 / S1 / S2 / S3** (\* strapping pins: `docs/RING_AND_MODULES.md` §3) |
+| **35** | IR obstacle module 0 OUT (front, shooting position) |
+| *36* | *IR obstacle module 1 OUT: **my proposal** (you wrote "34 and 35", GPIO34 is SIG)* |
 | **16 / 17** | MPU6050 SDA / SCL |
 | 1 / 3 | USB serial (115200 baud) |
 
 Battery + / − go to both L298N motor-supply and ground terminals (fuse and a switch within reach); **all grounds common**. How the ESP32 itself is powered is not specified in the project notes
 (do not feed it from the L298N regulator with a charged 3S pack, ~12.6 V). Full tables, electrical notes and the boot/reset analysis: `docs/HARDWARE_REVIEW.md`.
 
-**Free GPIOs:** 34 and 39 (input-only, ADC1) · 2 and 15 (strapping pins: usable as outputs, avoid pull-ups on GPIO2) · 0 and 12 (boot strapping: deliberately unused). GPIO6–11 are the flash and cannot be used.
+**Free GPIOs:** 39 (input-only, ADC1) · 2 and 15 (strapping pins: usable as outputs, avoid pull-ups on GPIO2). GPIO0 and GPIO12 are the multiplexer's S3 and S2 (strapping pins). GPIO6–11 are the flash and cannot be used.
 
-## How the two IR pairs are used (`docs/IR_SENSORS.md`)
+## How the ring and the modules are used (`docs/RING_AND_MODULES.md`)
 
-Each pair is an IR LED plus a receiver; the receiver measures the infrared light **reflected from the ball**. This detects the ball, not the goal.
-
-* **Pair 0 (front centre)** reports how strong the reflection is. When it reaches the *near* level the ball is "in the shooting position". The robot does not shoot because a ball is merely visible far away.
-* **Pair 1 (offset)** lets the robot judge centred or off-centre: the stronger pair shows the side; a ball seen by only one pair gives a cautious sideways move toward its side (needs `:set iroffset 1|-1` = pair 1 right/left of pair 0).
-* **Both see the ball and pair 0 is near** → shooting position (assumes the two beams overlap there; `:set irneedboth 0` if they do not).
-* **Ambient light:** with `:set iremit 1` the firmware pulses each emitter and reads its receiver dark and lit; the signal is `2048 + (lit − dark)`, so ambient light and the ball's own emission cancel. This needs the emitter drivers wired (proposed GPIO4 / GPIO13); with the default `iremit 0` the LEDs are assumed hard-wired on and ambient light is **not** cancelled.
-* **A reflective pair gives strength only**: no position, no distance, a limited range and field of view. The robot therefore *searches by rotating*; whether that finds a ball depends on the range. See the options in `docs/IR_SENSORS.md`.
-* **Nothing is assumed about the receivers:** analog or digital is a setting, which direction means "ball" is learned by `:ir cal`, and **the receiver circuit and the LED driver are candidates until you give the part numbers** (`docs/IR_SENSORS.md` §8).
+* **The ring** (C0–C11, front and back, with a slight blind spot) gives each receiver's **swing** (peak-to-peak over 900 µs, which spans the ball's pulse gaps; steady light has no swing). The ball's **bearing** (0 = ahead, + = right) is computed from the channels that see it and their configured mounting angles. **The default mounting angles are placeholders (even 30° spacing): set the real ones with `:ring bearing <ch> <deg>`.**
+* **Module 0 (front)** detecting = the ball is in the shooting position. By default the ring must also see the ball straight ahead (a wall or a robot also trips a module). Module 1 is read and logged only until you decide its job.
+* **Blind spots:** a ball in an uncovered arc is invisible. When the ball is lost the robot rotates towards where it went (the way it was moving, else the nearest uncovered arc, else its last side) and re-acquires; the search is bounded.
+* **C12–C15** (left/right receivers you add): `:ring on 12`, `:ring bearing 12 90` etc.
+* **A channel gives strength only**, not distance; nothing about the real ball is verified (`NOT TESTED`).
 
 ## Autonomous behaviour
 
-`a` starts autonomy (refused until sensor 0 is calibrated, or in SAFE_STOP). SEEK → APPROACH (drive forward, slowing as the signal rises; centre with sensor 1; heading held by the gyro) → stop at the shooting position;
-ball lost (`losthold` 300 ms) → SEARCH (rotate toward the last side, pause, reverse direction, wait; bounded). With `:set shootenable 1`, a registered goal heading and the ball held centred: aim at the goal heading, reverse a little, drive forward at full power.
+`a` starts autonomy (refused until `:ring cal noise` has been done, module 0 is on and a ring channel works, or in SAFE_STOP). SEEK → APPROACH (turn towards the ball when it is more than `turndeg` off the front, drive forward slowing as the signal rises, strafe to centre when close, heading held by the gyro) → stop at the shooting position (module 0);
+ball lost (`losthold` 300 ms) → SEARCH (rotate toward where it went, pause, reverse direction, wait; bounded). With `:set shootenable 1`, a registered goal heading and the ball held centred: aim at the goal heading, reverse a little, drive forward at full power.
 Motor commands are ramped (acceleration, deceleration, a dwell at zero when a wheel reverses); sensor faults stop or degrade the robot; the MPU6050 failing disables heading hold and the shot.
 
 ## Repository layout
@@ -73,15 +73,14 @@ Motor commands are ramped (acceleration, deceleration, a dwell at zero when a wh
 | Path | Contents |
 |---|---|
 | `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino` | Arduino sketch (`setup`/`loop`, boot sequence, watchdog) |
-| `Robosoccer26_Cyberbots/*.h` | Modules, one translation unit: `pins` `util` `config` `storage` `health` `motors` `ir2` `imu` `logger` `nav` `report` `ircli` `cli` |
+| `Robosoccer26_Cyberbots/*.h` | Modules, one translation unit: `pins` `util` `config` `storage` `health` `motors` `ring` `imu` `logger` `nav` `report` `ringcli` `cli` |
 | `test/` | Host test harness: `mock_arduino.h`, `test_main.cpp`, `run_tests.sh`, `static_analysis.sh` |
-| `docs/IR_SENSORS.md` | The two IR pairs: can the receivers connect directly (no), candidate receiver and LED-driver circuits, ambient subtraction, limits, calibration and testing, the shot, questions I need answered |
+| `docs/RING_AND_MODULES.md` | The multiplexer ring and the two modules: wiring, strapping pins, receiver circuit, how a channel is measured, bearing, blind spots and search, shooting position, calibration and testing, questions I need answered |
 | `docs/HARDWARE_REVIEW.md` | Component list, wiring tables, GPIO summary, electrical notes, boot/strapping analysis, limitations |
 | `docs/HEALTH_AND_LOGGING.md` | Health monitor, fault codes, CSV schema, rotation, flight recorder, export |
 | `docs/CALIBRATION_AND_TEST_PLAN.md` | Calibration guide, first power-on, physical test plan |
 | `docs/COMMISSIONING_CHECKLIST.md` | Ordered, unticked checklist from unpowered to floor tests |
 | `docs/VERIFICATION_REPORT.md` | Evidence, what was and was not verified |
-| `docs/CHANGES_TWO_SENSOR.md` | What was removed, kept and added, and the files changed |
 | `tools/real_build.sh` | Real-toolchain build (see the header of the script for toolchain setup) |
 
 ## Compile and upload (Arduino IDE)
@@ -91,7 +90,7 @@ Motor commands are ramped (acceleration, deceleration, a dwell at zero when a wh
 3. *Tools → Board → ESP32 Arduino → **ESP32 Dev Module***; *Tools → Partition Scheme → **Default 4MB with spiffs** (1.2 MB APP / 1.5 MB SPIFFS)*: LittleFS needs the `spiffs` label (without it the robot still runs; logging is reported OFF and nothing is ever auto-formatted); *Upload Speed* 921600 or lower; select the *Port*.
 4. **First upload with the motor battery disconnected** (USB only). Click *Upload*. If it stays on "Connecting…", hold the board's BOOT button until the upload starts.
 5. *Tools → Serial Monitor*, **115200 baud**, line ending "Both NL & CR" or "No line ending". Send `?` for the commands. The boot report must show autonomy DISABLED and no wheel moving.
-6. Calibrate the sensors (`docs/IR_SENSORS.md`), then `:save`.
+6. Set the mounting angles and calibrate (`docs/RING_AND_MODULES.md` §9), then `:save`.
 
 ## Safety first
 
@@ -110,11 +109,11 @@ Single keys act immediately. Words start with `:` and end with Enter.
 | `f` `b` / `l` `r` / `q` `e` | manual forward-backward / strafe left-right / rotate counter-clockwise-clockwise |
 | `s` | stop and disable autonomy |
 | `!` | emergency stop (also works in the middle of a `:` line) |
-| `i` | snapshot of both IR pairs and the ball state |
-| `I` | toggle rate-limited live IR view (`streamms`, default 500 ms) |
+| `i` | snapshot of the ring channels, the two modules and the ball state |
+| `I` | toggle rate-limited live ring view (`streamms`, default 500 ms) |
 | `m` | MPU6050 readings and heading estimate |
 | `t` | test mode: stops everything, prints the bench checklist (motors stay off) |
-| `a` | enable autonomous ball seeking (refused if SAFE_STOP or pair 0 is not calibrated) |
+| `a` | enable autonomous ball seeking (refused if SAFE_STOP, the ring noise floor is not calibrated, or module 0 is off) |
 | `h` | full hardware-health report |
 | `d` | navigation state, ball state, heading, request, four commanded PWM values |
 | `g` | logger status, buffers, storage, file list |
@@ -122,7 +121,7 @@ Single keys act immediately. Words start with `:` and end with Enter.
 | `?` | command list |
 
 Word commands: `:set <name> <v>`, `:get [name]`, `:save`, `:load`, `:defaults`, `:rev <FL|FR|BL|BR> <0|1>`, `:roller <X|O>`,
-`:ir [cal clear|near <0|1> | mode <0|1> analog|digital | on|off <0|1> | emit on|off | side right|left|none | reset]`, `:goal [set|clear]`, `:zero`, `:gcal`, `:diag <on|off>`,
+`:ring [on|off <ch> | bearing <ch> <deg> | cal noise | cal near | reset]`, `:mod [on|off <0|1> | level low|high]`, `:goal [set|clear]`, `:zero`, `:gcal`, `:diag <on|off>`,
 `:mtest <wheel>`, `:dtest`, `:confirm`, `:mok <wheel>`, `:mrev <wheel>`, `:recover`, `:xsel <ring|n>`, `:fsformat CONFIRM`, `:logdel CONFIRM`.
 
 Input handling: CR/LF/tab/space ignored; unknown or non-printable bytes are ignored (rate-limited warning); `:` lines are limited to 63 characters, rejected if too long or containing control characters, and abandoned after 4 s without Enter.

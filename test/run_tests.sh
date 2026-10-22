@@ -6,8 +6,9 @@ cd "$(dirname "$0")"
 FAIL=0
 TOTAL_T=0; TOTAL_P=0; TOTAL_C=0
 rm -rf /tmp/mockfs /tmp/mockfs_*          # clean, reproducible start: no state from earlier runs
-# The removed hardware (CD74HC4067 multiplexer, the 12-receiver ring, 3-pin TSOP receivers) must not come back into the firmware sources.
-if grep -rniE "CD74|4067|multiplex|TSOP|PIN_MUX|MUX_CHANNELS|\bmux\b|irscan|TSSP" ../Robosoccer26_Cyberbots/ ; then echo "OBSOLETE HARDWARE REFERENCE FOUND IN THE FIRMWARE SOURCES"; exit 1; fi
+# Hardware that is gone for good must not come back into the firmware sources: the TSOP digital receivers, the old scan/learn engine,
+# and the IR emitter-LED pulsing. (The multiplexer and the 12-receiver ring ARE the current hardware again.)
+if grep -rniE "TSOP|TSSP|irscan|PIN_IR_EMIT|irEmit|\birLearn\b" ../Robosoccer26_Cyberbots/ ; then echo "OBSOLETE HARDWARE REFERENCE FOUND IN THE FIRMWARE SOURCES"; exit 1; fi
 for CORE in 3 2; do
   BIN=/tmp/rs26_test_core$CORE
   echo "=== building (mock core v$CORE, -Wall -Wextra -Wshadow, ASan+UBSan) ==="

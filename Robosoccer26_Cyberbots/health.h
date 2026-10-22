@@ -6,7 +6,7 @@ enum Severity : uint8_t { SEV_INFO, SEV_WARN, SEV_DEGRADED, SEV_CRITICAL };
 enum Cond : uint8_t { COND_NORMAL, COND_DEGRADED, COND_SAFE_STOP };
 
 enum FaultCode : uint8_t {
-  F_IR_FRONT, F_IR_ALIGN,
+  F_RING_NONE, F_RING_STALL, F_RING_CHANNEL, F_RING_GAP,
   F_IMU_MISSING, F_IMU_TIMEOUT, F_IMU_INVALID,
   F_FS_UNAVAILABLE, F_FS_WRITE,
   F_CFG_REPLACED, F_BROWNOUT_RESET, F_ABNORMAL_RESET,
@@ -24,8 +24,10 @@ struct FaultMeta {
 };
 
 static const FaultMeta FMETA[F_COUNT] = {
-  {"IR_FRONT",        "IR sensor 0",     SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "symptom measured (reading held at an ADC end stop); cause (wiring/supply/part) unproven"},
-  {"IR_ALIGN",        "IR sensor 1",     SEV_DEGRADED, false, "sensor 1 excluded: no sideways guidance, shooting position uses sensor 0 only", "symptom measured (reading held at an ADC end stop); cause unproven"},
+  {"RING_NONE",       "Ball ring",       SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "no enabled channel is usable (all switched off or saturated); cause (wiring/supply/part) unproven"},
+  {"RING_STALL",      "Ball ring",       SEV_CRITICAL, false, "ball seeking disabled, motors stopped", "no channel scan completed for 600 ms: the control loop or the scan is stuck"},
+  {"RING_CHANNEL",    "Ball ring",       SEV_DEGRADED, false, "listed channels excluded from the ball bearing", "symptom measured (reading held at the top of the ADC range); cause (short to 3.3 V, steady light) unproven"},
+  {"RING_GAP",        "Ball ring",       SEV_DEGRADED, false, "reduced speed; the robot rotates to find a ball in the uncovered arc", "ESTIMATE from configured bearings and an assumed field of view, not a measurement"},
   {"IMU_MISSING",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, turn-toward-ball fallback", "no I2C ACK; wiring vs dead chip not distinguishable"},
   {"IMU_TIMEOUT",     "MPU6050",         SEV_DEGRADED, false, "heading hold disabled, retrying init", "bus errors observed; cause unproven"},
   {"IMU_INVALID",     "MPU6050",         SEV_DEGRADED, false, "invalid samples rejected, heading hold disabled", "frames failed plausibility checks; cause unproven"},

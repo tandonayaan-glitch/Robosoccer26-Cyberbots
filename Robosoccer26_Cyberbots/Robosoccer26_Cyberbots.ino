@@ -1,6 +1,6 @@
 // Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware (ESP32-S, Arduino-ESP32 2.x or 3.x)
 //
-// 4x mecanum (2x L298N) | 2x front IR sensors (GPIO35, GPIO36) | MPU6050 | LittleFS CSV logging
+// 4x mecanum (2x L298N) | 12-channel IR ring on a CD74HC4067 (GPIO34) + 2 IR modules (GPIO35, GPIO36) | MPU6050 | LittleFS CSV logging
 // Safe by construction: motors off at boot, autonomy only after an explicit 'a', every fault
 // degrades or stops instead of guessing. See docs/ for wiring review, calibration and test plan.
 //
@@ -55,11 +55,11 @@ static void logTask(void*) {
 }
 #endif
 
-static void bootIrSettle(uint32_t ms) {            // let the sensors settle before the report
+static void bootRingSettle(uint32_t ms) {            // let the ring settle before the report
   uint32_t t0 = millis();
   while (elapsedMs(millis(), t0) < ms) {
     uint32_t now = millis();
-    irService(g_cfg, now);
+    ringService(g_cfg, now);
     imuUpdate(g_cfg, now, true);
     outPump();
     delayMicroseconds(100);
@@ -88,10 +88,10 @@ void setup() {
   bool pwmOk = motorsAttachPwm(g_cfg);
   say("BOOT", "motor PWM init: %s (%u Hz, %u-bit)", pwmOk ? "OK" : "FAILED", (unsigned)g_cfg.pwmFreq, (unsigned)PWM_BITS);
 
-  // IR sensors (two, GPIO35 / GPIO36).
-  irBegin();
-  say("BOOT", "IR sensors: sensor 0 GPIO%u %s %s | sensor 1 GPIO%u %s %s", (unsigned)PIN_IR[0], irModeOf(g_cfg, 0) ? "digital" : "analog", irCalibrated(g_cfg, 0) ? "calibrated" : "NOT CALIBRATED",
-      (unsigned)PIN_IR[1], irModeOf(g_cfg, 1) ? "digital" : "analog", irCalibrated(g_cfg, 1) ? "calibrated" : "NOT CALIBRATED");
+  // Ball ring (CD74HC4067 on GPIO34, select GPIO4/13/12/0) and the two IR modules (GPIO35 / GPIO36).
+  ringBegin();
+  say("BOOT", "ball ring: %u of %u channels enabled, noise floor %s | IR modules: front GPIO%u %s, second GPIO%u %s", (unsigned)ringCountEnabled(g_cfg), (unsigned)RING_CH_MAX,
+      g_cfg.ringCalDone ? "calibrated" : "NOT CALIBRATED", (unsigned)PIN_MOD[0], modEnabled(g_cfg, 0) ? "on" : "off", (unsigned)PIN_MOD[1], modEnabled(g_cfg, 1) ? "on" : "off");
 
   // IMU: probe, configure, measure gyro bias while stationary.
   bool imuOk = imuInit(g_cfg, true);
@@ -101,7 +101,7 @@ void setup() {
     uint32_t t0 = millis();
     while (g_imu.calState == 1 && elapsedMs(millis(), t0) < 4000) {
       uint32_t now = millis();
-      irService(g_cfg, now);
+      ringService(g_cfg, now);
       imuUpdate(g_cfg, now, true);
       outPump();
       delayMicroseconds(100);
@@ -113,9 +113,9 @@ void setup() {
   if (g_resetReason == ESP_RST_PANIC || g_resetReason == ESP_RST_INT_WDT || g_resetReason == ESP_RST_TASK_WDT || g_resetReason == ESP_RST_WDT)
     faultRaise(F_ABNORMAL_RESET, "previous reset: %s", resetReasonName(g_resetReason));
 
-  bootIrSettle(700);
+  bootRingSettle(700);
   uint32_t now = millis();
-  irHealth(g_cfg, now);
+  ringHealth(g_cfg, now);
   imuHealth(g_cfg, now);
   condEvaluate();
   logEvent("E", "boot");
@@ -153,13 +153,14 @@ void loop() {
   }
 
   cliPoll(now);
-  irService(g_cfg, now);
+  ringService(g_cfg, now);
+  ringCalPoll(g_cfg, now);
   goalService(g_cfg, now);
   imuUpdate(g_cfg, now, motorsAllZero() && elapsedMs(now, g_motorsStoppedSinceMs) > 1000);
 
   if (elapsedMs(now, g_lastHealthMs) >= 50) {      // 20 Hz health monitor
     g_lastHealthMs = now;
-    irHealth(g_cfg, now);
+    ringHealth(g_cfg, now);
     imuHealth(g_cfg, now);
     faultUpdate(F_FS_UNAVAILABLE, !g_fsRwOk, g_cfg.recoverVerifyMs, g_fsDetail);
     condEvaluate();

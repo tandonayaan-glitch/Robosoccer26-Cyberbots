@@ -3,7 +3,7 @@
 //   2.x: ledcSetup(ch,freq,bits)/ledcAttachPin(pin,ch)/ledcWrite(ch,duty)
 //   3.x: ledcAttach(pin,freq,bits)/ledcWrite(pin,duty)
 // Build with -DMOCK_CORE_V3=1 or 0; only the matching API exists, so the wrong generation's
-// calls fail to compile. Time is virtual; the two IR sensor pins read values the tests set (g_mockAnalog).
+// calls fail to compile. Time is virtual; the ring / module pins read values the tests set.
 #pragma once
 #include <stdint.h>
 #include <stddef.h>
@@ -54,16 +54,19 @@ static inline uint32_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 4096; 
 // ---- virtual time + signal model ------------------------------------------------------
 static uint64_t g_mockUs = 5000000ULL;   // start at 5 s so nothing depends on t=0
 
-// IR sensor model: tests set the voltage-like value an analog sensor would read on a pin (0..4095); a digital read of the
-// same pin returns HIGH when that value is at least 2048. There is no signal generator and no interrupt: the sensors are polled.
+// Sensor model. Ring: the analog line on GPIO34 reads the channel the firmware selected on S0..S3 (GPIO4/13/12/0): a DC level plus, while the simulated
+// ball burst is on (192 us of every 833 us, the RCJ ball's pattern), the channel's swing. Tests set g_mockRingAmp[] / g_mockRingBase[].
+// Modules: GPIO35 / GPIO36 digital, LOW when g_mockModDetect[] is set (active-low module).
 static uint16_t g_mockAnalog[64];
 static uint8_t g_pinLevel[64];
 static uint8_t g_pinMode[64];
-// Optional emitter model (g_mockEmitModel = true): a receiver reads ambient + (its emitter lit ? reflection : 0). The emitter is "lit" while the firmware
-// drives its pin HIGH; while the pin is not an output the emitter counts as hard-wired on when g_mockEmitHardwired is true.
-static bool g_mockEmitModel = false, g_mockEmitHardwired = true;
-static uint16_t g_mockAmbient[64], g_mockReflect[64];
+static uint16_t g_mockRingAmp[16], g_mockRingBase[16];
+static uint16_t g_mockRingNoise = 0;                 // +- counts of deterministic jitter added to every reading
+static bool g_mockModDetect[2];
+static bool g_mockModActiveHigh = false;
 static uint32_t g_mockEmitWrites[64];
+static uint32_t g_mockAdcReads = 0;
+static uint32_t g_mockRng = 12345;
 
 // Serial TX model: 115200 8N1 ~ 11520 B/s, 2048 B buffer
 static double g_serialRoom = 2048;
@@ -88,16 +91,19 @@ static inline void pinMode(uint8_t p, uint8_t m) { g_pinMode[p] = m; }
 static inline void digitalWrite(uint8_t p, uint8_t v) { g_pinLevel[p] = v ? 1 : 0; g_mockEmitWrites[p]++; }
 static inline int analogRead(uint8_t p);
 static inline int digitalRead(uint8_t p) {
-  if (p == 35 || p == 36) return analogRead(p) >= 2048 ? 1 : 0;
+  if (p == 35 || p == 36) { bool d = g_mockModDetect[p - 35]; return (g_mockModActiveHigh ? d : !d) ? 1 : 0; }
   if (p == 16 || p == 17) return 1;
   return g_pinLevel[p];
 }
 static inline int analogRead(uint8_t p) {
-  if (!g_mockEmitModel) return g_mockAnalog[p];
-  int emit = p == 35 ? 4 : (p == 36 ? 13 : -1);
-  bool lit = emit >= 0 && (g_pinMode[emit] == OUTPUT ? g_pinLevel[emit] != 0 : g_mockEmitHardwired);
-  int v = (int)g_mockAmbient[p] + (lit ? (int)g_mockReflect[p] : 0);
-  return v > 4095 ? 4095 : v;
+  if (p != 34) return g_mockAnalog[p];
+  g_mockAdcReads++;
+  mockAdvance(20);                                   // one conversion takes about 20 us
+  int ch = g_pinLevel[4] | (g_pinLevel[13] << 1) | (g_pinLevel[12] << 2) | (g_pinLevel[0] << 3);
+  bool burst = (uint32_t)(g_mockUs % 833ULL) < 192u;
+  int v = (int)g_mockRingBase[ch] + (burst ? (int)g_mockRingAmp[ch] : 0);
+  if (g_mockRingNoise) { g_mockRng = g_mockRng * 1664525u + 1013904223u; v += (int)((g_mockRng >> 16) % (2u * g_mockRingNoise + 1u)) - (int)g_mockRingNoise; }
+  return v < 0 ? 0 : (v > 4095 ? 4095 : v);
 }
 
 // ---- LEDC -----------------------------------------------------------------------------------

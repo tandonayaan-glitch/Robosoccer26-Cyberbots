@@ -28,43 +28,60 @@ static const char* resetReasonName(esp_reset_reason_t r) {
   }
 }
 
-static const char* irSensorWord(const Config& c, uint8_t i) {
-  if (!irEnabled(c, i)) return "switched off";
-  if (!irCalibrated(c, i)) return "NOT CALIBRATED";
-  if (g_irs[i].railFault) return "FAULT (reading at an ADC end stop)";
-  return g_irs[i].near ? "ball NEAR" : (g_irs[i].seen ? "ball seen" : "clear");
+static const char* ringChWord(const Config& c, uint8_t i) {
+  if (!ringEnabled(c, i)) return "off";
+  if (g_ring[i].railFault) return "SATURATED (excluded)";
+  return g_ring[i].seen ? "SEES ball" : "-";
 }
 
-static void printIrSnapshot(const Config& c) {
-  say("INFO", "IR pairs (2, emitter LED + receiver, reflected light): sampled every %lu ms; seen at %u %% / near at %u %% of the clear->near span, %u-sample debounce",
-      UL(IR_SAMPLE_MS), (unsigned)c.irSeenPct, (unsigned)c.irNearPct, (unsigned)c.irDebounce);
-  say("INFO", "emitters: %s", c.irEmit ? "PULSED by the firmware (GPIO4 / GPIO13, HIGH = on); signal = 2048 + (lit - dark): ambient light cancels" : "not controlled by the firmware (assumed hard-wired on; the signal includes ambient light)");
-  for (uint8_t i = 0; i < IR_SENSORS; i++) {
-    const IrSensor& s = g_irs[i];
-    say("INFO", " pair %u receiver GPIO%u %s: %s | signal %u (smoothed %.0f, min %u max %u)%s | clear %u near %u | strength %.2f | %s", (unsigned)i, (unsigned)PIN_IR[i],
-        irModeOf(c, i) ? "digital" : "analog", irEnabled(c, i) ? "on" : "off", (unsigned)s.raw, (double)s.avg, (unsigned)(s.rawMin == 0xFFFF ? 0 : s.rawMin), (unsigned)s.rawMax,
-        c.irEmit ? " [dark/lit shown below]" : "", (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i), (double)s.s, irSensorWord(c, i));
-    if (c.irEmit) say("INFO", "   pair %u last dark %u lit %u (emitter GPIO%u)", (unsigned)i, (unsigned)s.dark, (unsigned)s.lit, (unsigned)PIN_IR_EMIT[i]);
+static void printRingSnapshot(const Config& c) {
+  uint8_t nU;
+  float gap = ringCoverageGap(c, &nU);
+  say("INFO", "ball ring: CD74HC4067, SIG GPIO%u, %u of %u channels enabled, %u usable | window %u us, settle %u us | seen at swing >= max(%u, noise x %.1f), very close at %u | noise floor %s",
+      (unsigned)P_MUX_SIG, (unsigned)ringCountEnabled(c), (unsigned)RING_CH_MAX, (unsigned)ringCountUsable(c), (unsigned)c.ringWinUs, (unsigned)c.ringSettleUs, (unsigned)c.ringSeen,
+      (double)c.ringNoiseX10 / 10.0, (unsigned)c.ringNear, c.ringCalDone ? "CALIBRATED" : "NOT CALIBRATED (':ring cal noise' with the ball off)");
+  for (uint8_t i = 0; i < RING_CH_MAX; i++) {
+    if (!ringEnabled(c, i) && i >= RING_CH_FIXED) continue;      // C12..C15 stay hidden until fitted and switched on
+    const RingCh& r = g_ring[i];
+    say("INFO", " C%-2u bearing %4d deg | swing %4u (smoothed %6.1f, max %4u) low %4u high %4u | noise %4u thr %5.0f | strength %.2f | %s", (unsigned)i, (int)c.ringBearing[i],
+        (unsigned)r.amp, (double)r.avg, (unsigned)r.ampMax, (unsigned)r.lo, (unsigned)r.hi, (unsigned)c.ringNoise[i], (double)ringThreshold(c, i), (double)r.s, ringChWord(c, i));
   }
-  if (g_ball.valid)
-    say("INFO", "ball: %s%s%s%s | sides seen 0x%X near 0x%X%s", g_ball.seenMask ? "SEEN" : "recently seen", g_ball.held ? ", in the shooting position" : "", g_ball.ready ? " and CENTRED (ready)" : "",
-        g_ball.offsetKnown ? "" : " | side unknown", (unsigned)g_ball.seenMask, (unsigned)g_ball.nearMask, "");
+  say("INFO", "coverage: largest arc no usable receiver covers ~%.0f deg (configured bearings, ASSUMED +-%u deg field of view each; an estimate, not a measurement)%s", (double)gap, (unsigned)c.ringFovHalf,
+      gap > 0 ? " | a ball inside it is not seen: the robot rotates to find it" : "");
+  if (g_ball.bearingKnown) say("INFO", "ball: bearing %.0f deg (0 = ahead, + = right), strongest C%u, strength %.2f, %u channel(s) see it", (double)g_ball.bearing, (unsigned)g_ball.bestCh, (double)g_ball.strength, (unsigned)g_ball.nSeen);
+  else if (g_ball.valid) say("INFO", "ball: not seen now, last bearing %.0f deg (held for %u ms)", (double)g_lastBearing, (unsigned)c.lostHoldMs);
   else say("INFO", "ball: not seen (a navigation condition, not a sensor fault)");
-  if (g_ball.offsetKnown) say("INFO", "ball offset %.2f (-1 left .. +1 right, sensor 1 mounted to the %s of sensor 0)", (double)g_ball.offset, c.irOffsetSide > 0 ? "right" : "left");
-  say("INFO", "a 2-pin sensor gives signal STRENGTH only: it cannot see a ball outside its own field of view, and strength is a proxy for distance only for this ball, this mounting and this lighting (docs/IR_SENSORS.md)");
+  say("INFO", "scan: last channel %lu us, longest %lu us; full passes %lu. A channel swing is a signal STRENGTH: the bearing is only as good as the mounting angles in ':ring' (placeholders until you set them)", UL(g_ringScanLastUs), UL(g_ringScanMaxUs), UL(g_ringCycles));
 }
 
-static void printIrStream(const Config& c) {
-  say("INFO", "IR s0 %4u %5.2f%s%s | s1 %4u %5.2f%s%s | ball=%s held=%d ready=%d off=%s", (unsigned)g_irs[0].raw, (double)g_irs[0].s, g_irs[0].seen ? " seen" : "", g_irs[0].near ? " near" : "",
-      (unsigned)g_irs[1].raw, (double)g_irs[1].s, g_irs[1].seen ? " seen" : "", g_irs[1].near ? " near" : "", g_ball.valid ? "Y" : "n", g_ball.held, g_ball.ready,
-      g_ball.offsetKnown ? (g_ball.offset > 0.15f ? "right" : (g_ball.offset < -0.15f ? "left" : "centre")) : "?");
-  (void)c;
+static void printModSnapshot(const Config& c) {
+  for (uint8_t i = 0; i < MOD_COUNT; i++) {
+    const Module& m = g_mod[i];
+    say("INFO", "IR module %u GPIO%u (%s): %s | raw level %s | %s", (unsigned)i, (unsigned)PIN_MOD[i], i == 0 ? "front: ball in the shooting position" : "position undecided: logged only",
+        modEnabled(c, i) ? "on" : "off", digitalRead(PIN_MOD[i]) ? "HIGH" : "LOW", !modEnabled(c, i) ? "-" : (m.active ? "DETECTING" : "clear"));
+  }
+  say("INFO", "modules: output is %s when something is detected (modactivelow=%u); shooting position = module 0 detecting%s", c.modActiveLow ? "LOW" : "HIGH", (unsigned)c.modActiveLow,
+      c.modNeedRing ? " AND the ring sees the ball straight ahead" : " (ring not required)");
+  say("INFO", "a module reacts to ANY reflective object in its range (wall, robot), and its own LED can disturb nearby receivers (docs/RING_AND_MODULES.md)");
+}
+
+static void printRingStream(const Config& c) {
+  char buf[96];
+  size_t n = 0;
+  for (uint8_t i = 0; i < RING_CH_MAX && n + 8 < sizeof(buf); i++) {
+    if (!ringEnabled(c, i)) continue;
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%u", g_ring[i].seen ? "*" : "", (unsigned)g_ring[i].amp);
+    if (n + 2 < sizeof(buf)) { buf[n++] = ' '; buf[n] = 0; }
+  }
+  if (!n) buf[0] = 0;
+  say("INFO", "RING %s| ball=%s brg=%s held=%d ready=%d mod0=%d mod1=%d", buf, g_ball.valid ? "Y" : "n", g_ball.bearingKnown ? "known" : "?", g_ball.held, g_ball.ready, g_mod[0].active, g_mod[1].active);
+  if (g_ball.bearingKnown) say("INFO", "   bearing %.0f deg strongest C%u strength %.2f", (double)g_ball.bearing, (unsigned)g_ball.bestCh, (double)g_ball.strength);
 }
 
 static void printNavStatus(const Config& c, uint32_t now) {
   say("NAV", "state=%s cond=%s autonomous=%s", NAV_NAME[g_navState], condName(g_cond), g_autoEnabled ? "ENABLED" : "disabled");
-  say("NAV", "ball: valid=%d seen=0x%X near=0x%X held=%d ready=%d offset=%s%.2f age=%lu ms", g_ball.valid, (unsigned)g_ball.seenMask, (unsigned)g_ball.nearMask, g_ball.held, g_ball.ready,
-      g_ball.offsetKnown ? "" : "(unknown) ", (double)g_ball.offset, UL(g_ball.lastSeenMs ? elapsedMs(now, g_ball.lastSeenMs) : 0));
+  say("NAV", "ball: valid=%d seen=0x%X (%u ch) held=%d ready=%d bearing=%s%.0f deg strength=%.2f age=%lu ms", g_ball.valid, (unsigned)g_ball.seenMask, (unsigned)g_ball.nSeen, g_ball.held, g_ball.ready,
+      g_ball.bearingKnown ? "" : "(last) ", (double)(g_ball.bearingKnown ? g_ball.bearing : g_lastBearing), (double)g_ball.strength, UL(g_ball.lastSeenMs ? elapsedMs(now, g_ball.lastSeenMs) : 0));
   if (isnan(g_hdgErr)) say("NAV", "heading: hold %s (imu %s)", c.hdgEnable ? "inactive" : "disabled", imuHeadingUsable(c, now) ? "usable" : "unavailable");
   else say("NAV", "heading: ref %.1f yaw %.1f error %.1f deg", g_refYaw, g_imu.yaw, g_hdgErr);
   say("NAV", "request vx=%.2f vy=%.2f w=%.2f | commanded PWM FL=%d FR=%d BL=%d BR=%d (commanded, NOT measured wheel speed)",
@@ -96,16 +113,20 @@ static void printHealth(const Config& c, uint32_t now, const char* tag) {
         WHEEL_PINS[i].en, c.reverse[i], (c.motorVerified & (1u << i)) ? "PASS (operator-confirmed by :mok, recorded in saved config)" : "NOT TESTED");
   say(tag, "[Drivetrain] motor/driver electrical health, actual rotation, stall: NOT MEASURABLE (no encoders, no current sensing)");
 
-  // --- IR sensors
-  for (uint8_t i = 0; i < IR_SENSORS; i++) {
-    const char* role = i == 0 ? "front centre: ball close enough to shoot" : "front offset: centred / off-centre";
-    const char* word = !irEnabled(c, i) ? "OFF" : !irCalibrated(c, i) ? "NOT TESTED (not calibrated)" : g_irs[i].railFault ? "FAIL (reading at an ADC end stop)" : "calibrated (software: says nothing about the ball response)";
-    say(tag, "[IR] sensor %u GPIO%u (%s): %s, %s, signal %u, clear %u near %u", (unsigned)i, (unsigned)PIN_IR[i], role, irModeOf(c, i) ? "digital" : "analog", word, (unsigned)g_irs[i].raw, (unsigned)irClearOf(c, i), (unsigned)irNearOf(c, i));
+  // --- ball ring and IR modules
+  {
+    uint8_t nU;
+    float gap = ringCoverageGap(c, &nU);
+    const char* w = ringCountEnabled(c) == 0 ? "OFF" : ringCountUsable(c) == 0 ? "FAIL (no usable channel)" : !c.ringCalDone ? "NOT TESTED (noise floor not calibrated)" : "calibrated (software: says nothing about the ball response)";
+    say(tag, "[Ring] CD74HC4067 on SIG GPIO%u, S0..S3 = GPIO%u/%u/%u/%u: %u enabled, %u usable, %s", (unsigned)P_MUX_SIG, (unsigned)P_MUX_S0, (unsigned)P_MUX_S1, (unsigned)P_MUX_S2, (unsigned)P_MUX_S3, (unsigned)ringCountEnabled(c), (unsigned)ringCountUsable(c), w);
+    for (uint8_t i = 0; i < RING_CH_MAX; i++)
+      if (ringEnabled(c, i) && g_ring[i].railFault) say(tag, "[Ring] C%u FAIL (saturated: swing cannot be measured; shorted to 3.3 V or steady light)", (unsigned)i);
+    say(tag, "[Ring] coverage gap ~%.0f deg (estimate from configured bearings; bearings are PLACEHOLDERS until set with ':ring bearing')", (double)gap);
+    for (uint8_t i = 0; i < MOD_COUNT; i++)
+      say(tag, "[Module %u] GPIO%u (%s): %s, %s", (unsigned)i, (unsigned)PIN_MOD[i], i == 0 ? "front, shooting position" : "position undecided", modEnabled(c, i) ? "on" : "off", !modEnabled(c, i) ? "-" : (g_mod[i].active ? "detecting now" : "clear now"));
+    say(tag, "[Ring] physical operation with the real ball (range, field of view of each receiver, lighting, the modules' LEDs): NOT TESTED until you calibrate and test it (docs/RING_AND_MODULES.md)");
+    say(tag, "[Ring] limits: every channel gives strength only; a ball in an uncovered arc is invisible and is found by rotating. Strength is only a proxy for distance.");
   }
-  say(tag, "[IR] emitters: %s", c.irEmit ? "pulsed by the firmware on GPIO4 / GPIO13 (PROPOSED pins: confirm them against your wiring)" : "not controlled by the firmware (hard-wired on assumed; no GPIO used)");
-  say(tag, "[IR] sensor 1 mounting side: %s", c.irOffsetSide > 0 ? "right of sensor 0" : (c.irOffsetSide < 0 ? "left of sensor 0" : "NOT SET (no sideways guidance)"));
-  say(tag, "[IR] physical operation with the real ball (range, field of view, lighting, other IR sources): NOT TESTED until you calibrate and test it (docs/IR_SENSORS.md)");
-  say(tag, "[IR] limits: two front sensors cannot see a ball outside their field of view; the robot finds it by rotating. Signal strength is only a proxy for distance.");
 
   // --- IMU
   if (!g_imu.present) say(tag, "[IMU] MPU6050: %s (no device answered at 0x68/0x69)", g_imu.hadFault ? "FAIL" : "WARNING - not found");

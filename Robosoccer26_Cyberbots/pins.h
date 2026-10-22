@@ -36,22 +36,30 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
   /* BR */ {P_BR_IN1, P_BR_IN2, P_BR_EN, "BR"},
 };
 
-// ---- Front IR receivers (two 2-pin receivers, one GPIO each) and the two IR emitter LEDs -------------
-// Both are input-only ADC1 pins. They have no internal pull-up/pull-down: whatever circuit makes a 2-pin
-// photodiode/phototransistor produce a voltage (resistor to 3.3 V or GND) is external. Both can also be read as digital inputs.
-#define P_IR0 35                                   // receiver 0: front CENTRE; decides "ball close enough to be in the shooting position"
-#define P_IR1 36                                   // receiver 1: front, slightly OFFSET to one side; helps judge centred / off-centre
-static const uint8_t PIN_IR[2] = {P_IR0, P_IR1};
-static const uint8_t IR_SENSORS = 2;
+// ---- Ball ring: CD74HC4067 16-channel analog multiplexer, one analog line (SIG) ------------------------------
+// Wiring (as built): VCC -> ESP32 3V3, GND -> common GND, EN -> GND (always enabled), SIG -> GPIO34 (analog input), S0..S3 -> GPIO4/13/12/0.
+// C0..C11 = 12 phototransistor receivers (the ring, they see the ball's own infrared emission); C12..C15 = optional extra receivers
+// (planned: left / right looking), enabled with ':ring on <ch>' once fitted.
+// WARNING (strapping pins): S2 is on GPIO12 (MTDI: must be LOW at reset for 3.3 V flash) and S3 on GPIO0 (must be HIGH at reset, LOW = download mode).
+// The CD74HC4067 select inputs are high-impedance and draw no current, so a bare chip does not disturb either level, but a breakout board that
+// pulls S2 up or S3 down would. If the board will not boot or upload, unplug the S2 / S3 wire and retry (docs/RING_AND_MODULES.md).
+#define P_MUX_S0 4
+#define P_MUX_S1 13
+#define P_MUX_S2 12
+#define P_MUX_S3 0
+#define P_MUX_SIG 34                               // ADC1_CH6, input-only, no pull resistors
+static const uint8_t PIN_MUX_SEL[4] = {P_MUX_S0, P_MUX_S1, P_MUX_S2, P_MUX_S3};
+static const uint8_t RING_CH_MAX = 16;             // the CD74HC4067 has 16 channels
+static const uint8_t RING_CH_FIXED = 12;           // C0..C11 are fitted; C12..C15 are optional
 
-// IR TRANSMITTER LEDs (one per receiver; the two pairs look forward from the front of the robot, reflected-light detection).
-// PROPOSED pins, NOT taken from the project wiring notes: nothing in the notes assigns a GPIO to the emitters, so these two are free pins
-// chosen by this firmware and must be confirmed against how you actually wire the LED drivers. The firmware NEVER touches them unless
-// the operator enables emitter pulsing (':set iremit 1'); with the default iremit = 0 the emitters are assumed to be hard-wired on
-// (or driven by something else) and the pins stay unused inputs. A GPIO cannot drive an IR LED directly (see docs/IR_SENSORS.md): use a transistor.
-#define P_IR_EMIT0 4                               // emitter of pair 0 (next to sensor 0, front centre)
-#define P_IR_EMIT1 13                              // emitter of pair 1 (next to sensor 1, front, offset)
-static const uint8_t PIN_IR_EMIT[2] = {P_IR_EMIT0, P_IR_EMIT1};
+// ---- Two IR obstacle modules (3-pin: VCC / GND / OUT, own IR LED + photodiode + LM393, 3.3 V supply, digital output) --------------
+// Module 0 sits at the front and reports "the ball is in the right position to shoot" (trimmer sets the distance). Module 1 is not planned yet
+// ("maybe the back"): it is read and logged only. GPIO34 is the multiplexer SIG line, so the modules cannot use it: GPIO35 and GPIO36 are the
+// next free input-only pins (PROPOSAL: confirm against the real wiring). Input-only pins have no pull resistors; the module output must be driven.
+#define P_MOD0 35                                  // front module: ball in the shooting position
+#define P_MOD1 36                                  // second module (position undecided)
+static const uint8_t PIN_MOD[2] = {P_MOD0, P_MOD1};
+static const uint8_t MOD_COUNT = 2;
 
 // ---- MPU6050 (I2C) ---------------------------------------------------------------
 #define P_SDA 16
@@ -68,19 +76,16 @@ static const uint32_t SERIAL_BAUD = 115200;
   (PIN_BIT(P_FL_IN1) | PIN_BIT(P_FL_IN2) | PIN_BIT(P_FL_EN) | PIN_BIT(P_FR_IN1) | PIN_BIT(P_FR_IN2) | \
    PIN_BIT(P_FR_EN) | PIN_BIT(P_BL_IN1) | PIN_BIT(P_BL_IN2) | PIN_BIT(P_BL_EN) | PIN_BIT(P_BR_IN1) |  \
    PIN_BIT(P_BR_IN2) | PIN_BIT(P_BR_EN) | PIN_BIT(P_SDA) | PIN_BIT(P_SCL))
+#define MUX_SEL_MASK (PIN_BIT(P_MUX_S0) | PIN_BIT(P_MUX_S1) | PIN_BIT(P_MUX_S2) | PIN_BIT(P_MUX_S3))
+#define ALL_OUT_MASK (OUTPUT_PIN_MASK | MUX_SEL_MASK)
 static_assert(__builtin_popcountll(OUTPUT_PIN_MASK) == 14, "a GPIO is assigned twice (12 motor + 2 I2C)");
-#define IR_PIN_MASK (PIN_BIT(P_IR0) | PIN_BIT(P_IR1))
-static_assert(__builtin_popcountll(IR_PIN_MASK) == 2, "the two IR sensors must use different pins");
-static_assert((IR_PIN_MASK & OUTPUT_PIN_MASK) == 0, "an IR sensor pin must not be a motor or I2C pin");
-#define IR_EMIT_PIN_MASK (PIN_BIT(P_IR_EMIT0) | PIN_BIT(P_IR_EMIT1))
-static_assert(__builtin_popcountll(IR_EMIT_PIN_MASK) == 2, "the two IR emitter pins must be different");
-static_assert((IR_EMIT_PIN_MASK & (OUTPUT_PIN_MASK | IR_PIN_MASK)) == 0, "an IR emitter pin must not be a motor, I2C or IR receiver pin");
-static_assert((IR_EMIT_PIN_MASK & ((0x3FULL << 6) | PIN_BIT(0) | PIN_BIT(12))) == 0, "emitter pins must not be flash pins, GPIO0 or GPIO12");
-static_assert((OUTPUT_PIN_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
-static_assert((OUTPUT_PIN_MASK & PIN_BIT(12)) == 0 && (OUTPUT_PIN_MASK & PIN_BIT(0)) == 0, "GPIO12 (flash voltage) and GPIO0 (boot mode) are unused on purpose");
+static_assert(__builtin_popcountll(ALL_OUT_MASK) == 18, "a multiplexer select pin collides with a motor or I2C pin");
+#define IN_ONLY_MASK (PIN_BIT(P_MUX_SIG) | PIN_BIT(P_MOD0) | PIN_BIT(P_MOD1))
+static_assert(__builtin_popcountll(IN_ONLY_MASK) == 3, "the multiplexer SIG pin and the two module pins must all be different");
+static_assert((IN_ONLY_MASK & ALL_OUT_MASK) == 0, "SIG / module pins must not be motor, I2C or multiplexer select pins");
+static_assert((ALL_OUT_MASK & (0x3FULL << 6)) == 0 && (IN_ONLY_MASK & (0x3FULL << 6)) == 0, "GPIO6..11 are the SPI flash pins");
 #ifdef SOC_GPIO_VALID_OUTPUT_GPIO_MASK   // only visible on the real toolchain
-static_assert((OUTPUT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");
-static_assert((IR_EMIT_PIN_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an IR emitter pin is not output-capable on this SoC");
-static_assert((IR_PIN_MASK & SOC_GPIO_VALID_GPIO_MASK) == IR_PIN_MASK && (IR_PIN_MASK & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
-              "the IR sensor pins (GPIO35, GPIO36) must be valid INPUT-ONLY GPIOs");
+static_assert((ALL_OUT_MASK & ~SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0, "an output pin is not output-capable on this SoC");
+static_assert((IN_ONLY_MASK & SOC_GPIO_VALID_GPIO_MASK) == IN_ONLY_MASK && (IN_ONLY_MASK & SOC_GPIO_VALID_OUTPUT_GPIO_MASK) == 0,
+              "the multiplexer SIG pin and the module pins (GPIO34, GPIO35, GPIO36) must be valid INPUT-ONLY GPIOs");
 #endif

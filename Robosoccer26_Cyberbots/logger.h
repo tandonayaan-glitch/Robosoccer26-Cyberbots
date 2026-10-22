@@ -12,13 +12,13 @@
 #include "health.h"
 #include "storage.h"
 #include "motors.h"
-#include "ir2.h"
+#include "ring.h"
 #include "imu.h"
 
 #define FW_VERSION "1.0.0"
-#define LOG_SCHEMA 1
+#define LOG_SCHEMA 2
 static const char* LOG_COLUMNS =
-  "t_ms,sess,seq,type,cond,nav,irmask,ball,offset,s0,s1,imu,yaw_deg,herr_deg,gz_dps,"
+  "t_ms,sess,seq,type,cond,nav,ringmask,ball,bearing_deg,strength,flags,imu,yaw_deg,herr_deg,gz_dps,"
   "vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,loop_us,note";
 
 enum NavState : uint8_t {
@@ -218,8 +218,8 @@ struct FrRec {
   uint32_t t;
   char type;
   uint8_t nav, cond;
-  uint16_t irmask, faults;               // irmask: bit0/1 sensor 0/1 sees the ball, bit2/3 near, bit4 held, bit5 ready (shooting position)
-  int16_t off100, s0x100, s1x100;        // ball offset (-1..1) and sensor strengths, times 100; off100 0x7FFF = unknown
+  uint16_t irmask, faults;               // irmask: bit n = ring channel Cn sees the ball
+  int16_t off100, s0x100, s1x100;        // bearing in tenths of a degree (0x7FFF = unknown), strongest strength x100, module/shot flags
   int16_t yaw10, herr10, gz10;           // 0x7FFF = not available
   uint8_t ball, imu;                     // imu: 0 absent, 1 present-not-ok, 2 ok
   int8_t vx100, vy100, w100;
@@ -245,12 +245,12 @@ static void frCapture(FrRec& r, char type, const char* note) {
   r.type = type;
   r.nav = g_navState;
   r.cond = g_cond;
-  r.irmask = (uint16_t)(g_ball.seenMask | (g_ball.nearMask << 2) | (g_ball.held ? 0x10 : 0) | (g_ball.ready ? 0x20 : 0));
+  r.irmask = g_ball.seenMask;
   r.faults = faultMask();
   r.ball = g_ball.valid ? 1 : 0;
-  r.off100 = g_ball.offsetKnown ? (int16_t)(clampf(g_ball.offset, -1.0f, 1.0f) * 100.0f) : (int16_t)FR_NA;
-  r.s0x100 = (int16_t)(clampf(g_ball.s0, -300.0f, 300.0f) * 100.0f);
-  r.s1x100 = (int16_t)(clampf(g_ball.s1, -300.0f, 300.0f) * 100.0f);
+  r.off100 = g_ball.bearingKnown ? (int16_t)(clampf(g_ball.bearing, -180.0f, 180.0f) * 10.0f) : (int16_t)FR_NA;
+  r.s0x100 = (int16_t)(clampf(g_ball.strength, -300.0f, 300.0f) * 100.0f);
+  r.s1x100 = (int16_t)((g_ball.held ? 1 : 0) | (g_ball.ready ? 2 : 0) | (g_mod[0].active ? 4 : 0) | (g_mod[1].active ? 8 : 0));
   r.imu = g_imu.present ? (g_imu.ok ? 2 : 1) : 0;
   r.yaw10 = (g_imu.present && g_imu.yawValid) ? sc10(g_imu.yaw) : FR_NA;
   r.herr10 = isnan(g_hdgErr) ? FR_NA : sc10(g_hdgErr);
@@ -263,13 +263,13 @@ static void frCapture(FrRec& r, char type, const char* note) {
 
 static void frFormat(const FrRec& r, uint32_t seq, char* out, size_t n) {
   char off[12] = "", yaw[12] = "", herr[12] = "", gz[12] = "";
-  if (r.off100 != FR_NA) snprintf(off, sizeof(off), "%.2f", r.off100 / 100.0f);
+  if (r.off100 != FR_NA) snprintf(off, sizeof(off), "%.1f", r.off100 / 10.0f);
   if (r.yaw10 != FR_NA) snprintf(yaw, sizeof(yaw), "%.1f", r.yaw10 / 10.0f);
   if (r.herr10 != FR_NA) snprintf(herr, sizeof(herr), "%.1f", r.herr10 / 10.0f);
   if (r.gz10 != FR_NA) snprintf(gz, sizeof(gz), "%.1f", r.gz10 / 10.0f);
-  snprintf(out, n, "%lu,%lu,%lu,%c,%u,%u,%04X,%u,%s,%.2f,%.2f,%u,%s,%s,%s,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04X,%lu,%s\n",
+  snprintf(out, n, "%lu,%lu,%lu,%c,%u,%u,%04X,%u,%s,%.2f,%d,%u,%s,%s,%s,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04X,%lu,%s\n",
            UL(r.t), UL(g_session), UL(seq), r.type, (unsigned)r.cond, (unsigned)r.nav, (unsigned)r.irmask,
-           (unsigned)r.ball, off, r.s0x100 / 100.0f, r.s1x100 / 100.0f, (unsigned)r.imu, yaw, herr, gz,
+           (unsigned)r.ball, off, r.s0x100 / 100.0f, (int)r.s1x100, (unsigned)r.imu, yaw, herr, gz,
            r.vx100 / 100.0f, r.vy100 / 100.0f, r.w100 / 100.0f, r.pwm[0], r.pwm[1], r.pwm[2], r.pwm[3],
            (unsigned)r.faults, UL((uint32_t)r.loop100us * 100u), r.note);
 }
@@ -353,10 +353,10 @@ static void logService(const Config& c, uint32_t nowMs) {
   }
   if (c.detailMs && elapsedMs(nowMs, g_lastDetailMs) >= c.detailMs) {
     g_lastDetailMs = nowMs;
-    for (uint8_t i = 0; i < IR_SENSORS; i++) {
-      if (!irEnabled(c, i)) continue;
+    for (uint8_t i = 0; i < RING_CH_MAX; i++) {
+      if (!ringEnabled(c, i)) continue;
       char note[24];
-      snprintf(note, sizeof(note), "s%u r%u %.2f%s", (unsigned)i, (unsigned)g_irs[i].raw, (double)g_irs[i].s, g_irs[i].near ? "N" : (g_irs[i].seen ? "S" : ""));
+      snprintf(note, sizeof(note), "c%u a%u %.2f%s", (unsigned)i, (unsigned)g_ring[i].amp, (double)g_ring[i].s, g_ring[i].railFault ? "X" : (g_ring[i].seen ? "S" : ""));
       logRow('D', note);
     }
   }
@@ -375,7 +375,7 @@ static void logService(const Config& c, uint32_t nowMs) {
 
 // ---- export over Serial -----------------------------------------------------------------------
 // Format:
-//   #BEGIN-EXPORT name=<file|ring> schema=1
+//   #BEGIN-EXPORT name=<file|ring> schema=2
 //   <the file's lines verbatim: '#' header lines, column row, CSV rows>
 //   #END-EXPORT lines=<n> crc32=<8 hex digits over every exported line including '\n'>
 // Every other message on the port starts with '[', so a parser can ignore those lines.

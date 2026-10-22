@@ -1,8 +1,9 @@
 // nav.h - navigation state machine: manual, autonomous ball seeking, search, approach/alignment, shot, motor test, safe stop.
 //
-// The ball is known only through the two front IR sensors (ir2.h): seen / near per sensor and a left-right offset. The robot has no
-// 360-degree view: finding a ball outside the sensors' field of view is done by rotating (search).
-// Frame convention: offset -1 = ball to the left, +1 = to the right, 0 = centred. Heading 0 = robot forward, clockwise positive.
+// The ball is known through the phototransistor ring (ring.h): a bearing and a strength while a channel sees it, plus the front IR module
+// ("in the shooting position"). The ring has blind arcs between its receivers: a ball that disappears into one is looked for by rotating
+// the way it was last moving / towards the nearest uncovered arc (search).
+// Frame convention: bearing 0 = ahead, + = to the right (clockwise), +-180 = behind. Heading 0 = robot forward, clockwise positive.
 // Body request: vx = strafe right, vy = forward, w = rotate clockwise.
 #pragma once
 #include <strings.h>
@@ -16,7 +17,6 @@ static int8_t g_searchDir = 1;
 static uint32_t g_searchStartMs = 0, g_lostAtMs = 0, g_pauseUntilMs = 0, g_searchBrakeUntilMs = 0;
 static bool g_lostPending = false;          // a loss happened and has not been re-acquired yet
 static float g_refYaw = 0;
-static float g_lastOffset = 0;               // last known side of the ball (-1 left .. +1 right): search turns that way first
 static uint32_t g_lastNavTick = 0;
 
 // Goal heading. The robot is placed pointing at the goal; goalRegisterMs after power-on (gyro calibrated, robot still) its heading is registered
@@ -80,7 +80,7 @@ static void navSetState(NavState s, const char* why) {
 }
 
 static bool drivetrainFault() { return faultActive(F_MOTOR_INIT) || faultActive(F_LOOP_STALL); }
-static bool sensingFault() { return faultActive(F_IR_FRONT); }
+static bool sensingFault() { return faultActive(F_RING_NONE) || faultActive(F_RING_STALL); }
 
 // 1.0 when sensing and the drivetrain are nominal, lower when degraded.
 static float navSensorScale(const Config& c) {
@@ -100,7 +100,7 @@ static void navMarkLoss(const char* where) {
   g_stats.ballLossEvents++;
   g_lostAtMs = millis();
   g_lostPending = true;
-  say("NAV", "ball lost (%s): loss #%lu, last side %s (%.2f)", where, UL(g_stats.ballLossEvents), g_lastOffset > 0.15f ? "right" : (g_lastOffset < -0.15f ? "left" : "centre/unknown"), g_lastOffset);
+  say("NAV", "ball lost (%s): loss #%lu, last bearing %.0f deg%s, moving %.0f deg/s", where, UL(g_stats.ballLossEvents), (double)g_lastBearing, ringInBlindSpot(g_cfg, g_lastBearing) ? " (inside a blind arc)" : "", (double)g_bearingRate);
   logEvent("N", "ball_lost");
 }
 
@@ -110,8 +110,9 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
     return false;
   }
   if (g_mtest.state) { say("SAFETY", "autonomous REFUSED: motor test in progress"); return false; }
-  if (!irEnabled(c, 0)) { say("SAFETY", "autonomous REFUSED: IR sensor 0 (front centre) is switched off (':set irenable 3')"); return false; }
-  if (!irCalibrated(c, 0)) { say("SAFETY", "autonomous REFUSED: IR sensor 0 is not calibrated. Run ':ir cal clear 0' (nothing in front) and ':ir cal near 0' (ball in the shooting position), then ':save'. See docs/IR_SENSORS.md."); return false; }
+  if (ringCountUsable(c) == 0) { say("SAFETY", "autonomous REFUSED: no usable ball-ring channel (':ring' shows which are off or saturated)"); return false; }
+  if (!c.ringCalDone) { say("SAFETY", "autonomous REFUSED: the ring noise floor is not calibrated. Switch the ball OFF (or take it away) and run ':ring cal noise', then ':save'. See docs/RING_AND_MODULES.md."); return false; }
+  if (!modEnabled(c, 0)) { say("SAFETY", "autonomous REFUSED: IR module 0 (front, shooting position) is switched off (':mod on 0'): the robot could not tell when the ball is in place"); return false; }
   g_autoEnabled = true;
   g_searchAttempt = 0;
   g_lostPending = false;
@@ -119,8 +120,9 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
   motorsStopNow();
   navSetState(NAV_SEEK, "autonomous enabled by operator");
   if (c.motorVerified != 0x0F) say("WARN", "drivetrain direction NOT operator-verified for all wheels (mask 0x%X of 0xF): bench-test first (see 'h')", (unsigned)c.motorVerified);
-  if (!irEnabled(c, 1) || !irCalibrated(c, 1)) say("WARN", "IR sensor 1 is %s: no centred/off-centre judgement, the shooting position uses sensor 0 only", irEnabled(c, 1) ? "not calibrated" : "switched off");
-  else if (c.irOffsetSide == 0) say("WARN", "IR sensor 1 mounting side not set (':set iroffset 1' = right of sensor 0, '-1' = left): no sideways guidance");
+  { uint8_t nU; float gap = ringCoverageGap(c, &nU);
+    if (gap > 0.0f) say("WARN", "ring blind arc ~%.0f deg (estimate from configured bearings): a ball inside it is only found by rotating", (double)gap); }
+  if (c.ringNear == 1500) say("WARN", "ringnear is the untouched default: strength (and so the slow-down) is a guess until ':ring cal near' is done with the ball in the shooting position");
   if (!imuHeadingUsable(c, now)) say("WARN", "heading hold unavailable: the robot may rotate while it strafes; shots need the gyro");
   if (g_cond == COND_DEGRADED) say("WARN", "running DEGRADED: reduced speed (x%.2f)", navSensorScale(c));
   return true;
@@ -134,38 +136,47 @@ static bool navHeading(const Config& c, uint32_t now, float* w) {
   return true;
 }
 
-// Approach and alignment, from the two front sensors only.
-//   far/medium: drive forward, slowing as the signal strengthens
-//   only ONE sensor sees the ball: cautious (slow forward) and a small sideways move towards the ball's side (needs irOffsetSide)
-//   both see it: sideways correction from the strength difference, until centred
-//   shooting position (sensor 0 near): no forward motion; only a small sideways correction if still off-centre
+// Approach and alignment from the ring bearing.
+//   ball far off to one side or behind (|bearing| > turndeg): turn on the spot towards it first (a little creep forward only when it is ahead)
+//   roughly ahead: drive forward, slowing as the signal strengthens, steering gently towards the bearing
+//   close (strong signal): keep the heading and strafe to centre the ball instead of turning
+//   front module detecting (shooting position): no forward motion; only a small sideways correction if still off-centre
+//   ball not seen right now (inside the loss grace): creep, do not guess
 static void navApproach(const Config& c, uint32_t now) {
-  if (g_ball.offsetKnown) g_lastOffset = g_ball.offset;
   float scale = navSensorScale(c);
-  bool seenNow = g_ball.seenMask != 0;
-  float s = g_ball.s0 > g_ball.s1 ? g_ball.s0 : g_ball.s1;
-  float nearFrac = (float)c.irNearPct / 100.0f;
-  float t = clampf(s / nearFrac, 0.0f, 1.0f);
+  bool seenNow = g_ball.bearingKnown;
+  float brg = seenNow ? g_ball.bearing : g_lastBearing;
+  float t = clampf(g_ball.strength, 0.0f, 1.0f);
   float vy = c.approachSpeed + t * (c.slowSpeed - c.approachSpeed);
-  float vx = 0;
-  bool oneOfTwo = (g_ball.seenMask == 1 || g_ball.seenMask == 2) && irUsable(c, 0) && irUsable(c, 1);
-  if (g_ball.offsetKnown && seenNow && absf(g_ball.offset) > 0.5f * c.centerBand) vx = c.alignSpeed * g_ball.offset;
-  if (oneOfTwo) vy = vy < c.slowSpeed ? vy : c.slowSpeed;                 // only one sensor sees it: cautious
-  if (!seenNow) { vy = 0.5f * c.slowSpeed; vx = 0; }                       // ball not seen right now (inside the loss grace): creep, do not guess
+  float vx = 0, w = 0;
+  bool turning = false;
+  if (!seenNow) { vy = 0.5f * c.slowSpeed; }
+  else if (absf(brg) > c.turnDeg) {                                          // turn towards it first
+    w = clampf(c.turnKp * brg, -c.turnMax, c.turnMax);
+    if (absf(w) < 0.12f) w = (brg > 0 ? 0.12f : -0.12f);                     // enough to move the wheels
+    vy = absf(brg) < 60.0f ? 0.5f * c.slowSpeed : 0.0f;
+    turning = true;
+  } else if (absf(brg) > 0.5f * c.centerDeg) {
+    if (t >= 0.5f || g_ball.held) vx = c.alignSpeed * clampf(brg / c.turnDeg, -1.0f, 1.0f);   // close: strafe, keep the heading
+    else { w = clampf(c.turnKp * brg, -c.turnMax, c.turnMax); turning = true; }                // far: steer
+  }
   if (g_ball.held) vy = 0;                                                  // shooting position reached: no more forward motion
   if (g_ball.ready) vx = 0;
   vx *= scale; vy *= scale;
 
-  float w = 0;
-  navHeading(c, now, &w);                                                   // keep the heading the approach started with (no turning toward the ball: there is no bearing)
+  if (turning) {                                                            // the robot follows the ball: the heading to hold is wherever it points after the turn
+    if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
+    g_hdgErr = NAN;
+    w *= scale;
+  } else navHeading(c, now, &w);
   motorsDrive(c, vx, vy, w, c.maxAuto);
 }
 
 // Start a shot when the ball has been in the shooting position (sensor 0 near and centred) for shootHoldMs and the goal heading is registered.
 // Returns true when the state changed.
 static bool navShootCheck(const Config& c, uint32_t now) {
-  bool fresh = g_irLastSampleMs && elapsedMs(now, g_irLastSampleMs) <= 100;   // a stalled sensor loop cannot start a shot
-  if (fresh && !g_ball.held) g_needRelease = false;                 // the ball has left the sensor: the next ball may be shot
+  bool fresh = g_ringLastScanMs && elapsedMs(now, g_ringLastScanMs) <= 100;   // a stalled sensor loop cannot start a shot
+  if (fresh && !g_ball.held) g_needRelease = false;                 // the ball has left the front module: the next ball may be shot
   if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || !goalValid() || !imuHeadingUsable(c, now) || !fresh || !g_ball.ready) return false;
   if (g_needRelease) return false;                                  // still the same ball: wait until it has left the sensor
   if (g_ball.readySinceMs == 0 || elapsedMs(now, g_ball.readySinceMs) < c.shootHoldMs) return false;
@@ -175,12 +186,24 @@ static bool navShootCheck(const Config& c, uint32_t now) {
   return true;
 }
 
+// Which way to rotate to find a ball that has disappeared. Priority: the way it was moving across the view (it left through that side), then
+// the nearest uncovered arc on either side of where it was last seen (it can only have slipped into a blind spot), then the side of its last bearing.
+static int8_t navPickSearchDir(const Config& c) {
+  if (absf(g_bearingRate) >= 20.0f) return g_bearingRate > 0 ? 1 : -1;
+  for (int d = 5; d <= 120; d += 5) {
+    bool r = ringInBlindSpot(c, g_lastBearing + (float)d), l = ringInBlindSpot(c, g_lastBearing - (float)d);
+    if (r != l) return r ? 1 : -1;
+    if (r && l) break;
+  }
+  return g_lastBearing >= 0 ? 1 : -1;
+}
+
 static void navEnterSearch(const char* why, bool brake = false) {
   g_searchStartMs = millis();
   // After a loss the wheels are still driving the old approach. Come to rest first (the ramp limits how fast that can be),
   // then rotate: going straight from a strafe to a spin would reverse two wheels through the dead-time pause for nothing.
   g_searchBrakeUntilMs = brake ? g_searchStartMs + 20u + (uint32_t)g_cfg.maxAuto * 1000u / (g_cfg.decelPwmPerS ? g_cfg.decelPwmPerS : 1u) : g_searchStartMs;
-  g_searchDir = (g_lastOffset >= 0) ? 1 : -1;
+  g_searchDir = navPickSearchDir(g_cfg);
   navSetState(NAV_SEARCH, why);
 }
 

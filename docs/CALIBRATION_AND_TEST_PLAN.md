@@ -1,6 +1,6 @@
 # Calibration guide, first power-on, and physical test plan
 
-See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `IR_SENSORS.md` (the two IR emitter/receiver pairs).
+See also `COMMISSIONING_CHECKLIST.md` (ordered, with tick boxes) and `RING_AND_MODULES.md` (the multiplexer ring and the two IR modules).
 
 Everything here is a **procedure for you to run**. No step has been performed on the robot; every result below is **NOT TESTED**.
 
@@ -8,13 +8,13 @@ Everything here is a **procedure for you to run**. No step has been performed on
 
 1. **Hardware first** (power off): remove the ENA/ENB jumpers on both L298N boards; add 4.7–10 kΩ pull-downs on all 12 L298N control inputs
    (IN1–IN4, ENA, ENB, both boards); common ground everywhere; a regulated 5 V for the ESP32 (not the L298N regulator when the pack is above 12 V);
-   the two IR pairs: each receiver through its own resistor/amplifier circuit and, if the firmware is to pulse the LEDs, each emitter through a transistor driver (`IR_SENSORS.md` §2–3; **the receivers cannot connect straight to a GPIO; confirm the part types and every pin voltage with a meter before applying power**); fuse the battery.
+   the ring: each phototransistor with its load resistor into its multiplexer channel, the multiplexer on 3V3/GND/EN=GND, SIG→GPIO34, S0–S3→GPIO4/13/12/0, the two IR modules on 3.3 V (`RING_AND_MODULES.md` §1, §4; **the phototransistors cannot connect straight to a channel; confirm every channel voltage stays within 0–3.3 V with a meter before applying power**; check that the board still boots and uploads with the S2/S3 wires connected, §3); fuse the battery.
 2. **Wheels off the ground**, robot on a stand, motor battery connector reachable. First flash with the motor battery **disconnected** (USB only).
-3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, IR pairs (`NOT CALIBRATED`), MPU6050 found at 0x68/0x69.
+3. Upload, open the Serial Monitor at 115200. Check the `[BOOT]` report: reset reason, filesystem, PWM init, ball ring (`NOT CALIBRATED`) and modules, MPU6050 found at 0x68/0x69.
    Expect warnings: wheels NOT TESTED, sensors NOT TESTED. Confirm **no wheel moved** and autonomy is DISABLED.
 4. Press reset several times and power-cycle: with the motor battery *connected* and wheels lifted, confirm no wheel twitches at reset (validates the pull-downs; GPIO5/14 boot behaviour).
 5. Connect the motor battery. Send `h` and `?`. Nothing may move.
-6. **Motor direction** (§B), **IR sensors** (§C), **IMU** (§D), then `:save`.
+6. **Motor direction** (§B), **ring and modules** (§C), **IMU** (§D), then `:save`.
 7. Only then try autonomy on the stand (`a`), then on the floor at low speed (`:set maxauto 100`).
 
 Stopping fast: `s` stops and disables autonomy, `!` is an emergency stop that works even in the middle of typing a `:` command; manual keys time out by themselves;
@@ -27,10 +27,10 @@ disconnect the motor battery for a hard stop.
 3. `:dtest` → `:confirm` runs forward, backward, strafe left, strafe right, rotate cw, rotate ccw. If strafes are mirrored but forward/rotate are right → `:roller O`.
 4. Find the smallest PWM that starts a wheel under load: `:set minpwm <n>`; set `:set maxauto`/`maxmanual` from the motor/driver ratings. `:save`.
 
-## C. IR pair calibration and testing
+## C. Ring and module calibration and testing
 
-Follow `IR_SENSORS.md` §7: circuit check, raw check, `:ir mode`, `:ir emit on` (if the LED drivers are wired), `:ir cal clear|near 0|1`, `:set iroffset 1|-1`, state test with the ball, distance table,
-interference test in competition lighting, then `:save`. Autonomy (`a`) is refused until sensor 0 is calibrated.
+Follow `RING_AND_MODULES.md` §9: circuit and strapping-pin check, channel-by-channel test with the ball at 5/10/20/40 cm, mounting angles (`:ring bearing <ch> <deg>`), `:ring cal noise` (ball OFF), `:ring cal near`,
+module test (`:mod`, trimmer, polarity), interference test (modules powered, motors running, competition lighting), blind-spot test, then `:save`. Autonomy (`a`) is refused until the noise floor is calibrated and module 0 is on.
 
 ## D. IMU calibration
 
@@ -41,8 +41,8 @@ Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues
 
 ## E. Goal heading and the shot (only when you want it)
 
-1. Set `goalwidth` and `goaldist` for your field. 2. Power the robot on **pointing at the goal and still**; 5 s later `[NAV] goal heading registered` appears (`:goal` to check). 3. Calibrate the sensors (§C),
-`:set shootenable 1`. 4. Wheels lifted first, then restrained, then on the floor. See `IR_SENSORS.md` for the sequence and what cancels a shot.
+1. Set `goalwidth` and `goaldist` for your field. 2. Power the robot on **pointing at the goal and still**; 5 s later `[NAV] goal heading registered` appears (`:goal` to check). 3. Calibrate the ring and modules (§C),
+`:set shootenable 1`. 4. Wheels lifted first, then restrained, then on the floor. See `README.md` (autonomous behaviour) and `RING_AND_MODULES.md` §7–8 for what makes a ball `ready` and what cancels a shot.
 
 ## F. Physical test plan (all NOT TESTED)
 
@@ -52,19 +52,19 @@ Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues
 | 2 | Startup / reset safety | §A 4, also pull USB, brown-out by lowering supply | no wheel motion; autonomy off after every reset | NOT TESTED |
 | 3 | Individual motor direction | §B 1–2 | each wheel forward = robot-forward | NOT TESTED |
 | 4 | Four mecanum motions | `:dtest` | motions match labels | NOT TESTED |
-| 5 | Sensor wiring and raw readings | `IR_SENSORS.md` steps 2–3 | stable raw readings, clear change with the ball | NOT TESTED |
-| 6 | Sensor calibration and polarity | `:ir cal ...` | calibrated; stronger = closer confirmed | NOT TESTED |
-| 7 | Seen / near / left / right states | `I` with the ball | states and the offset side match what you do | NOT TESTED |
-| 8 | Overlap of the two fields of view at the shooting position | ball at the shooting position, `i` | sensor 1 sees it (else `irneedboth 0`) | NOT TESTED |
-| 9 | Detection range of the ball | ball at 5/10/20/40 cm, centre and 20° off | range recorded; if too short, the search cannot find a distant ball | NOT TESTED |
-| 10 | Interference | competition lighting, sunlight, other robots, motors running (wheels lifted) | no false "seen" | NOT TESTED |
+| 5 | Ring wiring and raw swings | `RING_AND_MODULES.md` §9 steps 2–4 | quiet and steady with the ball off; only the channel(s) facing the ball react | NOT TESTED |
+| 6 | Strapping pins | reset five times and upload once with S2/S3 connected | boots and uploads every time | NOT TESTED |
+| 7 | Mounting angles and bearing | ball around the robot at a fixed distance | printed bearing within a few degrees of the real angle; blind arcs recorded | NOT TESTED |
+| 8 | Module 0 distance and polarity | ball, hand and a wall in front of it | `DETECTING` exactly in the shooting position; polarity set | NOT TESTED |
+| 9 | Detection range of the ball | ball at 5/10/20/40 cm on several channels | range recorded; if too short, the search cannot find a distant ball | NOT TESTED |
+| 10 | Interference | modules powered, competition lighting, sunlight, other robots, motors running (wheels lifted) | no false "seen" | NOT TESTED |
 | 11 | MPU6050 calibration, heading stability | §D, 60 s still, 90° turns | drift rate recorded | NOT TESTED |
-| 12 | Search, loss and reacquisition | remove/replace the ball while autonomous | SEARCH starts, ball re-found, stats | NOT TESTED |
+| 12 | Search, loss, blind spot and reacquisition | remove/replace the ball; step it into a blind arc | SEARCH starts towards where it went, ball re-found, stats | NOT TESTED |
 | 13 | Approach, alignment and stop at the shooting position | autonomy on the stand, then the floor | creeps in, centres, stops | NOT TESTED |
 | 14 | Goal heading and aim | §E with the wheels lifted | rotates toward the registered heading, stops inside the window | NOT TESTED |
 | 15 | Shot | §E restrained, then on the floor | reverse then forward burst; one shot per ball | NOT TESTED |
 | 16 | Missing optional parts | unplug the MPU6050 | DEGRADED, robot still seeks, no shot | NOT TESTED |
 | 17 | Deliberate storage failure | partition scheme without spiffs | logging OFF, robot unaffected, no format | NOT TESTED |
-| 18 | Sensor fault | short sensor 1 / sensor 0 to GND | `IR_ALIGN` degraded / `IR_FRONT` safe stop; recovery after the verification period | NOT TESTED |
+| 18 | Ring fault | tie one channel / SIG to 3.3 V | `RING_CHANNEL` degraded / `RING_NONE` safe stop; recovery after the verification period | NOT TESTED |
 | 19 | Repeated autonomous runs | 10 runs, check `h` stats and logs | consistent, no unexplained safety stops | NOT TESTED |
 | 20 | Log export and analysis | `g`, `:xsel 0`, `x`, verify the CRC in Python | CRC matches | NOT TESTED |

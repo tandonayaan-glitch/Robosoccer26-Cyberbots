@@ -20,10 +20,10 @@ static void printHelp() {
   say("INFO", "--- commands (115200 baud). Single keys act at once; words start with ':' and end with Enter ---");
   say("INFO", "f b l r : manual forward/back/strafe-left/strafe-right   q e : rotate CCW/CW   (each key moves ~%u ms, repeat to continue)", (unsigned)g_cfg.manualHoldMs);
   say("INFO", "s : stop + disable autonomy    ! : emergency stop    a : ENABLE autonomous ball seeking (refused if unsafe)");
-  say("INFO", "i : IR sensor snapshot   I : toggle live IR view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
+  say("INFO", "i : IR sensor snapshot   I : toggle live ring view   m : IMU/heading   d : nav/ball/PWM state   h : health report");
   say("INFO", "g : logger status   x : export selected log (:xsel ring|<n>)   t : test mode help   ? : this help");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
-  say("INFO", ":ir [cal clear|near <0|1> | mode <0|1> analog|digital | on|off <0|1> | side right|left|none | reset] | :goal [set|clear] | :zero | :gcal | :diag <on|off>");
+  say("INFO", ":ring [on|off <ch> | bearing <ch> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level low|high] | :goal [set|clear] | :zero | :gcal | :diag <on|off>");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel> | :recover | :xsel | :fsformat CONFIRM | :logdel CONFIRM");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach. Software is not a substitute for hardware protection.");
 }
@@ -37,7 +37,7 @@ static bool parseF(const char* s, float* out) {
   return true;
 }
 
-#include "ircli.h"
+#include "ringcli.h"
 
 static void cmdTestMode() {
   navStop("test mode");
@@ -46,7 +46,7 @@ static void cmdTestMode() {
   say("TEST", " 1) wheels off the ground, robot secured, motor power switch reachable");
   say("TEST", " 2) per wheel: :mtest FL  then :confirm  -> watch rotation -> :mok FL (correct) or :mrev FL (wrong, then repeat)");
   say("TEST", " 3) :dtest then :confirm runs forward/back/strafe/rotate; or use f b l r q e in short bursts. ':roller O' if strafe is mirrored");
-  say("TEST", " 4) IR: 'i' shows both sensors. Nothing in front -> ':ir cal clear 0'; ball in the shooting position -> ':ir cal near 0'; same for sensor 1; ':set iroffset 1|-1' = side of sensor 1");
+  say("TEST", " 4) ring: 'i' shows the 12 channels and the modules. Ball OFF -> ':ring cal noise'; ball in the shooting position -> ':ring cal near'; ':ring bearing <ch> <deg>' = where each receiver looks; ':mod' = the two IR modules");
   say("TEST", " 5) :save to persist. 'h' shows what is verified and what is NOT TESTED.");
 }
 
@@ -126,7 +126,8 @@ static void cliExecLine(char* line, uint32_t now) {
     if (t[1] && (t[1][0] == 'X' || t[1][0] == 'x' || t[1][0] == 'O' || t[1][0] == 'o')) { c.rollerO = (t[1][0] == 'O' || t[1][0] == 'o'); c.motorVerified = 0; say("INFO", "roller layout %c (all wheel verifications cleared)", c.rollerO ? 'O' : 'X'); }
     else say("WARN", "usage: :roller <X|O>");
   }
-  else if (!strcmp(cmd, "ir")) cmdIr(c, t[1], t[2], t[3]);
+  else if (!strcmp(cmd, "ring")) cmdRing(c, t[1], t[2], t[3]);
+  else if (!strcmp(cmd, "mod")) cmdMod(c, t[1], t[2]);
   else if (!strcmp(cmd, "goal")) {
     if (t[1] && !strcmp(t[1], "set")) {
       if (navGoalRegister(c, now)) say("INFO", "goal heading registered NOW at %.1f deg of gyro yaw (the robot must be pointing at the goal, standing still)", (double)g_goalYaw);
@@ -185,12 +186,12 @@ static void cliSingle(char ch, uint32_t now) {
     case 'f': case 'b': case 'l': case 'r': case 'q': case 'e': navManual(c, ch, now); break;
     case 's': navStop("operator stop 's'"); say("SAFETY", "stopped; autonomy disabled"); break;
     case '!': navStop("EMERGENCY STOP"); say("SAFETY", "EMERGENCY STOP"); break;
-    case 'i': printIrSnapshot(c); break;
+    case 'i': printRingSnapshot(c); printModSnapshot(c); break;
     case 'm': printImu(c, now); break;
     case 't': cmdTestMode(); break;
     case 'a': if (navEnableAuto(c, now)) say("NAV", "autonomous ball seeking ENABLED. 's' or any manual key stops it."); break;
     case 'h': printHealth(c, now, "INFO"); break;
-    case 'I': g_streamIr = !g_streamIr; g_streamLastMs = now; say("INFO", "live IR view %s (every %u ms)", g_streamIr ? "ON" : "OFF", (unsigned)c.streamMs); break;
+    case 'I': g_streamIr = !g_streamIr; g_streamLastMs = now; say("INFO", "live ring view %s (every %u ms)", g_streamIr ? "ON" : "OFF", (unsigned)c.streamMs); break;
     case 'd': printNavStatus(c, now); break;
     case 'g': logStatusPrint(c); break;
     case 'x': if (!exportStart(g_exportSel)) say("WARN", "export unavailable (busy, no such file, or no filesystem); ':xsel ring' always works"); break;
@@ -229,5 +230,5 @@ static void cliPoll(uint32_t now) {
 }
 
 static void streamService(const Config& c, uint32_t now) {
-  if (g_streamIr && elapsedMs(now, g_streamLastMs) >= c.streamMs) { g_streamLastMs = now; printIrStream(c); }
+  if (g_streamIr && elapsedMs(now, g_streamLastMs) >= c.streamMs) { g_streamLastMs = now; printRingStream(c); }
 }

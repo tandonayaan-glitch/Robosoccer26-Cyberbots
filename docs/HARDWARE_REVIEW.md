@@ -12,15 +12,16 @@ Evidence classes: **[V]** established by this repository's build or tests · **[
 | 4 | yellow BO geared DC motor | stall current **[?]**; measure |
 | 4 | mecanum wheel | roller layout X or O: `:roller X|O`, tested with `:dtest` |
 | 1 | 3S 11.1 V 4500 mAh battery | 12.6 V when full: see the L298N regulator note below |
-| 2 | IR transmitter LED, **940 nm, 5 V supply** | front, one per pair; **part number [?]** (forward voltage, maximum continuous and pulsed current): R_LED = (5 V − V_f − 0.2 V) / I_f, e.g. about 180 Ω for 20 mA with an assumed V_f of 1.3 V; `docs/IR_SENSORS.md` §3 |
-| 2 | 5 mm IR phototransistor (2-pin receiver) | front, one per pair; **part number [?]**; it cannot connect to a GPIO without at least a resistor: collector to 3.3 V, emitter to the GPIO with a load resistor to GND (start with 10 kΩ, `docs/IR_SENSORS.md` §2.1); check the lead order in the datasheet |
+| 1 | CD74HC4067 16-channel analog multiplexer (module or bare chip **[?]**) | EN tied to GND; S2/S3 sit on the strapping pins GPIO12/GPIO0 (§5); `docs/RING_AND_MODULES.md` |
+| 12 (+ up to 4) | 5 mm IR phototransistor (2-pin receiver) on multiplexer C0–C11 (C12–C15 optional) | the **ball ring**; **part number [?]**; each needs a load resistor (collector 3.3 V, emitter to the channel, R_L to GND, start 10 kΩ; `docs/RING_AND_MODULES.md` §4); they see the ball's own emission |
+| 2 | IR obstacle module, 3-pin (VCC / GND / OUT, LM393 comparator, trimmer), 3.3 V supply | module 0 at the front (ball in the shooting position); module 1 position undecided; OUT = digital |
 | 1 | MPU6050 (gyro + accelerometer) breakout | |
 | 1 | breadboard, jumper wires, power wiring | |
 
-**Ball detection hardware: exactly 2 IR transmitter LEDs and 2 IR receivers**, as two transmitter–receiver pairs at the front, for **reflected-light** ball detection. **Removed hardware (do not reintroduce):** the CD74HC4067 multiplexer and the 12-receiver three-pin TSOP ring. The firmware contains no code for them
-(`test/run_tests.sh` fails if their names reappear in the sources).
+**Ball detection hardware:** a ring of 12 phototransistors on a CD74HC4067 (one analog line, GPIO34) that see the **ball's own infrared emission**, optional extra receivers on C12–C15 (left / right), and two digital IR obstacle modules (GPIO35, GPIO36).
+The earlier reflective emitter/receiver pair design and its emitter-LED pulsing are gone (`test/run_tests.sh` fails if their names reappear); the 3-pin digital TSOP receivers and the old scan engine are gone too.
 
-**No kicker or shooting actuator is installed.** No kicker pin exists. The firmware "shot" is a drive burst (`docs/IR_SENSORS.md`).
+**No kicker or shooting actuator is installed.** No kicker pin exists. The firmware "shot" is a drive burst (`docs/RING_AND_MODULES.md`).
 
 ## 2. Wiring table (pins fixed in `pins.h`; no setting can change a pin) [V]
 
@@ -39,10 +40,12 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 
 | Device | Pin on the device | ESP32 | Notes |
 |---|---|---|---|
-| IR receiver 0 (pair 0, front centre): phototransistor, emitter lead + load resistor node | **GPIO35** (collector to 3.3 V; load resistor from this node to GND) | input-only, ADC1_CH7, no internal pull; **needs a resistor (or more) between the 2-pin part and the pin: not a direct connection** (`docs/IR_SENSORS.md` §2) |
-| IR receiver 1 (pair 1, front, offset): phototransistor, emitter lead + load resistor node | **GPIO36** (same circuit) | input-only, ADC1_CH0, no internal pull |
-| IR emitter 0 / 1 driver input | transistor base (via 1 kΩ) of a low-side NPN (LED + R_LED from the 5 V rail to the collector), or a MOSFET gate | **GPIO4 / GPIO13 – PROPOSED, not from your notes; used only if `iremit` = 1** | a GPIO cannot drive an IR LED directly: use a transistor driver (`docs/IR_SENSORS.md` §3); HIGH = LED on |
-| receivers and emitters | supply / return | 3.3 V or 5 V per the part and the driver design; GND common | every receiver pin voltage must stay within 0–3.3 V |
+| CD74HC4067 SIG | common signal | **GPIO34** | input-only, ADC1_CH6, no internal pull; ring channels arrive here one at a time |
+| CD74HC4067 S0 / S1 / S2 / S3 | channel select | **GPIO4 / GPIO13 / GPIO12\* / GPIO0\*** | outputs after boot; \* strapping pins (§5); the chip's select inputs are high-impedance |
+| CD74HC4067 VCC / GND / EN | supply / return / enable | 3V3 / common GND / **GND** (always enabled) | |
+| Ring phototransistor n (C0–C11, optional C12–C15) | collector → 3.3 V; emitter → channel Cn with R_L to GND | via the multiplexer | **not a direct connection**; every channel voltage must stay within 0–3.3 V |
+| IR obstacle module 0 (front, shooting position) | VCC 3.3 V · GND · OUT | **GPIO35** | input-only, ADC1_CH7, no internal pull; digital; `modactivelow` 1 by default [2nd] |
+| IR obstacle module 1 (undecided position) | VCC 3.3 V · GND · OUT | **GPIO36 – PROPOSAL** (you wrote "34 and 35": GPIO34 is SIG) | read and logged only |
 | MPU6050 | SDA | **GPIO16** | explicit `Wire.begin(16, 17)`; address 0x68 or 0x69 auto-detected |
 | MPU6050 | SCL | **GPIO17** | |
 | MPU6050 | VCC / GND | 3.3 V (check your breakout's regulator) / GND | |
@@ -61,26 +64,27 @@ Test `t_pinmap` compares `pins.h` with an independent copy of this table and che
 | Used | GPIOs |
 |---|---|
 | Motors (12) | 18, 19, 21, 22, 23, 5 (left) · 25, 26, 27, 14, 33, 32 (right) |
-| IR receivers (2) | 35, 36 |
-| IR emitter drivers (2), **proposed**, unused unless `iremit` = 1 | 4, 13 |
+| Multiplexer select S0–S3 | 4, 13, 12, 0 |
+| Multiplexer SIG | 34 |
+| IR obstacle modules (2) | 35, 36 (36 proposed) |
 | I2C / MPU6050 (2) | 16, 17 |
 | Serial | 1, 3 |
 | Unusable | 6–11 (flash) |
 
-**Still free** (after removing the multiplexer): **GPIO34** and **GPIO39** (input-only, ADC1; no internal pull) · **GPIO2** and **GPIO15** (strapping pins: GPIO2 must not be pulled high at boot, GPIO15 silences the boot log
-when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12** are boot-strapping pins and are deliberately left unused
-(GPIO0 selects the download mode, GPIO12 selects the flash voltage). GPIO32–39 other than those used are ADC1.
+**Still free:** **GPIO39** (input-only, ADC1; no internal pull) · **GPIO2** and **GPIO15** (strapping pins: GPIO2 must not be pulled high at boot, GPIO15 silences the boot log when low; outputs are fine, avoid pull-ups on GPIO2).
+GPIO0 and GPIO12 are now the multiplexer's S3 and S2: see §5. GPIO32–39 are ADC1.
 
 ## 4. Electrical notes
 
 | Item | Assessment |
 |---|---|
-| ESP32 logic level | 3.3 V, **not 5 V tolerant**. Every sensor signal into GPIO35/36/16/17 must stay ≤ 3.3 V. |
+| ESP32 logic level | 3.3 V, **not 5 V tolerant**. Every sensor signal into GPIO34/35/36/16/17 must stay ≤ 3.3 V. |
 | L298N inputs from 3.3 V | normally accepted [2nd]; remove the ENA/ENB jumpers |
 | L298N motor supply | 11.1 V nominal. The bipolar L298N drops about 2 V, so a motor sees about 9 V at full duty [2nd]; about 2 A per channel continuous [2nd] |
 | BO motor current **[?]** | measure the stall current; add current limiting/fuses if it exceeds the driver rating. Firmware limits: manual PWM ≤ 150/255, autonomous ≤ 170/255 (placeholders), the shot's drive phase uses `shootpwm` (255 by default: lower it if the driver or battery cannot take it) |
-| IR receiver pins | input-only, **no internal pull-up/down**. A bare 2-pin receiver needs a resistor (phototransistor) or an amplifier (photodiode). An open (unconnected) analog pin floats; a reading stuck at the clear-side end stop for 2 s raises a fault (not checked while the emitters are pulsed); a floating pin in the middle of the range does not |
-| IR emitter LEDs (940 nm, 5 V) | never from a GPIO directly (about 12 mA limit [2nd] against typically 20–50 mA); low-side NPN driver with the LED and R_LED on the 5 V rail, so the ESP32 pin only supplies the base current (about 2.6 mA through 1 kΩ) and never sees 5 V; resistor from the LED datasheet; the firmware pulses an emitter for about 200 µs every 5 ms (a few percent duty) only when `iremit` = 1 |
+| Ring channels | each phototransistor needs a load resistor; its supply must be 3.3 V so no channel can exceed the multiplexer's VCC. The multiplexer's on-resistance (about 100 Ω [2nd]) and the ADC sampling capacitor load the channel: R_L above about 10 kΩ is slow and picks up the previous channel. The firmware waits `ringsettle` and discards the first conversion after switching |
+| GPIO34 (SIG) | input-only, no pull. A disconnected multiplexer leaves SIG floating [2nd] (reads noise, not a stuck value): `:ring cal noise` then shows large swings on every channel and the autonomy refusal message points there |
+| IR obstacle modules | OUT is an LM393 output with the board's pull-up: its high level is the module's supply, so power the modules from **3.3 V** (not 5 V) or the pin sees 5 V. Their own IR LED is continuous [2nd] and may disturb nearby receivers |
 | Motor noise | the L298N drivers and brushed motors inject noise into supplies: decouple the sensor supply (100 nF close to the sensor), keep the sensor wires away from motor wires |
 | MPU6050 breakout **[?]** | GY-521-type boards carry a 3.3 V regulator and 4.7 kΩ pull-ups to the regulated rail; confirm yours does not pull SDA/SCL up to 5 V |
 | I2C on GPIO16/17 | free on a plain ESP-32S (WROOM) module; PSRAM modules use them |
@@ -92,12 +96,13 @@ when low; outputs are fine, avoid pull-ups on GPIO2) · **GPIO0** and **GPIO12**
 * **Which line matters**: with the L298N, EN low disables the outputs whatever IN1/IN2 are [2nd]. The protective element is a **pull-down on each EN line (ENA/ENB: GPIO23, 33, 5, 32)**; pull-downs on the IN lines are secondary protection. Use ≤ 10 kΩ (4.7 kΩ preferred): GPIO5's internal pull-up forms a divider with the external resistor.
 * **GPIO5** (back-left EN) is a strapping pin with an internal pull-up and is reported to emit a PWM signal during boot [2nd]: the back-left motor can twitch at every reset if the L298N inputs are not pulled low. **GPIO14** (back-right IN4) is reported to output PWM at boot [2nd]; harmless if its EN (GPIO32) is held low.
 * **Hung CPU / watchdog**: if the loop hangs, LEDC keeps its last duty until the 3 s watchdog fires; the motor power switch/fuse is the only protection for that time.
+* **GPIO12 (S2) and GPIO0 (S3)** are strapping pins: GPIO12 must be LOW at reset on a 3.3 V flash module, GPIO0 must be HIGH (LOW = serial bootloader) [2nd]. The firmware drives the select lines only after boot. A bare CD74HC4067's select inputs are high-impedance and do not disturb either level; a breakout board with a pull-up on S2 or a pull-down on S3 would. If the board does not boot or upload with the wires connected, unplug S2 / S3. Automatic upload (DTR/RTS toggling EN and GPIO0) needs S3 to stay high-impedance. [PHYS: reset five times and upload once with the multiplexer connected.]
 * **Verify before trusting [PHYS]**: with the motor supply disconnected, probe every L298N control input (12 lines) through repeated resets, brown-outs and a watchdog reset; require ≤ 0.8 V throughout.
 
 ## 6. Known limitations
 
-1. **The IR pairs give reflection strength only** (no position, no distance), have a limited range and field of view, and the receiver circuit is not final: see `docs/IR_SENSORS.md`. The robot finds a ball outside their range only by rotating.
-2. **Response to the real ball is NOT TESTED**; the receivers' and emitters' exact models and circuits are not known to the firmware.
+1. **The ring gives strength per channel, not distance**; its bearing is only as good as the configured mounting angles (placeholders until you set them), and it has blind arcs between receivers (the robot rotates to find a ball in one): `docs/RING_AND_MODULES.md`.
+2. **Response to the real ball is NOT TESTED**: whether the circuit passes the ball's burst pattern, the module distance setting, interference between the modules' LEDs and the receivers.
 3. **No wheel feedback**: commanded PWM only. Rotation, stall, driver faults and wheel slip are NOT MEASURABLE; `:mok` records an operator observation only.
 4. **No battery or current measurement.** Brownout resets are the only power evidence.
 5. **Gyro heading drifts**; it is relative to the last reference. The goal heading is registered once at start-up.
