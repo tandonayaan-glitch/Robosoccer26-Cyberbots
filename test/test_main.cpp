@@ -11,9 +11,8 @@
 #include <map>
 #include <vector>
 #include <string>
-#include "../remote_esp32/telemetry_parse.h"
-#include "../remote_esp32/auth_client.h"
-#include "../remote_esp32/console_help.h"
+#include "telemetry_check.h"
+#include "test_remote.h"
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; printf("  FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -2358,60 +2357,13 @@ static void t_direction_confidence() {
   CHECK(g_defState != DEF_TRACK && g_defState != DEF_INTERCEPT);           // and defending does not act on it
 }
 
-static void t_esp32_protocol() {
-  bootCal(); simRun(300);
-  ballAt(25, 0.5f); simRun(500);
-  Serial1.out.clear(); simRun(8000);
-  auto fr = btFrames();
-  TeleSnapshot s; teleInit(&s);
-  TeleLineBuf lb; teleLineInit(&lb);
-  char line[TELE_MAX_LINE + 2];
-  uint32_t now = 10000;
-  int got = 0;
-  for (char ch : Serial1.out) if (teleLineFeed(&lb, ch, line, sizeof(line)) && line[0] == '{') { if (teleParseLine(&s, line, now)) got++; }
-  CHECK(got == (int)fr.size() && s.bad == 0 && s.lost == 0 && s.frames == (uint32_t)got);
-  CHECK(teleLinkState(&s, now + 100, true) == TL_OK);
-  CHECK(teleLinkState(&s, now + 2000, true) == TL_STALE);
-  CHECK(teleLinkState(&s, now + 6000, true) == TL_LOST);
-  CHECK(teleLinkState(&s, now + 100, false) == TL_LOST);                   // Bluetooth link down: lost, whatever was received before
-  TeleSnapshot fresh; teleInit(&fresh);
-  CHECK(teleLinkState(&fresh, now, true) == TL_NO_DATA);
-  char view[1000];
-  teleRender(&s, now + 100, true, view, sizeof(view));
-  CHECK(strstr(view, "robot link: OK") && strstr(view, "ESTIMATES") && strstr(view, "n/a") == nullptr);
-  teleRender(&s, now + 3000, true, view, sizeof(view));
-  CHECK(strstr(view, "STALE"));
-  teleRender(&s, now + 9000, false, view, sizeof(view));
-  CHECK(strstr(view, "LINK LOST") && strstr(view, "no current telemetry"));
-  // malformed input never crashes or corrupts the snapshot
-  TeleSnapshot m; teleInit(&m);
-  const char* badLines[] = {"", "{", "{}", "{\"v\":2,\"k\":\"c\",\"n\":1,\"ms\":5}", "{\"v\":1,\"k\":\"c\",\"n\":1", "garbage", "{\"v\":1,\"k\":\"z\",\"n\":1,\"ms\":5}", "{\"v\":1,\"n\":1,\"ms\":5}"};
-  for (const char* b : badLines) CHECK(teleParseLine(&m, b, 1) == 0);
-  CHECK(m.bad == 8 && m.frames == 0);
-  std::string huge = "{\"v\":1,\"k\":\"c\",\"n\":1,\"ms\":5,\"x\":\"" + std::string(500, 'a') + "\"}";
-  CHECK(teleParseLine(&m, huge.c_str(), 1) == 0);
-  TeleLineBuf lb2; teleLineInit(&lb2);
-  std::string stream = std::string(900, 'q') + "\n" + fr[0] + "\n";                    // an over-long line is dropped and the next one is read
-  int okLines = 0; for (char ch : stream) if (teleLineFeed(&lb2, ch, line, sizeof(line))) okLines++;
-  CHECK(okLines == 1 && lb2.dropped == 1);
-  // a missing frame is counted
-  TeleSnapshot g; teleInit(&g);
-  teleParseLine(&g, fr[0].c_str(), 1); teleParseLine(&g, fr[2].c_str(), 2);
-  CHECK(g.lost == 1);
-  // null / absent values render as n/a, never as zero
-  ballGone(); simRun(900); Serial1.out.clear(); g_mpu.present = false; simRun(3000);
-  TeleSnapshot nn; teleInit(&nn); for (auto& f : btFrames()) teleParseLine(&nn, f.c_str(), 100);
-  teleRender(&nn, 150, true, view, sizeof(view));
-  CHECK(strstr(view, "n/a"));
-}
 
 // ================================================================================================
-// Bluetooth authentication (Mega: btauth.h) and the ESP32 console lock / client (remote_esp32/auth_client.h). HOST SIMULATION ONLY:
-// the same code runs on both sides here, there is no radio, no HC-05 and no ESP32.
+// Bluetooth authentication (Mega: btauth.h). HOST SIMULATION ONLY: a test-only C++ remote (test_remote.h) talks to the real firmware code; there is no radio and no HC-05.
+// The independent check is the Python client suite (laptop/tests/).
 
 static const char* TKEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";     // synthetic TEST key (not a credential of the robot)
 static const char* TKEY_WRONG = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
-static const char* TPASS = "test-passcode-1234";                                                    // synthetic test passcode
 static size_t g_btCursor = 0;
 static std::vector<std::string> btNewLines() {
   std::vector<std::string> v;
@@ -2425,7 +2377,6 @@ static std::vector<std::string> btNewLines() {
 static std::string lastBt(const char* prefix) { std::string r; for (auto& l : btNewLines()) if (l.rfind(prefix, 0) == 0) r = l; return r; }
 static void rndTest(uint8_t* o, size_t n) { static uint8_t c = 1; for (size_t i = 0; i < n; i++) { o[i] = c; c = (uint8_t)(c * 5u + 3u); } }
 static ClientAuth g_cl;
-static ConsoleAuth g_con;
 static void authBoot(bool provision = true) {
   g_mockAuthEnforced = true;
   ballGone(); setup(); g_autoStartPending = false; layout8(); calibrateAll();
@@ -2454,7 +2405,7 @@ static std::string respLine(const char* keyHex, const std::string& chLine, uint8
   char a[33], b[33]; bytesToHex(cn, 16, a); bytesToHex(tag, 16, b);
   return std::string("AUTH RESP ") + a + " " + b;
 }
-static bool noSecretOnAnyWire() { return Serial.out.find(TKEY) == std::string::npos && Serial1.out.find(TKEY) == std::string::npos && Serial.out.find(TPASS) == std::string::npos && Serial1.out.find(TPASS) == std::string::npos; }
+static bool noSecretOnAnyWire() { return Serial.out.find(TKEY) == std::string::npos && Serial1.out.find(TKEY) == std::string::npos; }
 
 static void t_sha256_hmac_vectors() {
   uint8_t o[32]; char h[65];
@@ -2718,190 +2669,9 @@ static void t_auth_nokey_and_open() {
   CHECK(EEPROM.mem[EEPROM_AUTH_ADDR] != 0xFF);
 }
 
-static void t_auth_console_lock() {
-  consoleInit(&g_con, TPASS, 60000);
-  uint32_t now = 100000;
-  // starts locked: nothing is forwarded, authentication text never becomes a command
-  CHECK(!g_con.unlocked);
-  CHECK(consoleLine(&g_con, "W", now) == CA_REJECT_LOCKED && consoleLine(&g_con, "defend", now) == CA_REJECT_LOCKED && consoleLine(&g_con, "M", now) == CA_REJECT_LOCKED);
-  CHECK(consoleLine(&g_con, "", now) == CA_NONE && consoleLine(&g_con, "   ", now) == CA_NONE);
-  // the emergency stop is available while locked
-  CHECK(consoleLine(&g_con, "X", now) == CA_ESTOP && consoleLine(&g_con, "x", now) == CA_ESTOP && consoleLine(&g_con, "!", now) == CA_ESTOP && consoleLine(&g_con, "  X  ", now) == CA_ESTOP);
-  CHECK(!g_con.unlocked);
-  // a wrong passcode: rejected, locked, throttled
-  CHECK(consoleLine(&g_con, "AUTH wrong-passcode", now) == CA_BAD_PASSCODE && !g_con.unlocked);
-  CHECK(consoleLine(&g_con, "AUTH wrong-passcode", now + 10) == CA_THROTTLED);
-  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now + 100) == CA_THROTTLED && !g_con.unlocked);       // even the right one waits for the throttle: no free guessing
-  CHECK(consoleLine(&g_con, "X", now + 100) == CA_ESTOP);                                                     // the stop is not throttled
-  now += 1100;
-  CHECK(consoleLine(&g_con, "AUTH test-passcode-123", now) == CA_BAD_PASSCODE);                              // prefix of the real one
-  CHECK(consoleLine(&g_con, "AUTH TEST-PASSCODE-1234", now + 1200) == CA_BAD_PASSCODE);                       // passcodes are case sensitive
-  CHECK(g_con.blockedUntil > now + 1200 + 4000);                                                              // the delay grows
-  now += 20000;
-  // never forwarded, whatever it contains
-  CHECK(consoleLine(&g_con, "AUTH W", now) != CA_FORWARD && consoleLine(&g_con, "AUTH defend", now + 30000) != CA_FORWARD);
-  now += 130000;
-  CHECK(consoleLine(&g_con, "auth test-passcode-1234", now) == CA_UNLOCKED && g_con.unlocked);                // the word AUTH is case insensitive, the passcode is not
-  CHECK(consoleLine(&g_con, "W", now + 10) == CA_FORWARD && consoleLine(&g_con, "defend", now + 20) == CA_FORWARD);
-  CHECK(consoleLine(&g_con, "AUTHX", now + 30) == CA_FORWARD);                                                // not the AUTH word: an ordinary (unknown) command for the robot to reject
-  CHECK(consoleLine(&g_con, "X", now + 40) == CA_ESTOP && g_con.unlocked);
-  // LOCK
-  CHECK(consoleLine(&g_con, "lock", now + 50) == CA_DISCONNECT && !g_con.unlocked);
-  CHECK(consoleLine(&g_con, "W", now + 60) == CA_REJECT_LOCKED);
-  // a wrong attempt while unlocked re-locks
-  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now + 70) == CA_UNLOCKED);
-  CHECK(consoleLine(&g_con, "AUTH nope-nope-nope", now + 80) == CA_BAD_PASSCODE && !g_con.unlocked);
-  // idle auto-lock and button gating
-  now += 200000;
-  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now) == CA_UNLOCKED);
-  CHECK(consoleButtonAllowed(&g_con, now + 1000));
-  CHECK(!consoleTick(&g_con, now + 50000) && g_con.unlocked);
-  CHECK(consoleButtonAllowed(&g_con, now + 50000));                                                           // button use counts as activity
-  CHECK(!consoleTick(&g_con, now + 100000));
-  CHECK(consoleTick(&g_con, now + 50000 + 61000) && !g_con.unlocked);
-  CHECK(!consoleButtonAllowed(&g_con, now + 200000));                                                         // locked: buttons are dead (the E-stop button is handled outside)
-  // not provisioned (placeholders / too short / empty): the console can never be unlocked
-  const char* bad[] = {"", "REPLACE_WITH_PASSCODE", "short", "REPLACE"};
-  for (const char* p : bad) { ConsoleAuth c; consoleInit(&c, p, 0); CHECK(!c.provisioned && consoleLine(&c, "AUTH ", 5) == CA_NOT_PROVISIONED && consoleLine(&c, "AUTH REPLACE_WITH_PASSCODE", 5) == CA_NOT_PROVISIONED && !c.unlocked); }
-  // the plain passcode is not kept in the structure
-  CHECK(memmem(&g_con, sizeof(g_con), TPASS, strlen(TPASS)) == nullptr);
-  // the client refuses placeholder / malformed / uniform keys
-  ClientAuth c2; clientInit(&c2, "REPLACE_WITH_64_HEX_CHARACTERS"); CHECK(!c2.keyOk);
-  clientInit(&c2, "0000000000000000000000000000000000000000000000000000000000000000"); CHECK(!c2.keyOk);
-  clientInit(&c2, TKEY); CHECK(c2.keyOk);
-  char b[100]; CHECK(clientWantLine(&c2, false, 1, rndTest, b, sizeof(b)) == 0);                              // no handshake while the console is locked
-}
 
-static void t_auth_end_to_end() {
-  authBoot();
-  consoleInit(&g_con, TPASS, 0);
-  uint32_t t = millis();
-  // the laptop types commands while locked: nothing reaches the robot
-  Serial1.out.clear(); g_btCursor = 0;
-  ConAct a = consoleLine(&g_con, "defend", t);
-  CHECK(a == CA_REJECT_LOCKED);
-  pumpClient(g_con.unlocked, 500);
-  CHECK(!g_auth.authed && !g_defendEnabled && Serial1.out.empty());                  // locked console: not even the handshake starts
-  // unlock the console, the ESP32 authenticates to the Mega, then commands are forwarded
-  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", millis()) == CA_UNLOCKED);
-  pumpClient(g_con.unlocked, 800);
-  CHECK(clientAuthed(&g_cl) && g_auth.authed);
-  a = consoleLine(&g_con, "defend", millis()); CHECK(a == CA_FORWARD);
-  lineBt("defend"); simRun(200);
-  CHECK(g_defendEnabled && modeIs("DEFEND"));
-  // LOCK: the ESP32 tells the Mega to forget the session; commands are refused again; defend carries on by itself
-  CHECK(consoleLine(&g_con, "LOCK", millis()) == CA_DISCONNECT);
-  lineBt("AUTH OUT"); clientReset(&g_cl); simRun(100);
-  CHECK(!g_auth.authed && g_defendEnabled);
-  Serial1.out.clear(); g_btCursor = 0; lineBt("attack"); simRun(100);
-  CHECK(!g_autoEnabled && g_defendEnabled && btHas("ERR:AUTH"));
-  // the laptop's emergency stop still goes out while locked
-  CHECK(consoleLine(&g_con, "X", millis()) == CA_ESTOP);
-  bt("X"); loop();
-  CHECK(g_estop && allWheelsStopped());
-  // a different laptop later: same ESP32, same procedure (passcode typed again; nothing about the first laptop is remembered)
-  g_estop = false;
-  ConsoleAuth fresh; consoleInit(&fresh, TPASS, 0);                                 // = the ESP32 rebooted when its USB cable moved
-  CHECK(!fresh.unlocked && consoleLine(&fresh, "W", millis()) == CA_REJECT_LOCKED);
-  CHECK(noSecretOnAnyWire());
-}
 
-static std::string g_helpOut;
-static void helpCollect(const char* l) { g_helpOut += l; g_helpOut += "\n"; }
 
-static void t_esp32_console_ui() {
-  uint32_t now = 100000;
-  ConsoleAuth c; consoleInit(&c, TPASS, 0);
-  // everything starts locked; help and the status of this remote work while locked; views and robot commands do not
-  CHECK(consoleLine(&c, "help", now) == CA_HELP && consoleLine(&c, "help ir", now) == CA_HELP && strcmp(c.arg, "ir") == 0 && consoleLine(&c, "esp32status", now) == CA_LOCALSTATUS);
-  CHECK(consoleLine(&c, "ir", now) == CA_REJECT_LOCKED && consoleLine(&c, "back", now) == CA_REJECT_LOCKED && consoleLine(&c, "defend", now) == CA_REJECT_LOCKED);
-  // esp32connect with the passcode on the line
-  CHECK(consoleLine(&c, "esp32connect wrong-wrong", now) == CA_BAD_PASSCODE);
-  now += 1500;
-  CHECK(consoleLine(&c, "ESP32CONNECT test-passcode-1234", now) == CA_UNLOCKED && c.unlocked);
-  // views: exactly one word, local, never forwarded
-  CHECK(consoleLine(&c, "ir", now) == CA_VIEW && c.view == V_IR);
-  CHECK(consoleLine(&c, "imu", now) == CA_VIEW && c.view == V_IMU && consoleLine(&c, "gyro", now) == CA_VIEW && c.view == V_IMU);
-  CHECK(consoleLine(&c, "motors", now) == CA_VIEW && c.view == V_MOTORS && consoleLine(&c, "ball", now) == CA_VIEW && c.view == V_BALL);
-  CHECK(consoleLine(&c, "safety", now) == CA_VIEW && c.view == V_SAFETY && consoleLine(&c, "raw", now) == CA_VIEW && c.view == V_RAW);
-  CHECK(consoleLine(&c, "back", now) == CA_VIEW && c.view == V_ALL && consoleLine(&c, "ALL", now) == CA_VIEW && c.view == V_ALL);
-  CHECK(consoleLine(&c, "gyro drift 30", now) == CA_FORWARD && consoleLine(&c, "gyro cal", now) == CA_FORWARD);      // with arguments the robot command is meant
-  CHECK(consoleLine(&c, "defend", now) == CA_FORWARD && consoleLine(&c, "tele now r", now) == CA_FORWARD && consoleLine(&c, "M", now) == CA_FORWARD);
-  // esp32disconnect and LOCK
-  CHECK(consoleLine(&c, "esp32disconnect", now) == CA_DISCONNECT && !c.unlocked);
-  CHECK(consoleLine(&c, "ir", now) == CA_REJECT_LOCKED);
-  // the prompt form: the next line is the passcode and is never a command; X still stops during the prompt
-  now += 2000;
-  CHECK(consoleLine(&c, "esp32connect", now) == CA_PROMPT && c.awaitingPass);
-  CHECK(consoleLine(&c, "X", now + 10) == CA_ESTOP && c.awaitingPass);
-  CHECK(consoleLine(&c, "test-passcode-1234", now + 20) == CA_UNLOCKED && c.unlocked && !c.awaitingPass);
-  c.unlocked = false;
-  CHECK(consoleLine(&c, "esp32connect", now + 100) == CA_PROMPT);
-  CHECK(consoleLine(&c, "defend", now + 200) != CA_FORWARD && !c.unlocked);                                          // a command typed at the prompt is a (wrong) passcode, not a command
-  now += 10000;
-  CHECK(consoleLine(&c, "esp32connect", now) == CA_PROMPT);
-  CHECK(consoleLine(&c, "test-passcode-1234", now + 31000) == CA_REJECT_LOCKED);                                      // the prompt timed out
-  // convenience mode (CONSOLE_REQUIRE_PASSCODE 0): esp32connect alone unlocks
-  ConsoleAuth open; consoleInit(&open, "", 0, false);
-  CHECK(open.provisioned && consoleLine(&open, "esp32connect", 5) == CA_UNLOCKED && open.unlocked);
-  CHECK(consoleLine(&open, "esp32disconnect", 6) == CA_DISCONNECT && consoleLine(&open, "W", 7) == CA_REJECT_LOCKED);
-  // help: every command has an entry, aliases resolve, unknown words are reported
-  const char* cmds[] = {"esp32connect", "esp32disconnect", "esp32status", "help", "x", "ir", "imu", "motors", "ball", "safety", "raw", "all", "back", "defend", "attack", "manual", "stop", "calibrate", "tele", "W", "M", "sensors", "gyro", "status", "lock", "auth", "idle", "!"};
-  for (const char* w : cmds) { const HelpEntry* e = helpFind(w); CHECK(e && e->usage[0] && strlen(e->text) > 20); }
-  CHECK(!helpFind("nonsense"));
-  g_helpOut.clear(); helpPrint("", helpCollect);
-  CHECK(g_helpOut.find("esp32connect") != std::string::npos && g_helpOut.find("esp32disconnect") != std::string::npos && g_helpOut.find("ir ") != std::string::npos && g_helpOut.find("back") != std::string::npos && g_helpOut.find("EMERGENCY STOP") != std::string::npos);
-  g_helpOut.clear(); helpPrint("ir", helpCollect);
-  CHECK(g_helpOut.find("D34") != std::string::npos && g_helpOut.find("A0") != std::string::npos);
-  g_helpOut.clear(); helpPrint("nonsense", helpCollect);
-  CHECK(g_helpOut.find("no help") != std::string::npos);
-  // the passcode never appears in any help text
-  for (size_t i = 0; i < CONSOLE_HELP_N; i++) CHECK(strstr(CONSOLE_HELP[i].text, TPASS) == nullptr);
-}
-
-static void t_esp32_views_render() {
-  authBoot();
-  g_cfg.modEnable = 3; g_cfg.teleDetailEvery = 1;
-  pumpClient(true, 600);
-  CHECK(g_auth.authed);
-  ballAt(30, 0.5f); g_mockModDetect[1] = true; simRun(500);
-  TeleSnapshot s; teleInit(&s);
-  // like the sketch: ask for fresh frames of each kind ("tele now <kind>") and parse what comes back
-  const char kinds[4] = {'c', 'r', 'i', 'd'};
-  Serial1.out.clear(); g_btCursor = 0;
-  for (char k : kinds) { char rq[16]; snprintf(rq, sizeof(rq), "tele now %c", k); lineBt(rq); simRun(700); }
-  for (auto& f : btFrames()) teleParseLine(&s, f.c_str(), millis());
-  CHECK(s.lastCoreMs && s.lastRecvMs && s.lastImuMs && s.lastDiagMs && s.bad == 0);
-  CHECK(btHas("OK:TELE"));
-  lineBt("tele now q"); simRun(100);                                                                                      // an unknown kind is refused, nothing breaks
-  char out[1200];
-  teleRenderView(&s, V_IR, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "A0") && strstr(out, "swing") && strstr(out, "threshold") && strstr(out, "D35 DETECTING") && strstr(out, "underside") && !strstr(out, "gyro") && !strstr(out, "motor COMMAND"));
-  teleRenderView(&s, V_IMU, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "accel g") && strstr(out, "gyro dps") && strstr(out, "ESTIMATES") && !strstr(out, "swing"));
-  teleRenderView(&s, V_MOTORS, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "motor COMMAND PWM") && strstr(out, "no encoder") && !strstr(out, "accel g"));
-  teleRenderView(&s, V_BALL, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "ball SEEN") && strstr(out, "bearing"));
-  teleRenderView(&s, V_SAFETY, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "safety OK") && strstr(out, "e-stop clear") && strstr(out, "loop avg"));
-  teleRenderView(&s, V_RAW, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "[c] {\"v\":1") && strstr(out, "[r] {\"v\":1") && strstr(out, "[d] {\"v\":1"));
-  teleRenderView(&s, V_ALL, millis(), true, out, sizeof(out));
-  CHECK(strstr(out, "mode ") && strstr(out, "receivers swing") && strstr(out, "imu "));
-  // stale data and a lost link are flagged in every view
-  teleRenderView(&s, V_IR, millis() + 20000, true, out, sizeof(out));
-  CHECK(strstr(out, "STALE"));
-  teleRenderView(&s, V_MOTORS, millis(), false, out, sizeof(out));
-  CHECK(strstr(out, "LINK LOST") && strstr(out, "no current data"));
-  TeleSnapshot empty; teleInit(&empty);
-  teleRenderView(&empty, V_IMU, 5000, true, out, sizeof(out));
-  CHECK(strstr(out, "NO DATA YET") && strstr(out, "n/a"));
-  // an unauthenticated peer cannot use the view requests
-  clientInit(&g_cl, TKEY); lineBt("AUTH OUT"); simRun(60);
-  Serial1.out.clear(); g_btCursor = 0; lineBt("tele now r"); simRun(100);
-  CHECK(btFrames().empty() && btHas("ERR:AUTH"));
-}
 
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
@@ -2976,7 +2746,6 @@ static const TestCase TESTS[] = {
   T(t_attack_side_ball),
   T(t_ring_polarity_and_calibration),
   T(t_direction_confidence),
-  T(t_esp32_protocol),
   T(t_sha256_hmac_vectors),
   T(t_auth_enforced_basics),
   T(t_auth_invalid),
@@ -2984,10 +2753,6 @@ static const TestCase TESTS[] = {
   T(t_auth_session_and_reconnect),
   T(t_auth_estop_latch),
   T(t_auth_nokey_and_open),
-  T(t_auth_console_lock),
-  T(t_auth_end_to_end),
-  T(t_esp32_console_ui),
-  T(t_esp32_views_render),
   T(t_bt_protocol),
   T(t_bt_modes_and_estop),
   T(t_bt_link_loss),

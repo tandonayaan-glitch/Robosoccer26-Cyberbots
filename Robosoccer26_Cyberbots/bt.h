@@ -1,6 +1,6 @@
 // bt.h - remote control and telemetry over the HC-05 Bluetooth Classic module on the Mega's Serial1 (TX1 = D18, RX1 = D19; see pins.h and docs/BLUETOOTH.md).
 //
-// FRAMING. The link is line oriented (the ESP32 remote sends "<command>\n"; a Serial Monitor set to "Both NL & CR" or "Newline" does the same):
+// FRAMING. The link is line oriented (the laptop remote sends "<command>\n"; a terminal set to "Both NL & CR" or "Newline" does the same):
 //   * a line of ONE character is a single-key command (case-insensitive):
 //       M manual mode   U autonomous (attack) mode   Q stop (manual stays)   W S A D Z C drive (manual only)   X EMERGENCY STOP   R clear the e-stop latch   P ping   ? status line
 //   * a line of several characters is a WORD command that goes through the same parser as the USB console (cliExecLine):

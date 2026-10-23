@@ -1,4 +1,4 @@
-# Telemetry (Mega → ESP32 over the HC-05)
+# Telemetry (Mega → Windows laptop over the HC-05)
 
 Newline-delimited JSON, protocol version `"v":1`. One object per line, ≤ 299 bytes, ASCII. Every frame has `v`, `k` (kind), `n` (sequence, wraps at 65535) and `ms` (Mega uptime in ms).
 A frame is built only when the HC-05 transmit queue is empty and the whole frame fits; a frame is never sent truncated, never queued behind another, and a stuck or absent link never blocks the control loop.
@@ -43,8 +43,5 @@ Requested on demand by the words `status` (core), `sensors` (receivers + core), 
 ```
 (`usable":8` comes from the 8-receiver test layout; on the robot it is at most 6.)
 
-## ESP32 side
-`remote_esp32/telemetry_parse.h` (portable C++, host-tested): `teleLineFeed` assembles bounded lines (an over-long line is dropped whole and the next newline resyncs), `teleParseLine` rejects anything that is not a v1
-frame with `v,k,n,ms` and counts it as bad, counts gaps in `n` as lost frames, keeps one snapshot per frame kind with the time it arrived. `teleLinkState` = `OK` (< 1.5 s), `STALE` (< 5 s), `LINK LOST`
-(≥ 5 s or the ESP32's Bluetooth is down), `NO DATA YET`. `teleRender` prints the dashboard; unavailable values print `n/a` and sections older than 1.5 s are marked `[STALE/none]`.
-There is no display on the remote: the dashboard goes to the ESP32's USB console once a second.
+## Laptop side
+`laptop/robot_protocol.py` (`parse_frame`, `FrameStore`, `render_view`): every line is parsed with Python's `json` module and accepted only if it is a version-1 frame with integer `n` (0-65535) and `ms`, a known kind and at most 400 characters; anything else counts as a bad frame. Gaps in `n` are counted as lost frames. Telemetry from a peer that has not authenticated is dropped. The views (`ir`, `imu`, `motors`, `ball`, `safety`, `raw`, `back`) print `n/a` for anything the robot did not provide and mark a section `[STALE ... s old]` when it is more than 2.5 s old; `request_frames` asks the robot for fresh frames with `tele now <c|r|i|d>`.

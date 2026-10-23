@@ -71,7 +71,7 @@ Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues
 Wheels off the ground (robot on a stand) until step 9.
 
 1. Power up with motors disconnected; `:status` -> check boot report, no faults.
-2. HC-05: wire with the divider; pair from the ESP32; send `P` -> `PONG:IDLE`.
+2. HC-05: wire with the divider; pair from the Windows laptop (`Connect.md`); send `P` -> `PONG:IDLE`.
 3. `M`, then `W/S/A/D/Z/C` with wheels lifted: check each wheel direction against the table in WIRING_MEGA.md.
 4. Release a held key: wheels stop within about 400 ms. Switch the remote off: stop within `btlink`.
 5. `X`: stops at once; `W`, `M`, `U` are refused (`ERR:ESTOP`); `R` clears; robot stays idle.
@@ -89,8 +89,8 @@ Wheels off the ground (robot on a stand) until step 12. Motor battery switch wit
 
 1. Boot with USB only (motor battery off): `status`, `sensors`, `gyro`, `motors` all answer; no fault you cannot explain; `help` lists the words.
 2. Wiring: HC-05 VCC measured with a multimeter against your breakout's rating; the divider junction at HC-05 RXD reads about 3.3 V with the Mega transmitting; no pin shared with a motor.
-3. Pairing: set the HC-05 name/PIN (AT mode, syntax per your module), power-cycle, flash the ESP32, watch `connected`; `P` → `PONG:IDLE`. Walk away until it drops: note the range, check `bt` goes 0 and `status` shows the link lost.
-4. Telemetry: frames arrive on the ESP32 console; `n` increments without gaps; check the real rate against the table in `docs/BLUETOOTH.md`; raise the HC-05 baud to 38400 and repeat.
+3. Pairing: set the HC-05 name/PIN (AT mode, syntax per your module), power-cycle, pair Windows, run `laptop_remote.py --port COMx`, type `connect`; `P` → `PONG:IDLE`. Walk away until it drops: note the range, check `bt` goes 0 and `status` shows the link lost.
+4. Telemetry: frames arrive in the laptop client (`ir`, `imu` views); `n` increments without gaps; check the real rate against the table in `docs/BLUETOOTH.md`; raise the HC-05 baud to 38400 and repeat.
 5. Receivers: with no ball, `calibrate`; then `sensors` with the ball at 8 positions around the robot. Write the bearing of each receiver down and enter it with `:ring bearing <n> <deg>`, `:save`. Confirm telemetry `map` = `operator` and that the bearing follows the ball. Look for blind arcs, and for ambiguity when the ball is beside two receivers.
 6. Receiver polarity: with a flashlight on one receiver the junction voltage and the swing must rise; if not, check the pinout (wiring doc).
 7. Underside sensor D40: watch `:raw` with and without the ball; set `underlow`; confirm `under_ok` stays 1.

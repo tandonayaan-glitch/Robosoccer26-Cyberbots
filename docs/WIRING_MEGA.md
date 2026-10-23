@@ -7,7 +7,7 @@ Nothing in this document has been verified on the physical robot. A firmware tha
 
 | Qty | Part | Notes |
 |---:|---|---|
-| 1 | Arduino Mega 2560 (ATmega2560, 16 MHz, 5 V logic) | replaces the ESP-32S; the ESP32 firmware is kept in git as commit `1963a3f` (local tag `esp32-final`) |
+| 1 | Arduino Mega 2560 (ATmega2560, 16 MHz, 5 V logic) | replaces the earlier controller board; that firmware is kept in git as commit `1963a3f` (local tag `esp32-final`) |
 | 2 | L298N dual H-bridge | remove the ENA / ENB jumpers so the Mega's PWM controls the enable pins |
 | 4 | BO geared DC motor + 4 mecanum wheels | roller layout X or O: `:roller X|O`, checked with `:dtest` |
 | 1 | battery pack and power switch | 3S 11.1 V nominal (12.6 V full) in the earlier notes **[?]** |
@@ -135,4 +135,4 @@ D36 is not used. Per-wheel trim: `wscalefl/fr/bl/br`.
 | MPU6050 | SDA D20, SCL D21 | |
 | Motors | D22–D29 direction, D5 D6 D9 D10 PWM | unchanged |
 
-Serial2 (D16/D17) and Serial3 (D14/D15) are also free; Serial1 was kept. The ESP32 connects over the air, not by wire.
+Serial2 (D16/D17) and Serial3 (D14/D15) are also free; Serial1 was kept. The Windows laptop connects over the air to the HC-05; nothing else is wired.

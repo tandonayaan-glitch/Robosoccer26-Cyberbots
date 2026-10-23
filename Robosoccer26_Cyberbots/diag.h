@@ -16,7 +16,7 @@ static MotionDiag g_motion;
 
 static bool modeCommandsMotion() { return g_autoEnabled || g_defendEnabled || g_navState == NAV_MANUAL || g_navState == NAV_TEST; }
 
-// The five operating modes the ESP32 sees (plus FAULT). A latched emergency stop and a SAFE_STOP condition both read FAULT; `safetyText()` says which.
+// The five operating modes the laptop sees (plus FAULT). A latched emergency stop and a SAFE_STOP condition both read FAULT; `safetyText()` says which.
 static PGM_P modeName() {
   if (g_estop || g_cond == COND_SAFE_STOP || drivetrainFault()) return PSTR("FAULT");
   if (g_imu.calState == 1 || g_ringCalActive || g_imu.driftState == 1) return PSTR("CALIBRATION");

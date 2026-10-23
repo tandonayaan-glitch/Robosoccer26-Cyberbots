@@ -1,10 +1,10 @@
-// btauth.h - authentication of the Bluetooth remote (ESP32) to the robot: mutual challenge-response with HMAC-SHA-256 and a shared 32-byte key.
+// btauth.h - authentication of the Bluetooth remote (the Windows laptop, directly through the HC-05) to the robot: mutual challenge-response with HMAC-SHA-256 and a shared 32-byte key.
 //
-//   ESP32 -> Mega   AUTH                        request (starts a handshake and ENDS any current session)
-//   Mega  -> ESP32  AUTH CH <sn: 32 hex>        the Mega's challenge: 16 bytes, unique, single use, valid AUTH_CH_MS
-//   ESP32 -> Mega   AUTH RESP <cn: 32 hex> <tag: 32 hex>      cn = the ESP32's own 16-byte challenge, tag = HMAC(key, "E2M"|sn|cn)[0..16]
-//   Mega  -> ESP32  AUTH OK <tag2: 32 hex>      tag2 = HMAC(key, "M2E"|cn|sn)[0..16]  (the Mega proves it knows the key too)
-//   ESP32 -> Mega   AUTH OUT                    end the session (also ended by 2.5 s without a valid command, by the link timeout, by a new AUTH, or a reset)
+//   laptop -> Mega  AUTH                        request (starts a handshake and ENDS any current session)
+//   Mega -> laptop  AUTH CH <sn: 32 hex>        the Mega's challenge: 16 bytes, unique, single use, valid AUTH_CH_MS
+//   laptop -> Mega  AUTH RESP <cn: 32 hex> <tag: 32 hex>      cn = the laptop's own 16-byte challenge, tag = HMAC(key, "E2M"|sn|cn)[0..16]
+//   Mega -> laptop  AUTH OK <tag2: 32 hex>      tag2 = HMAC(key, "M2E"|cn|sn)[0..16]  (the Mega proves it knows the key too)
+//   laptop -> Mega  AUTH OUT                    end the session (also ended by 2.5 s without a valid command, by the link timeout, by a new AUTH, or a reset)
 //
 // WHAT IT GIVES: nobody who merely pairs with the HC-05 (or knows its name / PIN) can drive the robot, change modes, calibrate, write settings or clear the emergency-stop
 // latch; a recorded handshake cannot be replayed (the challenge is single use, time limited, and the proofs are bound to both nonces and to a direction label); the key
@@ -15,7 +15,7 @@
 //
 // The Mega has no hardware random number generator. Its challenge is HMAC(key, "NON" | boot counter | challenge counter | micros | millis) truncated to 16 bytes:
 // unpredictable to anyone without the key, and NEVER repeated because the boot counter lives in the EEPROM and increases at every power-up (a repeated challenge is what
-// would make a replay possible). The ESP32 uses its hardware RNG for its own challenge.
+// would make a replay possible). The laptop client uses the operating system's secure random generator (Python os.urandom) for its own challenge.
 #pragma once
 #include "sha256_hmac.h"
 

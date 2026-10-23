@@ -40,7 +40,7 @@ static void printHelp() {
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
   say("INFO", ":authkey <64 hex> | :authkey clear | :authkey = Bluetooth key (USB only) | :auth on|off = enforcement (off lasts until reset)");
-  say("INFO", ":tele [on|off|usb on|usb off|now] = telemetry to the ESP32 | :gyro drift [s] = stationary drift test | :motors = commanded motor state | :defend / :attack / :manual = modes (docs/DEFENDING.md)");
+  say("INFO", ":tele [on|off|usb on|usb off|now] = telemetry to the laptop | :gyro drift [s] = stationary drift test | :motors = commanded motor state | :defend / :attack / :manual = modes (docs/DEFENDING.md)");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach.");
 }
 
@@ -239,7 +239,7 @@ static void cliExecLine(char* line, uint32_t now) {
   else if (STREQ(cmd, "estop")) { navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); }
   else if (STREQ(cmd, "bt")) printBt(c, now);
   else if (STREQ(cmd, "authkey")) {                    // USB only. The key is never echoed, logged or recorded.
-    if (!t[1]) { char fp[9] = "--------"; if (g_auth.keySet) authFingerprint(fp); say("INFO", "Bluetooth key %S, fingerprint %s (compare with the ESP32 console 'FINGERPRINT')", g_auth.keySet ? PSTR("SET") : PSTR("NOT SET: the remote cannot control the robot"), fp); }
+    if (!t[1]) { char fp[9] = "--------"; if (g_auth.keySet) authFingerprint(fp); say("INFO", "Bluetooth key %S, fingerprint %s (the laptop client prints the same value)", g_auth.keySet ? PSTR("SET") : PSTR("NOT SET: the remote cannot control the robot"), fp); }
     else if (STREQ(t[1], "clear")) { authClearKey(); say("SAFETY", "Bluetooth key ERASED: the remote can no longer control the robot (X and P still work)"); }
     else if (authSetKey(t[1])) { char fp[9]; authFingerprint(fp); say("SAFETY", "Bluetooth key stored in the EEPROM, fingerprint %s. Any current session is ended.", fp); }
     else say("WARN", "key rejected: it must be exactly 64 hexadecimal digits and not all the same byte (tools/provision.py makes one)");

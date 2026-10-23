@@ -1,5 +1,5 @@
 // Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware for the ARDUINO MEGA 2560 (ATmega2560).
-// (The ESP32-S version is kept in git: commit 1963a3f.)
+// (An earlier controller version, on a different board, is kept in git: commit 1963a3f.)
 //
 // 4x mecanum (2x L298N) | 6 phototransistor receivers on A0..A5 | 2 IR obstacle modules (D34, D35) | HC-05 on Serial1 (D18/D19) | underside sensor D40 | MPU6050 on I2C (D20/D21)
 // Safe by construction: motors off at boot, autonomy starts by itself after a clean boot (autostart, default on), never with a fault, every fault

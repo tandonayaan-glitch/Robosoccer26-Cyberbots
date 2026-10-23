@@ -1,7 +1,7 @@
 # Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware (Arduino Mega 2560)
 
-Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, six 5 mm IR phototransistor receivers (A0–A5, each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an underside ball-position sensor (D40), an MPU6050 for a relative heading, an HC-05 Bluetooth module (Serial1) talking to an **ESP32 remote**, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
-Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **DEFEND** (`defend`: heading hold + sideways intercept/block), **MANUAL**, **CALIBRATION**, **IDLE**, **FAULT**. **No multiplexer. No kicker, no encoders, no current sensors.** The earlier ESP32-S version is preserved in git as commit `1963a3f` (local tag `esp32-final`).
+Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, six 5 mm IR phototransistor receivers (A0–A5, each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an underside ball-position sensor (D40), an MPU6050 for a relative heading, an HC-05 Bluetooth module (Serial1) that a **Windows laptop** connects to directly, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
+Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **DEFEND** (`defend`: heading hold + sideways intercept/block), **MANUAL**, **CALIBRATION**, **IDLE**, **FAULT**. **No multiplexer. No kicker, no encoders, no current sensors.** An earlier version for a different controller board is preserved in git as commit `1963a3f`.
 
 > **Status – read this first.**
 >
@@ -9,7 +9,7 @@ Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **D
 > |---|---|
 > | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 125,542 B flash (49 %), 5,031 B static RAM (61 %), 3,161 B left for the stack |
 > | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM, Bluetooth) | 80 test cases, 2,734 checks, all pass, ASan/UBSan clean; static analysis (cppcheck, clang-tidy, valgrind) clean |
-> | **ESP32 sketch** | **not built for an ESP32** (no toolchain). Its protocol parser is unit-tested on the host; the sketch is only type-checked against host stubs (`tools/esp32_syntax_check.sh`) |
+> | **Python laptop client** (`laptop/`) | 34 tests pass against the real firmware logic in simulation (cross-checks Python's `hmac` with the firmware's HMAC) |
 > | Upload / run on a Mega, HC-05 pairing, range, receivers, modules, underside sensor, motors, power, MPU6050 on the real robot | **not done** – every behaviour below is unverified on hardware |
 >
 > **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md` and the staged plan in `docs/CALIBRATION_AND_TEST_PLAN.md`. Details: `docs/VERIFICATION_REPORT.md`.
@@ -17,7 +17,7 @@ Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **D
 ## Commands (Serial Monitor 115200 baud, line ending **Newline** or **Both NL & CR**; the same words work over Bluetooth)
 
 `defend` · `attack` · `manual` · `stop` (or `idle`) · `status` · `sensors` · `gyro` (`gyro drift [s]`, `gyro cal`, `gyro stop`) · `calibrate` · `motors` · `tele` · `help`; emergency stop `!` (USB) / `X` (Bluetooth).
-**Bluetooth control needs authentication** (`docs/BLUETOOTH.md`, quick start `docs/ESP32_QUICKSTART.md`): on the ESP32's Serial Monitor type `esp32connect <passcode>`; views `ir`, `imu`, `motors`, `ball`, `safety`, `back`; `esp32disconnect`; `help`. One-time setup: `python3 tools/provision.py --mega-port <port>`.
+**Bluetooth control needs authentication** (`Connect.md`, `docs/BLUETOOTH.md`): `python laptop\laptop_remote.py --port COMx`, then `connect`; views `ir`, `imu`, `motors`, `ball`, `safety`, `back`; `x` = emergency stop. One-time key setup: `python tools\provision.py --mega-port COMy`.
 Classic single keys (`f b l r q e s a h i m d g t ?`) work **when sent alone**; `:set`, `:get`, `:save`, `:ring`, `:mod`, `:log`, … are unchanged. A multi-letter burst that is not a known word executes nothing. Full list: `help`; protocol: `docs/BLUETOOTH.md`; telemetry: `docs/TELEMETRY.md`; defending: `docs/DEFENDING.md`.
 
 **Startup:** after a clean boot the robot starts ATTACK by itself after 1.5 s (`autostart`, team decision; `:set autostart 0` + `:save` for always-idle). DEFEND is never started automatically. Bluetooth is not required.
@@ -28,12 +28,12 @@ Classic single keys (`f b l r q e s a h i m d g t ?`) work **when sent alone**; 
 tools/avr_build.sh            # real ATmega2560 compile (avr-gcc + Arduino AVR core from Debian packages); never uploads
 test/run_tests.sh             # host simulation, one process per test case, ASan/UBSan
 test/static_analysis.sh       # cppcheck, clang-tidy, valgrind
-tools/esp32_syntax_check.sh   # type-check of the ESP32 sketch against host STUBS (not an ESP32 build)
+python -m unittest discover -s laptop/tests -p "test_*.py"   # Python client vs the firmware simulator (test/run_tests.sh builds it first)
 ```
-Arduino IDE: open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino`, board "Arduino Mega or Mega 2560". ESP32: open `remote_esp32/remote_esp32.ino`, an **original ESP32** board (Classic Bluetooth), partition "Huge APP".
+Arduino IDE: open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino`, board "Arduino Mega or Mega 2560". Windows laptop: `python -m pip install -r laptop\requirements.txt`.
 
 ## Unverified hardware assumptions (all of them)
-HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · phototransistor pinout and junction voltages · where each receiver looks (angles are a guess until `:ring bearing`) · receiver response to the real ball · D40 sensor type and active level · module polarity · MPU6050 axis signs, pull-ups and supply · motor directions and the power supply · strafe speed/slip · everything about defending or shooting a real ball · Bluetooth range · the exact ESP32 board.
+HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · phototransistor pinout and junction voltages · where each receiver looks (angles are a guess until `:ring bearing`) · receiver response to the real ball · D40 sensor type and active level · module polarity · MPU6050 axis signs, pull-ups and supply · motor directions and the power supply · strafe speed/slip · everything about defending or shooting a real ball · Bluetooth range and pairing with Windows.
 
 ## Pin map (fixed in `pins.h`)
 
@@ -57,7 +57,7 @@ Battery + goes through the power switch to both L298N motor-supply inputs; **all
 
 ## Hardware (what the firmware is written for)
 
-1 Arduino Mega 2560 · 2 L298N · 4 BO motors + 4 mecanum wheels · battery pack + power switch · 6 IR phototransistors (5 mm, 2-pin) · 2 IR obstacle modules · 1 underside IR sensor · 1 HC-05 · (ESP32 remote) · 1 MPU6050 · breadboard, wires, resistors.
+1 Arduino Mega 2560 · 2 L298N · 4 BO motors + 4 mecanum wheels · battery pack + power switch · 6 IR phototransistors (5 mm, 2-pin) · 2 IR obstacle modules · 1 underside IR sensor · 1 HC-05 · Windows laptop with Python 3 · 1 MPU6050 · breadboard, wires, resistors.
 
 ## How the ball is sensed (`docs/BALL_SENSING.md`)
 
@@ -176,6 +176,6 @@ tools/avr_build.sh         # REAL ATmega2560 compile + link, flash / RAM report 
 
 ## Bluetooth remote, underside sensor, re-attack (update)
 
-HC-05 on Serial1 (D18/D19) with an ESP32 remote (`remote_esp32/`, not compiled); protocol and wiring in `docs/BLUETOOTH.md`. Underside ball-position sensor on D40. After a failed shot the robot judges, reverses a bounded distance and re-attacks at most `remax` times, then pauses. Host tests: `test/run_tests.sh` (65 cases); AVR build: `tools/avr_build.sh`. Nothing in this update has been tested on the robot.
+HC-05 on Serial1 (D18/D19), controlled from a Windows laptop (`laptop/`); protocol and wiring in `docs/BLUETOOTH.md`. Underside ball-position sensor on D40. After a failed shot the robot judges, reverses a bounded distance and re-attacks at most `remax` times, then pauses. Host tests: `test/run_tests.sh` (65 cases); AVR build: `tools/avr_build.sh`. Nothing in this update has been tested on the robot.
 
 **Startup is automatic:** after a clean boot the robot begins autonomous mode by itself after 1.5 s (`autostart`, `startdelay`); no serial command and no Bluetooth link needed. See `docs/BLUETOOTH.md` ("Startup") for cancelling and switching modes safely.

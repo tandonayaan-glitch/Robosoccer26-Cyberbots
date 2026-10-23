@@ -1,6 +1,6 @@
 // pins.h - fixed hardware map for the ARDUINO MEGA 2560 (ATmega2560). Pin numbers are the Arduino "D" numbers (D22 = 22, A0 = analog 0).
 // They are compile-time constants: nothing in the runtime configuration (Serial commands, EEPROM settings) can change a pin.
-// (The ESP32-S version of this project is kept in git: commit 1963a3f.)
+// (An earlier controller version, on a different board, is kept in git: commit 1963a3f.)
 #pragma once
 #include <stdint.h>
 
@@ -63,7 +63,7 @@ static const uint8_t PIN_MOD[2] = {P_MOD0, P_MOD1};
 static const uint8_t MOD_COUNT = 2;
 
 // ---- HC-05 Bluetooth Classic module (robot side), on the Mega's hardware UART1 ---------------------------------------------------
-// Serial1 = TX1 on D18, RX1 on D19. These two pins are FREE in this pin map (the front-left motor is on D26/D27; the "D18/D19" of the old ESP32 numbering was a
+// Serial1 = TX1 on D18, RX1 on D19. These two pins are FREE in this pin map (the front-left motor is on D26/D27; the "D18/D19" of an earlier board numbering was a
 // different board), and D10 stays the back-left motor PWM pin. USB debugging (Serial on D0/D1) is unaffected.
 //   Mega TX1 (D18, 5 V) ---[1 kOhm]---+--- HC-05 RXD   (the 2 kOhm below makes a 5 V -> 3.3 V divider: 5 x 2/3 = 3.33 V)
 //                                     +---[2 kOhm]--- GND

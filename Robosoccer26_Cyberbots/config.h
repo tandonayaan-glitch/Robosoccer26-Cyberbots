@@ -125,7 +125,7 @@ struct Config {
   // ---- recovery ----
   uint16_t recoverVerifyMs;
 
-  // ---- telemetry to the ESP32 over the HC-05 ----
+  // ---- telemetry to the laptop over the HC-05 ----
   uint8_t teleEnable;            // 1 = send JSON telemetry frames over Bluetooth
   uint8_t teleHz;                // requested frames per second (the real rate is limited by the link speed, see telemetry.h)
   uint8_t teleDetailEvery;       // every Nth frame is the long "detail" frame, the others are the short "core" frame

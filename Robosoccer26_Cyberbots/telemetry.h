@@ -1,4 +1,4 @@
-// telemetry.h - JSON-lines telemetry from the Mega to the ESP32 over the HC-05.
+// telemetry.h - JSON-lines telemetry from the Mega to the laptop over the HC-05.
 //
 // One frame = one line of JSON ending in '\n', protocol version "v":1, sequence "n" (wraps at 65535), uptime "ms". Four frame kinds so each stays under 300 bytes:
 //   "k":"c"  core      mode, safety, link, ball, obstacle / underside sensors, motor commands

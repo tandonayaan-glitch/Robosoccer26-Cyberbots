@@ -1,4 +1,4 @@
-// logger.h - diagnostics over Serial. The ESP32 version wrote CSV files to flash and kept a RAM flight recorder; the Mega has 8 KB of RAM and no
+// logger.h - diagnostics over Serial. An earlier controller version wrote CSV files to flash and kept a RAM flight recorder; the Mega has 8 KB of RAM and no
 // filesystem, so the same CSV row format is STREAMED over the USB serial port while ':diag on' is active (capture it in the Serial Monitor / a terminal).
 // Events (faults, recoveries, navigation transitions) are streamed as rows of type E/F/R/N when ':diag on' is active.
 #pragma once

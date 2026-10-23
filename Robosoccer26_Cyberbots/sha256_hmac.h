@@ -1,10 +1,9 @@
-// sha256_hmac.h - SHA-256 (FIPS 180-4) and HMAC-SHA-256 (RFC 2104) in plain C++, small enough for the ATmega2560 and identical on the ESP32 and the host tests.
-// This file exists in TWO identical copies (Robosoccer26_Cyberbots/ and remote_esp32/) because an Arduino sketch can only include files from its own folder;
-// test/run_tests.sh fails if the copies differ. It is verified against the NIST / RFC 4231 test vectors (t_sha256_hmac_vectors). It is NOT a substitute for a
+// sha256_hmac.h - SHA-256 (FIPS 180-4) and HMAC-SHA-256 (RFC 2104) in plain C++, small enough for the ATmega2560.
+// The laptop client uses Python's standard hmac / hashlib instead (an independent implementation, so the two are cross-checked in laptop/tests/). Verified against the NIST / RFC 4231 test vectors (t_sha256_hmac_vectors). It is NOT a substitute for a
 // reviewed crypto library: the Arduino AVR core ships none, so this minimal, standard algorithm is used for the challenge-response only (see docs/BLUETOOTH.md).
 // No dynamic memory; the message schedule is a rolling 16-word window (64 bytes of stack) to suit the 8 KB of RAM.
 #pragma once
-#ifndef RS_SHA256_HMAC_H            // (also a classic guard: the host tests see both identical copies)
+#ifndef RS_SHA256_HMAC_H            // classic include guard
 #define RS_SHA256_HMAC_H
 #include <stdint.h>
 #include <stddef.h>
@@ -127,9 +126,9 @@ __attribute__((unused)) static void bytesToHex(const uint8_t* in, size_t n, char
   out[2 * n] = 0;
 }
 
-// ---- the challenge-response used between the ESP32 and the Mega -------------------------------------------------------------------------------
-// sn = Mega's challenge (16 bytes), cn = ESP32's challenge (16 bytes). Tags are the first 16 bytes of an HMAC-SHA-256 keyed with the shared 32-byte key.
-//   ESP32 -> Mega proof : HMAC(key, "E2M" | sn | cn)      Mega -> ESP32 proof : HMAC(key, "M2E" | cn | sn)
+// ---- the challenge-response used between the laptop and the Mega -------------------------------------------------------------------------------
+// sn = Mega's challenge (16 bytes), cn = the laptop's challenge (16 bytes). Tags are the first 16 bytes of an HMAC-SHA-256 keyed with the shared 32-byte key.
+//   laptop -> Mega proof : HMAC(key, "E2M" | sn | cn)     Mega -> laptop proof : HMAC(key, "M2E" | cn | sn)
 // The different labels stop a proof for one direction being reflected back as the other.
 static const size_t AUTH_NONCE = 16, AUTH_TAG = 16, AUTH_KEY = 32;
 __attribute__((unused)) static void authTag(const uint8_t key[32], const char* label3, const uint8_t* first16, const uint8_t* second16, uint8_t tag[16]) {

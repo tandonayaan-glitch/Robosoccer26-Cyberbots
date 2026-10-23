@@ -43,7 +43,7 @@ About 298 twelve-byte records in EEPROM bytes 512–4095 (the configuration uses
 
 ## 6. Output on the Mega (no flash logging)
 
-The ESP32 version wrote CSV files to flash with a RAM flight recorder. The Mega has 8 KB of RAM and no filesystem, so:
+An earlier controller version wrote CSV files to flash with a RAM flight recorder. The Mega has 8 KB of RAM and no filesystem, so:
 
 * All text goes through a 512-byte non-blocking queue; whole lines are dropped (and counted in the `h` report) rather than ever blocking the control loop. Long reports (`h`, `?`, `i`, `d`, `m`, `t`) are **paced**: they are printed in several passes as the queue drains.
 * `:diag on` streams CSV rows over Serial every `snapms` (250 ms) plus event rows; save the Serial Monitor output to a file to keep it. `:diag off` stops it. Header:
