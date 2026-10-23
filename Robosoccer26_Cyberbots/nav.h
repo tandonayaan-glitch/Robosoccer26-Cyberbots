@@ -12,6 +12,8 @@ static bool g_autoEnabled = false;          // RAM only: every reset starts with
 static bool g_estop = false;                // emergency-stop LATCH (RAM only): while set, no movement and no autonomy can be started from anywhere
 static bool g_autoStartPending = false;       // boot decided to start autonomy by itself once the start delay has passed
 static uint32_t g_autoStartAtMs = 0;
+static bool g_defendEnabled = false;          // defend mode is active (defend.h); exclusive with autonomous attack and manual driving
+static void defendTick(const Config& c, uint32_t now);
 static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
 static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
 static uint8_t g_rePhase = 0, g_reCount = 0, g_appTimeouts = 0;
@@ -97,6 +99,7 @@ static float navSensorScale(const Config& c) {
 static void navStop(PGM_P why) {
   motorsStopNow();
   g_autoEnabled = false;
+  g_defendEnabled = false;
   g_mtest.state = 0;
   g_hdgErr = NAN;
   if (g_cond == COND_SAFE_STOP) navSetState(NAV_SAFE_STOP, why);
@@ -136,6 +139,8 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
   if (ringCountUsable(c) == 0) { say("SAFETY", "autonomous REFUSED: no usable ball-ring channel (':ring' shows which are off or saturated)"); return false; }
   if (!c.ringCalDone) { say("SAFETY", "autonomous REFUSED: ring noise floor not calibrated. Ball OFF, then ':ring cal noise' and ':save' (docs/RING_AND_MODULES.md)."); return false; }
   if (!modEnabled(c, 0)) { say("SAFETY", "autonomous REFUSED: IR module 0 (front, shooting position) is switched off (':mod on 0'): the robot could not tell when the ball is in place"); return false; }
+  g_defendEnabled = false;
+  g_remoteManual = false;
   g_autoEnabled = true;
   g_autoStartMs = now ? now : 1u;
   g_reCount = 0; g_appTimeouts = 0; g_reLockUntil = 0; g_waitHoldUntil = 0;
@@ -394,6 +399,8 @@ static void navTick(const Config& c, uint32_t now) {
       else if (elapsedMs(now, g_navSince) > c.researchMs) { g_searchAttempt = 1; navEnterSearch(PSTR("fresh search after the pause")); }   // never stay blind for good
       break;
 
+    case NAV_DEFEND: defendTick(c, now); break;
+
     case NAV_COUNT: break;
 
     case NAV_TEST: {
@@ -439,6 +446,7 @@ static void navManual(const Config& c, char key, uint32_t now, uint16_t holdMs =
   if (navEstopRefuses(PSTR("manual motion"))) return;
   if (drivetrainFault()) { say("SAFETY", "manual motion REFUSED: drivetrain fault active (use :recover after fixing)"); return; }
   g_autoEnabled = false;
+  g_defendEnabled = false;
   g_mtest.state = 0;
   g_hdgErr = NAN;
   float vx = 0, vy = 0, w = 0;
@@ -509,3 +517,6 @@ static void onCondChange(Cond from, Cond to) {
     say("INFO", "operating condition %S -> %S", condName(from), condName(to));
   }
 }
+
+#include "defend.h"
+#include "diag.h"

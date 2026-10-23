@@ -1,7 +1,7 @@
 // Robosoccer26_Cyberbots - RoboCup Junior soccer robot firmware for the ARDUINO MEGA 2560 (ATmega2560).
 // (The ESP32-S version is kept in git: commit 1963a3f.)
 //
-// 4x mecanum (2x L298N) | 2 phototransistor receivers on A0 / A1 (more can be added on A2..A7) | 2 IR obstacle modules (D34, D35) | HC-05 on Serial1 (D18/D19) | underside sensor D40 | MPU6050 on I2C (D20/D21)
+// 4x mecanum (2x L298N) | 6 phototransistor receivers on A0..A5 | 2 IR obstacle modules (D34, D35) | HC-05 on Serial1 (D18/D19) | underside sensor D40 | MPU6050 on I2C (D20/D21)
 // Safe by construction: motors off at boot, autonomy starts by itself after a clean boot (autostart, default on), never with a fault, every fault
 // degrades or stops instead of guessing. See docs/ for wiring, power, calibration and the test plan.
 //
@@ -53,14 +53,14 @@ void setup() {
 
   recInit();
   recAdd(REC_BOOT, 0);
-  btBegin();
-  say("BOOT", "Bluetooth (HC-05) on Serial1 D18/D19 at %lu baud: %S", UL(BT_BAUD), g_cfg.btEnable ? PSTR("listening") : PSTR("disabled"));
+  btBegin(g_cfg);
+  say("BOOT", "Bluetooth (HC-05) on Serial1 D18/D19 at %lu baud: %S", UL(btBaudNow(g_cfg)), g_cfg.btEnable ? PSTR("listening") : PSTR("disabled"));
 
   // Drivetrain PWM check (duty 0, outputs still disabled).
   bool pwmOk = motorsAttachPwm(g_cfg);
   say("BOOT", "motor PWM pins: %S (D%u D%u D%u D%u)", pwmOk ? PSTR("OK") : PSTR("NOT PWM CAPABLE"), (unsigned)WHEEL_PINS[0].en, (unsigned)WHEEL_PINS[1].en, (unsigned)WHEEL_PINS[2].en, (unsigned)WHEEL_PINS[3].en);
 
-  // Ball receivers (analog inputs A0, A1, ...) and the two IR modules (D34 / D35).
+  // Ball receivers (analog inputs A0..A5) and the two IR modules (D34 / D35).
   ringBegin();
   say("BOOT", "ball receivers: %u of %u enabled, noise floor %S | IR modules: front D%u %S, second D%u %S", (unsigned)ringCountEnabled(g_cfg), (unsigned)RING_CH_MAX,
       g_cfg.ringCalDone ? PSTR("calibrated") : PSTR("NOT CALIBRATED"), (unsigned)PIN_MOD[0], modEnabled(g_cfg, 0) ? PSTR("on") : PSTR("off"), (unsigned)PIN_MOD[1], modEnabled(g_cfg, 1) ? PSTR("on") : PSTR("off"));
@@ -115,6 +115,7 @@ void loop() {
 
   uint32_t gap = (uint32_t)(nowUs - g_lastLoopUs);
   g_lastLoopUs = nowUs;
+  g_tele.loopAvgUs = (g_tele.loopAvgUs * 15u + gap) / 16u;
   if (gap > g_loopMaxUs) g_loopMaxUs = gap;
   if (gap > g_loopMaxEverUs) g_loopMaxEverUs = gap;
   if (gap > LOOP_STALL_FATAL_MS * 1000u) {
@@ -150,11 +151,13 @@ void loop() {
     g_lastCtlMs = now;
     navTick(g_cfg, now);
     motorsUpdate(g_cfg, now);
+    motionService(g_cfg, now);
   }
 
   reportService(g_cfg, now);
   logService(g_cfg, now);
   streamService(g_cfg, now);
+  teleService(g_cfg, now);
   outPump();
 }
 

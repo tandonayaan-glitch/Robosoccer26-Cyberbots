@@ -38,7 +38,8 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
 
 // ---- Ball receivers: 5 mm phototransistors, each on its OWN analog input ---------------------------------------
 // Circuit per receiver: collector -> regulated 5 V, emitter -> signal junction, 10 kOhm from the junction to GND, junction -> the analog input.
-// Receiver 0 = A0 (first receiver), receiver 1 = A1 (second receiver). A2..A7 are reserved for more receivers (off until fitted and switched on with ':ring on <n>').
+// Receiver n = An for A0..A5 (six fitted receivers, each with its own 10 kOhm). A6, A7 are spare (off until fitted and switched on with ':ring on <n>'). Where each receiver LOOKS is not known to the
+// firmware: the default angles 0,60,120,180,-120,-60 are an even-spacing guess, flagged `bearingsSet = 0` until you enter the real ones with ':ring bearing <n> <deg>'.
 // The ATmega2560 ADC is 10-bit (readings 0..1023, 5 V reference). Every receiver has its own wire and its own load resistor: the signals are never joined.
 #define P_RECV0 A0
 #define P_RECV1 A1
@@ -50,7 +51,7 @@ static const WheelPins WHEEL_PINS[WHEEL_COUNT] = {
 #define P_RECV7 A7
 static const uint8_t PIN_RECV[8] = {P_RECV0, P_RECV1, P_RECV2, P_RECV3, P_RECV4, P_RECV5, P_RECV6, P_RECV7};
 static const uint8_t RING_CH_MAX = 8;              // analog inputs A0..A7 are supported
-static const uint8_t RING_CH_FIXED = 2;            // A0 and A1 are fitted; A2..A7 are optional
+static const uint8_t RING_CH_FIXED = 6;            // A0..A5 are fitted; A6, A7 are spare
 
 // ---- Two IR obstacle modules (3-pin: VCC / GND / OUT, own IR LED + photodiode + LM393, digital output) ---------
 // Module 0 sits at the front and reports "the ball is in the right position to shoot" (trimmer sets the distance). Module 1 is the second module

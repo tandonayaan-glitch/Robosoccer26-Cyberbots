@@ -81,3 +81,23 @@ Wheels off the ground (robot on a stand) until step 9.
 9. Floor, low speed: `U` with the ball ahead; check approach, hold, shot burst.
 10. Failed push: place the ball so the push fails; confirm at most `remax` reverse tries, then a pause (`recooldown`), and a manual `X` during a reverse.
 11. Search: hide the ball; confirm search sweeps, WAIT, fresh search (`researchms`), give-up (`giveupms`).
+
+
+## Staged physical test plan for the intelligence / telemetry / defending update (NONE of these steps has been done on the robot)
+
+Wheels off the ground (robot on a stand) until step 12. Motor battery switch within reach. Stop at the first surprise.
+
+1. Boot with USB only (motor battery off): `status`, `sensors`, `gyro`, `motors` all answer; no fault you cannot explain; `help` lists the words.
+2. Wiring: HC-05 VCC measured with a multimeter against your breakout's rating; the divider junction at HC-05 RXD reads about 3.3 V with the Mega transmitting; no pin shared with a motor.
+3. Pairing: set the HC-05 name/PIN (AT mode, syntax per your module), power-cycle, flash the ESP32, watch `connected`; `P` → `PONG:IDLE`. Walk away until it drops: note the range, check `bt` goes 0 and `status` shows the link lost.
+4. Telemetry: frames arrive on the ESP32 console; `n` increments without gaps; check the real rate against the table in `docs/BLUETOOTH.md`; raise the HC-05 baud to 38400 and repeat.
+5. Receivers: with no ball, `calibrate`; then `sensors` with the ball at 8 positions around the robot. Write the bearing of each receiver down and enter it with `:ring bearing <n> <deg>`, `:save`. Confirm telemetry `map` = `operator` and that the bearing follows the ball. Look for blind arcs, and for ambiguity when the ball is beside two receivers.
+6. Receiver polarity: with a flashlight on one receiver the junction voltage and the swing must rise; if not, check the pinout (wiring doc).
+7. Underside sensor D40: watch `:raw` with and without the ball; set `underlow`; confirm `under_ok` stays 1.
+8. IMU: robot still: `gyro cal`; `gyro drift 60` and note deg/min; tilt the robot by hand: roll/pitch follow gravity, yaw does not (it must not); move it during a drift test: the test must fail.
+9. Manual: `manual`, then W/S/A/D/Z/C over Bluetooth with wheels lifted: directions; release the button (stop within ~0.4 s); switch the remote off (link lost, stop).
+10. Emergency stop: from manual, attack and defend, send `X` and `!`: all four wheels stop at once and nothing restarts until `R`.
+11. Motion watchdog: hold a command past `maxmovesec` (lower it to 5 s for the test): the robot stops and says so.
+12. Floor, low `maxauto`, ball held by hand: `attack`: turn toward the ball, no charging at a ball on the side, recovery when the ball is hidden.
+13. `defend` with a ball rolled slowly across the front, then toward the robot: watch the printed state transitions and telemetry `sub`; note how far it strafes (compare with `deflatms`), whether it overshoots, and tune `defspeed`, `defaligndeg`, `defslope`, `defstrafems`.
+14. Never claim blocking works until a real ball has been blocked repeatedly.

@@ -32,6 +32,16 @@ struct ImuState {
   uint32_t samples, errCount, timeoutCount, invalidCount, recoveries, gaps, sameFrames, initAttempts;
   int16_t lastRaw[7];
   bool hadFault;
+  // ---- estimates added for telemetry / diagnostics (all RELATIVE ESTIMATES; the body-axis signs of gx/gy are not verified on the robot) ----
+  float roll, pitch;                // degrees: gyro integrated, corrected slowly towards the accelerometer's gravity direction while the specific force is ~1 g
+  bool tiltValid;
+  float calMean, calSd;             // dps: result of the last accepted bias calibration (mean of gz, standard deviation of the samples)
+  uint32_t calAtMs;                 // millis() when the last accepted calibration finished (0 = never)
+  // stationary drift diagnostic (':gyro drift'): 0 idle, 1 running, 2 done, 3 failed
+  uint8_t driftState, driftWhy;     // why: 1 motors moving, 2 gyro not still, 3 sensor lost, 4 tilted/shaken (accel), 5 stopped by the operator
+  uint32_t driftStartMs, driftDurMs, driftN;
+  float driftYaw0, driftSum, driftSumSq, driftAccMin, driftAccMax;
+  float driftMeanDps, driftSdDps, driftDeltaDeg, driftRateDegMin;
 };
 static ImuState g_imu;
 static bool g_imuWireStarted = false;
@@ -119,6 +129,40 @@ static void imuStartCalibration() {
   g_imu.calState = 1; g_imu.calN = 0; g_imu.calSum = 0; g_imu.calSumSq = 0;
 }
 
+// Yaw uncertainty ESTIMATE: only the standard error of the bias measurement times the time since the reference was zeroed. It does NOT include the bias
+// instability (temperature, vibration), which is why a real drift measurement (':gyro drift') matters more than this number.
+static float imuBiasSeDps() { return g_imu.calN > 0 && g_imu.calibrated ? g_imu.calSd / sqrtf((float)g_imu.calN) : 0.0f; }
+static uint32_t g_imuZeroAtMs = 0;
+static float imuYawUncertDeg(uint32_t nowMs) { return imuBiasSeDps() * (float)elapsedMs(nowMs, g_imuZeroAtMs) / 1000.0f; }
+
+// Stationary drift diagnostic. Started by ':gyro drift [s]' (the robot must be still and the motors stopped); it measures the mean raw gyro-Z rate over the
+// window (= the bias the gyro actually has now) and the change of the integrated yaw. Aborted if anything moves.
+static bool imuDriftStart(const Config& c, uint32_t nowMs, uint32_t durMs, bool motorsStopped) {
+  if (!g_imu.present || !g_imu.ok || !g_imu.calibrated || g_imu.calState == 1 || !motorsStopped) return false;
+  g_imu.driftState = 1; g_imu.driftWhy = 0; g_imu.driftStartMs = nowMs ? nowMs : 1u; g_imu.driftDurMs = durMs;
+  g_imu.driftN = 0; g_imu.driftSum = g_imu.driftSumSq = 0; g_imu.driftYaw0 = g_imu.yaw; g_imu.driftAccMin = 9.0f; g_imu.driftAccMax = 0.0f;
+  (void)c;
+  return true;
+}
+static void imuDriftFail(uint8_t why) { if (g_imu.driftState == 1) { g_imu.driftState = 3; g_imu.driftWhy = why; } }
+static void imuDriftSample(const Config& c, uint32_t nowMs, bool stationary) {
+  if (g_imu.driftState != 1) return;
+  if (!stationary) { imuDriftFail(1); return; }
+  float mag = sqrtf(g_imu.ax * g_imu.ax + g_imu.ay * g_imu.ay + g_imu.az * g_imu.az);
+  if (mag < g_imu.driftAccMin) g_imu.driftAccMin = mag;
+  if (mag > g_imu.driftAccMax) g_imu.driftAccMax = mag;
+  g_imu.driftSum += g_imu.gz; g_imu.driftSumSq += g_imu.gz * g_imu.gz; g_imu.driftN++;
+  if (elapsedMs(nowMs, g_imu.driftStartMs) < g_imu.driftDurMs) return;
+  float n = (float)g_imu.driftN;
+  float mean = g_imu.driftSum / n, var = g_imu.driftSumSq / n - mean * mean;
+  g_imu.driftMeanDps = mean; g_imu.driftSdDps = sqrtf(var > 0 ? var : 0);
+  g_imu.driftDeltaDeg = angDiffDeg(g_imu.driftYaw0, g_imu.yaw) * -1.0f;      // yaw now minus yaw at the start
+  g_imu.driftRateDegMin = g_imu.driftDeltaDeg * 60000.0f / (float)elapsedMs(nowMs, g_imu.driftStartMs);
+  if (g_imu.driftSdDps > c.imuStillDps) g_imu.driftState = 3, g_imu.driftWhy = 2;
+  else if (g_imu.driftAccMax - g_imu.driftAccMin > 0.15f) g_imu.driftState = 3, g_imu.driftWhy = 4;
+  else g_imu.driftState = 2;
+}
+
 // Plausibility of one raw frame (7 x int16: ax ay az temp gx gy gz).
 static bool imuFrameValid(const int16_t r[7]) {
   bool allZero = true, allFF = true;
@@ -140,7 +184,7 @@ static bool imuFresh(const Config& c, uint32_t nowMs) {
 static bool imuHeadingUsable(const Config& c, uint32_t nowMs) {
   return c.hdgEnable && g_imu.present && g_imu.calibrated && g_imu.yawValid && imuFresh(c, nowMs);
 }
-static void imuZeroYaw() { g_imu.yaw = 0; g_imu.yawValid = g_imu.calibrated; g_imu.yawEpoch++; }
+static void imuZeroYaw() { g_imu.yaw = 0; g_imu.yawValid = g_imu.calibrated; g_imu.yawEpoch++; g_imuZeroAtMs = millis(); }
 
 // Call every loop. Reads at most every 5 ms; I2C timeouts are bounded by Wire.setTimeOut().
 static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
@@ -205,8 +249,9 @@ static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
       float mean = g_imu.calSum / (float)g_imu.calN;
       float var = g_imu.calSumSq / (float)g_imu.calN - mean * mean;
       float sd = sqrtf(var > 0 ? var : 0);
-      if (sd <= c.imuStillDps && absf(mean) < 20.0f) {
+      if (sd <= c.imuStillDps && absf(mean) < c.imuMaxBiasDps) {
         g_imu.bias = mean; g_imu.calibrated = true; g_imu.calState = 2; g_imu.yaw = 0; g_imu.yawValid = true; g_imu.yawEpoch++;
+        g_imu.calMean = mean; g_imu.calSd = sd; g_imu.calAtMs = nowMs ? nowMs : 1u; g_imuZeroAtMs = nowMs;
         say("INFO", "IMU gyro bias %.3f dps (sd %.3f) measured; heading reference zeroed", mean, sd);
       } else {
         g_imu.calState = 3;
@@ -217,7 +262,18 @@ static void imuUpdate(const Config& c, uint32_t nowMs, bool stationary) {
   }
   if (!g_imu.ok || !g_imu.calibrated) return;
   float rate = g_imu.gz - g_imu.bias;
-  if (stationary && absf(rate) < 1.5f) g_imu.bias += 0.0005f * rate;   // slow drift tracking, only at rest
+  if (g_imu.driftState != 1 && stationary && absf(rate) < 1.5f) g_imu.bias += 0.0005f * rate;   // slow drift tracking, only at rest (frozen during the drift diagnostic)
+  imuDriftSample(c, nowMs, stationary);
+  {                                                         // roll / pitch: gyro integration, pulled slowly to the gravity direction when the specific force is ~1 g
+    float dtt = (dt > 0.0f && dt <= 0.05f) ? dt : 0.0f;
+    float mag = sqrtf(g_imu.ax * g_imu.ax + g_imu.ay * g_imu.ay + g_imu.az * g_imu.az);
+    float accRoll = atan2f(g_imu.ay, g_imu.az) * RAD2DEG, accPitch = atan2f(-g_imu.ax, sqrtf(g_imu.ay * g_imu.ay + g_imu.az * g_imu.az)) * RAD2DEG;
+    if (!g_imu.tiltValid) { g_imu.roll = accRoll; g_imu.pitch = accPitch; g_imu.tiltValid = true; }
+    else {
+      g_imu.roll += g_imu.gx * dtt; g_imu.pitch += g_imu.gy * dtt;
+      if (mag > 0.85f && mag < 1.15f) { g_imu.roll += 0.02f * (accRoll - g_imu.roll); g_imu.pitch += 0.02f * (accPitch - g_imu.pitch); }
+    }
+  }
   if (dt > 0.0f && dt <= 0.05f) {
     g_imu.yaw = wrapDeg180(g_imu.yaw + (float)c.imuYawSign * rate * dt);
     g_imu.yawValid = true;

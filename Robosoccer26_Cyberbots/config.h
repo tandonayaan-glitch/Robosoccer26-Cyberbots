@@ -6,7 +6,10 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 19
+#ifndef RS_USE_WATCHDOG
+#define RS_USE_WATCHDOG 0              // hardware watchdog off by default (see the .ino); also reported in telemetry
+#endif
+#define CFG_VERSION 20
 
 struct Config {
   uint32_t magic;
@@ -26,8 +29,8 @@ struct Config {
   uint16_t reverseDeadMs;        // pause at zero when a wheel changes direction
   uint16_t manualHoldMs;         // manual motion auto-stops after this long without a repeated key
 
-  // ---- ball receivers: phototransistors, each on its own analog input (A0, A1 fitted; A2..A7 optional), 10-bit ADC ----
-  uint16_t ringEnable;           // bit n = receiver on analog input An is fitted and scanned. A0 and A1 on by default; more once you fit them
+  // ---- ball receivers: phototransistors, each on its own analog input (A0..A5 fitted; A6, A7 spare), 10-bit ADC ----
+  uint16_t ringEnable;           // bit n = receiver on analog input An is fitted and scanned. A0..A5 on by default (the six fitted receivers)
   int16_t ringBearing[RING_CH_MAX]; // where each receiver looks, degrees: 0 = straight ahead, + clockwise (right), +-180 = behind. PLACEHOLDERS until you measure (':ring bearing')
   uint16_t ringNoise[RING_CH_MAX];  // per-channel noise floor in ADC counts (0..1023) (peak-to-peak with no ball emitting), set by ':ring cal noise'
   uint8_t ringCalDone;           // 1 = ':ring cal noise' has been run on this robot (autonomy is refused otherwise)
@@ -122,6 +125,23 @@ struct Config {
   // ---- recovery ----
   uint16_t recoverVerifyMs;
 
+  // ---- telemetry to the ESP32 over the HC-05 ----
+  uint8_t teleEnable;            // 1 = send JSON telemetry frames over Bluetooth
+  uint8_t teleHz;                // requested frames per second (the real rate is limited by the link speed, see telemetry.h)
+  uint8_t teleDetailEvery;       // every Nth frame is the long "detail" frame, the others are the short "core" frame
+  uint16_t btBaud100;            // HC-05 data-mode baud / 100 (96 = 9600). Must equal the module's AT+UART setting. Applied at boot.
+
+  // ---- IMU extras / motion supervision / receivers ----
+  float imuMaxBiasDps;           // a startup gyro bias measurement larger than this is rejected
+  uint16_t driftSec;             // default length of ':gyro drift'
+  uint16_t maxMoveSec;           // motors commanded non-zero this long without a break => stopped (0 = off)
+  uint8_t bearingsSet;           // 1 once the receiver mounting angles were entered by the operator (':ring bearing'); defend mode needs it
+
+  // ---- defending mode (all speeds 0..1 of maxauto; angles in degrees; there is NO position sensor: "position" means heading + commanded-time estimates) ----
+  float defSpeed, defAlignSpeed, defTurnSpeed, defAlignDeg, defFrontArcDeg, defBlockStrength, defSlope;
+  uint8_t defConfOn, defConfOff;
+  uint16_t defDwellMs, defConfirmMs, defLostMs, defRecoverMs, defLeadMs, defPosMs, defStrafeMs, defLatMs;
+
   uint32_t crc;                  // CRC32 of every byte before this field
 };
 
@@ -177,6 +197,31 @@ static const ParamDef PARAMS[] PROGMEM = {
   PD("btlease", PT_U16, btLeaseMs, 100, 3000),
   PD("btlink", PT_U16, btLinkMs, 500, 30000),
   PD("autostart", PT_U8, autoStart, 0, 1),
+  PD("teleenable", PT_U8, teleEnable, 0, 1),
+  PD("telehz", PT_U8, teleHz, 1, 20),
+  PD("teledetail", PT_U8, teleDetailEvery, 1, 20),
+  PD("btbaud100", PT_U16, btBaud100, 12, 1152),
+  PD("imumaxbias", PT_F32, imuMaxBiasDps, 0.5, 30),
+  PD("driftsec", PT_U16, driftSec, 5, 300),
+  PD("maxmovesec", PT_U16, maxMoveSec, 0, 600),
+  PD("bearingsset", PT_U8, bearingsSet, 0, 1),
+  PD("defspeed", PT_F32, defSpeed, 0.1, 0.8),
+  PD("defalign", PT_F32, defAlignSpeed, 0.05, 0.4),
+  PD("defturn", PT_F32, defTurnSpeed, 0.1, 0.5),
+  PD("defaligndeg", PT_F32, defAlignDeg, 3, 40),
+  PD("deffrontarc", PT_F32, defFrontArcDeg, 40, 170),
+  PD("defblock", PT_F32, defBlockStrength, 0.2, 1.0),
+  PD("defslope", PT_F32, defSlope, 0.02, 2.0),
+  PD("defconfon", PT_U8, defConfOn, 5, 100),
+  PD("defconfoff", PT_U8, defConfOff, 1, 99),
+  PD("defdwell", PT_U16, defDwellMs, 50, 2000),
+  PD("defconfirm", PT_U16, defConfirmMs, 20, 1000),
+  PD("deflost", PT_U16, defLostMs, 200, 10000),
+  PD("defrecover", PT_U16, defRecoverMs, 200, 5000),
+  PD("deflead", PT_U16, defLeadMs, 0, 1000),
+  PD("defposms", PT_U16, defPosMs, 500, 10000),
+  PD("defstrafems", PT_U16, defStrafeMs, 200, 10000),
+  PD("deflatms", PT_U16, defLatMs, 0, 20000),
   PD("startdelay", PT_U16, autoStartDelayMs, 0, 30000),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
   PD("centerdeg", PT_F32, centerDeg, 3, 60),
@@ -265,11 +310,11 @@ static void cfgDefaults(Config& c) {
   c.decelPwmPerS = 1200;
   c.reverseDeadMs = 60;
   c.manualHoldMs = 600;
-  c.ringEnable = 0x0003;         // A0 and A1 (the two fitted phototransistors)
+  c.ringEnable = 0x003F;         // A0..A5 (the six fitted phototransistors, each with its own 10 kOhm)
   for (int i = 0; i < RING_CH_MAX; i++) {
     // PLACEHOLDER: the firmware does not know where the receivers look. All channels default to straight ahead (0 deg): the robot then sees THAT a ball is
     // in front but cannot tell left from right. Set the real mounting angles with ':ring bearing <ch> <deg>' (0 = ahead, + = right, +-180 = behind).
-    c.ringBearing[i] = 0;
+    c.ringBearing[i] = i < 6 ? (int16_t)(i <= 3 ? i * 60 : i * 60 - 360) : 0;   // A0..A5 at 0,60,120,180,-120,-60: an EVEN-SPACING GUESS, flagged by bearingsSet = 0
     c.ringNoise[i] = 0;
   }
   c.ringCalDone = 0;             // autonomy is refused until ':ring cal noise' has been run
@@ -283,6 +328,11 @@ static void cfgDefaults(Config& c) {
   for (int i = 0; i < WHEEL_COUNT; i++) c.wheelScale[i] = 100;
   c.btEnable = 1; c.btLeaseMs = 400; c.btLinkMs = 3000;
   c.autoStart = 1; c.autoStartDelayMs = 1500;
+  c.teleEnable = 1; c.teleHz = 5; c.teleDetailEvery = 4; c.btBaud100 = 96;
+  c.imuMaxBiasDps = 10.0f; c.driftSec = 20; c.maxMoveSec = 45; c.bearingsSet = 0;
+  c.defSpeed = 0.4f; c.defAlignSpeed = 0.2f; c.defTurnSpeed = 0.3f; c.defAlignDeg = 12.0f; c.defFrontArcDeg = 100.0f; c.defBlockStrength = 0.7f; c.defSlope = 0.15f;
+  c.defConfOn = 40; c.defConfOff = 25;
+  c.defDwellMs = 250; c.defConfirmMs = 150; c.defLostMs = 1500; c.defRecoverMs = 1200; c.defLeadMs = 250; c.defPosMs = 3000; c.defStrafeMs = 1500; c.defLatMs = 2500;
   c.lostHoldMs = 300;
   c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;
   c.approachSpeed = 0.5f;
@@ -360,6 +410,10 @@ static int cfgValidate(Config& c, char* rep, size_t repN) {
     if (c.ringBearing[i] < -180 || c.ringBearing[i] > 180) { c.ringBearing[i] = d.ringBearing[i]; bad++; repNote(rep, repN, "ringbearing"); }
     if (c.ringNoise[i] > 1023) { c.ringNoise[i] = 0; bad++; repNote(rep, repN, "ringnoise"); }
   }
+  if (c.defConfOff >= c.defConfOn) { c.defConfOff = d.defConfOff; c.defConfOn = d.defConfOn; bad++; repNote(rep, repN, "defconfon/off"); }
+  if (c.defAlignSpeed > c.defSpeed) { c.defAlignSpeed = d.defAlignSpeed; c.defSpeed = d.defSpeed; bad++; repNote(rep, repN, "defalign/speed"); }
+  { uint16_t b = c.btBaud100; if (b != 96 && b != 192 && b != 384 && b != 576 && b != 1152) { c.btBaud100 = d.btBaud100; bad++; repNote(rep, repN, "btbaud100"); } }
+  if (c.bearingsSet > 1) { c.bearingsSet = 0; bad++; repNote(rep, repN, "bearingsset"); }
   if (c.ringCalDone > 1) { c.ringCalDone = 0; bad++; repNote(rep, repN, "ringcaldone"); }
   if (c.ballDiaMm * 2 >= c.goalWidthMm) { c.ballDiaMm = d.ballDiaMm; c.goalWidthMm = d.goalWidthMm; bad++; repNote(rep, repN, "balldia/goalwidth"); }
   return bad;

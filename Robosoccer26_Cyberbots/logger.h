@@ -12,9 +12,9 @@
 // t_ms,type,cond,nav,ringmask,ball,bearing_deg,strength,flags,imu,yaw_deg,herr_deg,gz_dps,vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,loop_us,note
 
 enum NavState : uint8_t {
-  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT, NAV_REVERSE, NAV_COUNT
+  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT, NAV_REVERSE, NAV_DEFEND, NAV_COUNT
 };
-static const char NAV_NAME[NAV_COUNT][13] PROGMEM = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP", "SHOOT", "REVERSE"};
+static const char NAV_NAME[NAV_COUNT][13] PROGMEM = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP", "SHOOT", "REVERSE", "DEFEND"};
 static NavState g_navState = NAV_IDLE;
 static float g_hdgErr = NAN;               // degrees; NaN when heading hold is not active
 static uint32_t g_loopMaxUs = 0;           // longest loop() iteration since the last snapshot

@@ -147,13 +147,16 @@ static void printRaw(const Config& c) {
 static void printPins() {
   say("INFO", "motors  FR: IN1 D%u IN2 D%u ENA D%u | BR: IN3 D%u IN4 D%u ENB D%u (right L298N)", (unsigned)P_FR_IN1, (unsigned)P_FR_IN2, (unsigned)P_FR_EN, (unsigned)P_BR_IN1, (unsigned)P_BR_IN2, (unsigned)P_BR_EN);
   say("INFO", "motors  FL: IN1 D%u IN2 D%u ENA D%u | BL: IN3 D%u IN4 D%u ENB D%u (left L298N)", (unsigned)P_FL_IN1, (unsigned)P_FL_IN2, (unsigned)P_FL_EN, (unsigned)P_BL_IN1, (unsigned)P_BL_IN2, (unsigned)P_BL_EN);
-  say("INFO", "receivers A0..A7 (A0, A1 fitted) | modules: front D%u, second D%u (not fitted yet) | underside sensor D%u | MPU6050 SDA D%u SCL D%u", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_UNDER, (unsigned)P_SDA, (unsigned)P_SCL);
+  say("INFO", "receivers A0..A5 fitted (A6, A7 spare) | modules: front D%u, second D%u (not fitted yet) | underside sensor D%u | MPU6050 SDA D%u SCL D%u", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_UNDER, (unsigned)P_SDA, (unsigned)P_SCL);
   say("INFO", "HC-05 on Serial1: TX1 D%u -> divider -> HC-05 RXD, HC-05 TXD -> RX1 D%u | USB serial D0/D1", (unsigned)P_BT_TX, (unsigned)P_BT_RX);
 }
 
 // ':status' - one screen: is everything there, and what is the robot doing.
 static void printStatus(const Config& c, uint32_t now) {
-  say("INFO", "uptime %lu s | condition %S | nav %S | autonomous %S | free RAM %d B", UL(now / 1000), condName(g_cond), (PGM_P)NAV_NAME[g_navState], g_autoEnabled ? PSTR("ENABLED") : PSTR("disabled"), freeRam());
+  say("INFO", "MODE %S (%S) | safety %S%S%S | uptime %lu s | condition %S | nav %S | free RAM %d B", modeName(), g_defendEnabled ? (PGM_P)DEF_NAME[g_defState] : (PGM_P)NAV_NAME[g_navState], safetyText(),
+      firstFaultName()[0] ? PSTR(" | fault ") : PSTR(""), firstFaultName(), UL(now / 1000), condName(g_cond), (PGM_P)NAV_NAME[g_navState], freeRam());
+  say("INFO", "motors commanded (FL FR BL BR): %d %d %d %d PWM | last command received: '%c' | ball %S bearing %.0f deg confidence %u", (int)g_wheelOut[W_FL], (int)g_wheelOut[W_FR], (int)g_wheelOut[W_BL], (int)g_wheelOut[W_BR],
+      g_btLast ? g_btLast : '-', g_ball.valid ? PSTR("seen") : PSTR("not seen"), (double)(g_ball.bearingKnown ? g_ball.bearing : 0.0f), (unsigned)g_ball.confidence);
   say("INFO", "receivers: %u on, %u usable, noise floor %S | ball %S | modules: front %S, second %S | IMU %S%S", (unsigned)ringCountEnabled(c), (unsigned)ringCountUsable(c),
       c.ringCalDone ? PSTR("calibrated") : PSTR("NOT calibrated"), g_ball.valid ? PSTR("seen") : PSTR("not seen"),
       !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")), !modEnabled(c, 1) ? PSTR("off") : (g_mod[1].active ? PSTR("DETECTING") : PSTR("clear")),
@@ -163,9 +166,46 @@ static void printStatus(const Config& c, uint32_t now) {
   say("INFO", "active faults: %u (mask 0x%X) | shots %lu | ball losses %lu | records %u | output lines dropped %lu", (unsigned)popcount16(faultMask()), (unsigned)faultMask(), UL(g_stats.shots), UL(g_stats.ballLossEvents), (unsigned)g_recCount, UL(g_outDropped));
 }
 
+// 'sensors': receivers, modules, underside sensor and IMU in one block.
+static void printSensors(const Config& c, uint32_t now) {
+  say("SENS", "receivers (A0..A5): swing / filtered / noise floor / threshold (0..1023 ADC counts; '-' = channel off)");
+  for (uint8_t i = 0; i < 6; i++) {
+    if (!ringEnabled(c, i)) { say("SENS", "  A%u  off", (unsigned)i); continue; }
+    say("SENS", "  A%u  level %u..%u swing %u filtered %.1f noise %u threshold %.0f | %S%S | looks %d deg%S", (unsigned)i, (unsigned)g_ring[i].lo, (unsigned)g_ring[i].hi, (unsigned)g_ring[i].amp, (double)g_ring[i].avg, (unsigned)c.ringNoise[i],
+        (double)ringThreshold(c, i), g_ring[i].seen ? PSTR("SEES BALL") : PSTR("quiet"), g_ring[i].railFault ? PSTR(" RAIL-FAULT") : PSTR(""), (int)c.ringBearing[i], c.bearingsSet ? PSTR("") : PSTR(" (default guess)"));
+  }
+  say("SENS", "ball %S bearing %.1f deg confidence %u strength %.2f centered %S | noise floor %S | bearing map %S", g_ball.valid ? PSTR("DETECTED") : PSTR("none"), (double)(g_ball.bearingKnown ? g_ball.bearing : 0.0f), (unsigned)g_ball.confidence, (double)g_ball.strength,
+      g_ball.centered ? PSTR("yes") : PSTR("no"), c.ringCalDone ? PSTR("calibrated") : PSTR("NOT calibrated"), c.bearingsSet ? PSTR("set by operator") : PSTR("default guess - UNVERIFIED"));
+  say("SENS", "obstacle modules: D34 %S, D35 %S | underside D40 %S (%S) | shooting position %S", !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")),
+      !modEnabled(c, 1) ? PSTR("off") : (g_mod[1].active ? PSTR("DETECTING") : PSTR("clear")), !c.underEnable ? PSTR("off") : (g_under.active ? PSTR("BALL") : PSTR("clear")),
+      underUsable(c) ? PSTR("trusted") : PSTR("ignored"), g_ball.ready ? PSTR("YES") : PSTR("no"));
+  say("SENS", "IMU %S: accel %.2f %.2f %.2f g | gyro %.2f %.2f %.2f dps | roll %.1f pitch %.1f yaw %.1f deg (relative ESTIMATES)", g_imu.present && g_imu.ok ? PSTR("ok") : PSTR("NOT delivering data"),
+      (double)g_imu.ax, (double)g_imu.ay, (double)g_imu.az, (double)g_imu.gx, (double)g_imu.gy, (double)g_imu.gz, (double)g_imu.roll, (double)g_imu.pitch, (double)g_imu.yaw);
+  (void)now;
+}
+
+// 'gyro': calibration quality and the stationary drift diagnostic.
+static void printGyro(const Config& c, uint32_t now) {
+  say("GYRO", "MPU6050 %S | gyro bias calibration %S | bias in use %.3f dps", g_imu.present ? (g_imu.ok ? PSTR("ok") : PSTR("present but not delivering")) : PSTR("MISSING"),
+      g_imu.calibrated ? PSTR("DONE") : (g_imu.calState == 1 ? PSTR("running") : (g_imu.calState == 3 ? PSTR("REJECTED (robot moved)") : PSTR("not done"))), (double)g_imu.bias);
+  if (g_imu.calAtMs) say("GYRO", "  accepted calibration: mean %.3f dps, noise sd %.3f dps (limit %.2f), bias standard error %.4f dps, %lu s ago; stationary-limit |bias| < %.1f dps",
+      (double)g_imu.calMean, (double)g_imu.calSd, (double)c.imuStillDps, (double)imuBiasSeDps(), UL(elapsedMs(now, g_imu.calAtMs) / 1000), (double)c.imuMaxBiasDps);
+  say("GYRO", "  yaw %.2f deg RELATIVE to the last zero; estimated uncertainty %.2f deg (bias standard error only - excludes bias instability, so run 'gyro drift'); roll %.1f pitch %.1f (gravity-corrected ESTIMATES)",
+      (double)g_imu.yaw, (double)imuYawUncertDeg(now), (double)g_imu.roll, (double)g_imu.pitch);
+  if (g_imu.driftState == 1) say("GYRO", "  drift test RUNNING: %lu of %lu ms (keep the robot still)", UL(elapsedMs(now, g_imu.driftStartMs)), UL(g_imu.driftDurMs));
+  else if (g_imu.driftState == 2) {
+    say("GYRO", "  drift test DONE (%lu ms): mean raw gz %.3f dps vs calibrated bias %.3f: difference %.3f dps = measured BIAS ERROR (noise sd %.3f)", UL(g_imu.driftDurMs),
+        (double)g_imu.driftMeanDps, (double)g_imu.calMean, (double)(g_imu.driftMeanDps - g_imu.bias), (double)g_imu.driftSdDps);
+    say("GYRO", "  integrated yaw changed %.2f deg = %.2f deg/min = measured HEADING DRIFT of this run (not a guarantee for a whole match)", (double)g_imu.driftDeltaDeg, (double)g_imu.driftRateDegMin);
+  }
+  else if (g_imu.driftState == 3) say("GYRO", "  drift test FAILED: %S", g_imu.driftWhy == 1 ? PSTR("the motors moved") : (g_imu.driftWhy == 2 ? PSTR("the gyro was not still") : (g_imu.driftWhy == 4 ? PSTR("the robot was tilted or shaken") : (g_imu.driftWhy == 5 ? PSTR("stopped by the operator") : PSTR("sensor lost")))));
+  else say("GYRO", "  no drift test run since boot: 'gyro drift [s]' (robot still, motors stopped)");
+  say("GYRO", "  The gyro alone gives a RELATIVE heading that drifts; the accelerometer cannot correct yaw. Nothing here is an absolute heading.");
+}
+
 // ---- paced reports -----------------------------------------------------------------------------------
 // Every long report is requested with reportRequest() and printed by reportService() from the main loop in as many passes as the small output queue needs.
-enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY, REP_LOG, REP_RAW, REP_PINS, REP_STATUS };
+enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY, REP_LOG, REP_RAW, REP_PINS, REP_STATUS, REP_SENSORS, REP_GYRO, REP_MOTORS };
 static uint8_t g_repKind = REP_NONE;
 static void printHelp();
 static void cmdTestModeText();
@@ -183,6 +223,9 @@ static void reportRun(uint8_t kind, const Config& c, uint32_t now) {
     case REP_RAW: printRaw(c); break;
     case REP_PINS: printPins(); break;
     case REP_STATUS: printStatus(c, now); break;
+    case REP_SENSORS: printSensors(c, now); break;
+    case REP_GYRO: printGyro(c, now); break;
+    case REP_MOTORS: printMotion(c, now); break;
     default: break;
   }
 }

@@ -11,7 +11,7 @@ Nothing in this document has been verified on the physical robot. A firmware tha
 | 2 | L298N dual H-bridge | remove the ENA / ENB jumpers so the Mega's PWM controls the enable pins |
 | 4 | BO geared DC motor + 4 mecanum wheels | roller layout X or O: `:roller X|O`, checked with `:dtest` |
 | 1 | battery pack and power switch | 3S 11.1 V nominal (12.6 V full) in the earlier notes **[?]** |
-| 2 | 5 mm IR phototransistor (2-pin receivers) | on A0 and A1; the pinout **[?]** must be checked (§4) |
+| 6 | 5 mm IR phototransistor (2-pin receivers), each with its own 10 kΩ | on A0…A5; the pinout **[?]** must be checked (§4); where each looks: `:ring bearing` |
 | 2 | 940 nm IR LED (transmitters), 5 V | hard-wired with a current-limiting resistor each; **not controlled by the firmware** (§5) |
 | 2 | IR obstacle module (VCC / GND / OUT, LM393, trimmer) | front module D34, second module D35 |
 | 1 | MPU6050 breakout | hardware I2C D20 / D21 |
@@ -55,7 +55,7 @@ The Mega's I/O is 5 V logic: a digital input reads HIGH from about 3.0 V (0.6 ×
 ```
  +5 V ──── collector ┐
                      │  5 mm phototransistor (pinout to be verified)
-            emitter ─┴───┬──────── analog input A0 (receiver 0)  /  A1 (receiver 1)
+            emitter ─┴───┬──────── analog input A0…A5 (receiver n on An)
                          │
                         10 kΩ       (one resistor PER receiver; the two circuits are never joined)
                          │
@@ -121,3 +121,18 @@ No wheel feedback (PWM shown is the commanded value), no battery voltage or curr
 | Second module | D35 | not fitted, disabled |
 
 D36 is not used. Per-wheel trim: `wscalefl/fr/bl/br`.
+
+
+## Receivers and HC-05 (update)
+
+| Function | Pin | Note |
+|---|---|---|
+| Ball receivers 0–5 | A0, A1, A2, A3, A4, A5 | each junction to its own input; A6, A7 spare |
+| Obstacle modules | D34 (front, shooting position), D35 | active level is a setting (`:mod level`) |
+| Underside sensor | D40 | type / active level undocumented: `underlow` setting |
+| HC-05 TXD → Mega | D19 (RX1) | direct |
+| Mega → HC-05 RXD | D18 (TX1) | 1 kΩ / 2 kΩ divider; HC-05 VCC per your breakout (docs/BLUETOOTH.md) |
+| MPU6050 | SDA D20, SCL D21 | |
+| Motors | D22–D29 direction, D5 D6 D9 D10 PWM | unchanged |
+
+Serial2 (D16/D17) and Serial3 (D14/D15) are also free; Serial1 was kept. The ESP32 connects over the air, not by wire.

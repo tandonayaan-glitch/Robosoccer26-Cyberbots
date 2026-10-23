@@ -91,8 +91,10 @@ struct MockSerial {
   std::string out;
   std::deque<uint8_t> in;
   bool begun = false;
-  void begin(unsigned long) { begun = true; }
-  int availableForWrite() { return (!usb || g_serialUnlimited) ? 4096 : (int)g_serialRoom; }
+  bool blocked = false;                             // Serial1 only: the transmit buffer never drains (no HC-05 listening / link down)
+  unsigned long baud = 0;
+  void begin(unsigned long b) { begun = true; baud = b; }
+  int availableForWrite() { if (blocked) return 0; return (!usb || g_serialUnlimited) ? 4096 : (int)g_serialRoom; }
   size_t write(uint8_t b) {
     out.push_back((char)b);
     if (usb && !g_serialUnlimited) g_serialRoom = std::max(0.0, g_serialRoom - 1.0);
@@ -111,7 +113,7 @@ struct MockMpu {
   uint8_t addr = 0x68;
   uint8_t whoami = 0x68;
   int mode = 0;            // 0 normal, 1 NACK, 2 frozen frame, 3 all-zero frame, 4 gyro saturated
-  float gz = 0, gx = 0, gy = 0, azg = 1.0f;
+  float gz = 0, gx = 0, gy = 0, azg = 1.0f, axg = 0, ayg = 0;
   uint8_t regs[128];
   uint32_t reads = 0, initWrites = 0;
   int16_t frozen[7];
@@ -147,7 +149,7 @@ struct MockWire {
       g_mpu.reads++;
       int16_t r[7];
       auto cl = [](float v) { return (int16_t)std::max(-32767.0f, std::min(32767.0f, v)); };
-      r[0] = 0; r[1] = 0; r[2] = cl(g_mpu.azg * 8192.0f); r[3] = 0x0800;
+      r[0] = cl(g_mpu.axg * 8192.0f); r[1] = cl(g_mpu.ayg * 8192.0f); r[2] = cl(g_mpu.azg * 8192.0f); r[3] = 0x0800;
       r[4] = cl(g_mpu.gx * 65.5f); r[5] = cl(g_mpu.gy * 65.5f); r[6] = cl(g_mpu.gz * 65.5f);
       static uint32_t lcg = 1234567u;                       // sensor noise: a real MPU6050 never repeats a frame exactly
       for (int i = 0; i < 7; i++) { lcg = lcg * 1664525u + 1013904223u; if (i != 3) r[i] = (int16_t)(r[i] + (int)((lcg >> 24) % 7u) - 3); }

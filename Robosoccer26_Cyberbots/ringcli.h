@@ -37,6 +37,7 @@ static void cmdRing(Config& c, const char* a1, const char* a2, const char* a3) {
   }
   if (STREQ(a1, "bearing") && parseChannel(a2, &ch) && parseF(a3, &v) && v >= -180 && v <= 180) {
     c.ringBearing[ch] = (int16_t)(v < 0 ? v - 0.5f : v + 0.5f);
+    c.bearingsSet = 1;
     say("INFO", "receiver A%u looks %d deg (0 = ahead, + = right, +-180 = behind). ':save' keeps it.", (unsigned)ch, (int)c.ringBearing[ch]);
     return;
   }

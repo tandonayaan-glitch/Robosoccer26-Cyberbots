@@ -9,6 +9,9 @@
 
 #include <functional>
 #include <map>
+#include <vector>
+#include <string>
+#include "../remote_esp32/telemetry_parse.h"
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; printf("  FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -58,6 +61,7 @@ static void ballHeld() { ballAt(0.0f, 1.0f); g_mockModDetect[0] = true; g_mockUn
 static void calibrateAll() { g_cfg.ringCalDone = 1; }
 // The default configuration has only A0 and A1 (both "straight ahead"). Most tests want 8 receivers 45 deg apart: A0 = 0 deg, clockwise.
 static void layout8() {
+  g_cfg.bearingsSet = 1;                         // the test layout stands in for operator-entered mounting angles
   g_cfg.ringEnable = 0x00FF;
   for (int i = 0; i < 8; i++) g_cfg.ringBearing[i] = (int16_t)(i <= 4 ? i * 45 : i * 45 - 360);
 }
@@ -130,7 +134,7 @@ static void t_report_paced() {
   CHECK(ok);
   // the other long reports
   Serial.out.clear(); send("?"); simRun(1500);
-  CHECK(outHas("commands (115200 baud)") && outHas("Safety: first motor tests"));
+  CHECK(outHas("commands (115200 baud") && outHas("Safety: first motor tests"));
   Serial.out.clear(); send("i"); simRun(1500);
   CHECK(outHas("ball receivers: 8 of 8") && outHas("IR module 1 D35") && outHas("a module reacts to ANY reflective object"));
 }
@@ -719,8 +723,8 @@ static void t_cli_robust() {
   for (unsigned char ch : withNul) Serial.in.push_back(ch);
   simRunTracking(800);
   CHECK(!anyWheelEverMoved);
-  CHECK(outHas("ignored unknown input"));
-  CHECK(outCount("ignored unknown input") <= 2);           // rate limited, not a flood
+  CHECK(outHas("input line too long") || outHas("unknown input"));
+  CHECK(outCount("unknown input") + outCount("too long") <= 3);           // not a flood
   // overlong ':' line is rejected, not executed, not overflowing
   std::string longLine = ":set maxauto ";
   longLine.append(300, '9');
@@ -773,7 +777,7 @@ static void t_diag_no_motion() {
   CHECK(outHas("HARDWARE HEALTH REPORT"));
   CHECK(outHas("state=IDLE"));
   CHECK(outHas("TEST MODE"));
-  CHECK(outHas("commands (115200 baud)"));
+  CHECK(outHas("commands (115200 baud"));
   CHECK(outHas("signal STRENGTH"));
   CHECK(!outHas("distance:"));                              // no fabricated distance anywhere
   CHECK(g_streamIr);                                        // 'I' toggled the live view on
@@ -892,7 +896,7 @@ static void t_nonblocking() {
   uint64_t worst = 0;
   const char* floods[] = {"h", "i", "h", "d", "m", "g", "h"};
   for (int rep = 0; rep < 20; rep++) {
-    for (const char* f : floods) send(f);
+    for (const char* f : floods) { send(f); send("\n"); }
     for (int k = 0; k < 200; k++) {
       uint64_t t0 = g_mockUs;
       loop();
@@ -994,10 +998,10 @@ static void t_ring_pure_rules() {
 }
 
 static void t_ring_pins_and_isolation() {
-  ballGone(); setup();                                                   // default configuration: only A0 and A1
+  ballGone(); setup();                                                   // default configuration: A0..A5 (six receivers)
   simRun(300);
-  CHECK(g_ring[0].scans > 0 && g_ring[1].scans > 0);
-  for (int ch = 2; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A2..A7 are not scanned until switched on
+  for (int ch = 0; ch < 6; ch++) CHECK(g_ring[ch].scans > 0);
+  for (int ch = 6; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A6, A7 are not scanned until switched on
   for (int k = 0; k < 8; k++) CHECK(g_pinMode[PIN_RECV[k]] == INPUT);   // analog inputs, no pull-up
   CHECK(g_pinMode[PIN_MOD[0]] == INPUT_PULLUP && g_pinMode[PIN_MOD[1]] == INPUT);   // active-LOW front module: internal pull-up; the disabled second module is left alone
   CHECK(allWheelsStopped());
@@ -1598,7 +1602,7 @@ static void t_old_hardware_removed() {
 // ================================================================================================
 // Bluetooth remote (HC-05 on Serial1), emergency-stop latch, mode switching
 
-static void bt(const char* s) { Serial1.feed(s); }
+static void bt(const char* s) { Serial1.feed(s); if (strlen(s) == 1) Serial1.feed("\n"); }    // a single command is one line
 static bool btHas(const char* s) { return Serial1.out.find(s) != std::string::npos; }
 static void forwardNow() { CHECK(wheelDir(W_FL) > 0 && wheelDir(W_FR) > 0 && wheelDir(W_BL) > 0 && wheelDir(W_BR) > 0); }
 
@@ -1630,7 +1634,7 @@ static void t_bt_protocol() {
   CHECK(allWheelsStopped() && g_remoteManual && !g_estop);
   // unknown bytes never move anything
   Serial1.out.clear(); bt("k#$1\r\n  "); simRun(100);
-  CHECK(allWheelsStopped() && g_btUnknown >= 4 && outCountOf(Serial1.out, "ERR:UNKNOWN") <= 1);
+  CHECK(allWheelsStopped() && g_btUnknown >= 1 && outCountOf(Serial1.out, "ERR:UNKNOWN") <= 1);
 }
 
 static void t_bt_modes_and_estop() {
@@ -1688,7 +1692,7 @@ static void t_bt_modes_and_estop() {
   send(":recover\n"); simRun(50);
   CHECK(!g_estop);
   // status / ping
-  Serial1.out.clear(); bt("P?"); simRun(60);
+  Serial1.out.clear(); bt("P"); bt("?"); simRun(60);
   CHECK(btHas("PONG:") && btHas("ST:"));
 }
 
@@ -1710,7 +1714,7 @@ static void t_bt_link_loss() {
   g_cfg.btLeaseMs = 400;
   // many stale movement bytes then silence: the robot stops within the lease, it does not keep driving
   bt("Q"); simRun(30);
-  bt("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+  for (int k = 0; k < 60; k++) bt("W");
   simRun(200);
   CHECK(!allWheelsStopped());
   simRun(g_cfg.btLeaseMs + 500);
@@ -1957,6 +1961,448 @@ static void t_autostart() {
   CHECK(!g_autoEnabled);
 }
 
+// ================================================================================================
+// Defending mode, telemetry, gyro diagnostics, motion diagnostics, parser (2026 intelligence update)
+
+static void lineBt(const char* s) { Serial1.feed(s); Serial1.feed("\n"); }                 // a word / line from the Bluetooth remote
+static void word(const char* s) { send(s); send("\n"); }                                    // a word typed in the USB Serial Monitor
+static bool modeIs(const char* m) { return strcmp(modeName(), m) == 0; }
+static std::vector<std::string> btFrames() {
+  std::vector<std::string> v; size_t p = 0; const std::string& o = Serial1.out;
+  while (p < o.size()) { size_t e = o.find('\n', p); if (e == std::string::npos) break; if (o[p] == '{') v.push_back(o.substr(p, e - p)); p = e + 1; }
+  return v;
+}
+static uint32_t g_visited = 0;
+static void runWatch(uint32_t ms) { uint32_t n = ms / 20; for (uint32_t k = 0; k < n; k++) { simRun(20); g_visited |= 1u << g_defState; } }
+static bool visited(DefState s) { return (g_visited >> s) & 1u; }
+static void defendStart() { bootCal(); simRun(300); word("defend"); simRun(300); }
+
+static void t_defend_enter_exit() {
+  bootCal(); simRun(300);
+  g_cfg.bearingsSet = 0;                                                   // mounting angles still the default guess: no directional behaviour
+  word("defend"); simRun(100);
+  CHECK(!g_defendEnabled && outHas("mounting angles") && allWheelsStopped());
+  g_cfg.bearingsSet = 1; g_cfg.ringCalDone = 0;
+  Serial.out.clear(); word("defend"); simRun(100);
+  CHECK(!g_defendEnabled && outHas("not calibrated"));
+  g_cfg.ringCalDone = 1;
+  word("defend"); simRun(100);
+  CHECK(g_defendEnabled && g_navState == NAV_DEFEND && allWheelsStopped() && modeIs("DEFEND"));
+  simRun(800);
+  CHECK(outHas("POSITION -> SEARCH") && g_defState == DEF_SEARCH);         // the state change and its reason are reported
+  // telemetry says DEFEND
+  Serial1.out.clear(); simRun(1500);
+  bool sawMode = false; for (auto& f : btFrames()) if (f.find("\"mode\":\"DEFEND\"") != std::string::npos && f.find("\"sub\":\"SEARCH\"") != std::string::npos) sawMode = true;
+  CHECK(sawMode);
+  // switching between modes cancels the previous one and leaves no motion behind
+  word("attack"); simRun(100);
+  CHECK(g_autoEnabled && !g_defendEnabled && modeIs("ATTACK"));
+  word("defend"); simRun(100);
+  CHECK(g_defendEnabled && !g_autoEnabled && allWheelsStopped());
+  word("manual"); simRun(100);
+  CHECK(!g_defendEnabled && g_remoteManual && modeIs("MANUAL") && allWheelsStopped());
+  word("defend"); simRun(100); word("stop"); simRun(100);
+  CHECK(!g_defendEnabled && modeIs("IDLE") && allWheelsStopped());
+  // the same words through Bluetooth, through the same parser
+  Serial1.out.clear(); lineBt("defend"); simRun(100);
+  CHECK(btHas("OK:DEFEND") && g_defendEnabled);
+  lineBt("attack"); simRun(100);
+  CHECK(btHas("OK:ATTACK") && g_autoEnabled && !g_defendEnabled);
+  lineBt("manual"); simRun(100);
+  CHECK(btHas("OK:MANUAL") && g_remoteManual && !g_autoEnabled);
+  lineBt("stop"); simRun(100);
+  CHECK(btHas("OK:STOP"));
+  // refused: drivetrain fault, emergency stop
+  faultRaise(F_MOTOR_INIT, "test fault"); simRun(60);
+  Serial1.out.clear(); lineBt("defend"); simRun(100);
+  CHECK(!g_defendEnabled && btHas("ERR:REFUSED"));
+  g_fault[F_MOTOR_INIT].active = false; condEvaluate();
+  bt("X"); simRun(20);
+  Serial1.out.clear(); lineBt("defend"); simRun(60);
+  CHECK(!g_defendEnabled && btHas("ERR:ESTOP"));
+  word("defend"); simRun(60);
+  CHECK(!g_defendEnabled && g_estop);
+}
+
+static void t_defend_behaviour() {
+  defendStart(); simRun(800);
+  CHECK(g_defState == DEF_SEARCH && allWheelsStopped());
+  g_visited = 0;
+  ballAt(30, 0.3f); runWatch(800);                                         // a distant, steady ball: confirm, track, but do not run after it
+  CHECK(g_defState == DEF_TRACK && visited(DEF_TRACK) && !visited(DEF_INTERCEPT));
+  CHECK(absf(g_reqVx) < 0.01f && absf(g_reqW) < 0.05f);
+  ballAt(40, 0.55f); runWatch(1000);                                       // closer and to the right: intercept = strafe right, no spinning
+  CHECK(visited(DEF_INTERCEPT));
+  CHECK(g_reqVx > 0.1f && absf(g_reqW) < 0.05f && absf(g_reqVy) < 0.01f);
+  CHECK(wheelsMatchStrafeRight() || g_defState != DEF_INTERCEPT);
+  ballAt(0, 0.9f); runWatch(1200);                                         // in line with the robot and strong: block (stand still)
+  CHECK(visited(DEF_BLOCK) && g_defState == DEF_BLOCK);
+  simRun(400); CHECK(absf(g_reqVx) < 0.05f && allWheelsStopped());
+  ballGone(); runWatch(800);                                               // gone after the block attempt
+  CHECK(visited(DEF_LOST));
+  runWatch(g_cfg.defLostMs + 3000);
+  CHECK(g_defState == DEF_SEARCH || g_defState == DEF_POSITION);           // back to the defensive posture
+  CHECK(allWheelsStopped());
+  // ball on the left: strafe left
+  ballAt(-45, 0.6f); runWatch(1200);
+  CHECK(g_reqVx < -0.1f || g_defState == DEF_TRACK);
+  // ball behind the robot: cannot be blocked from here, no strafing
+  ballAt(180, 0.6f); ballAt(180, 0.6f); runWatch(1500);
+  CHECK(g_defState == DEF_RECOVER || g_defState == DEF_POSITION || g_defState == DEF_SEARCH || g_defState == DEF_TRACK);
+  CHECK(absf(g_reqVx) < 0.01f);
+}
+
+static void t_defend_prediction() {
+  defendStart(); simRun(600);
+  // approaching: the strength RISES over time-stamped observations
+  g_visited = 0;
+  for (int k = 0; k < 60; k++) { ballAt(35, 0.15f + 0.5f * (float)k / 60.0f); runWatch(20); }
+  CHECK(visited(DEF_PREDICT) && visited(DEF_INTERCEPT));
+  CHECK(g_defPredOk && g_defApproaching);
+  CHECK(g_defStrSlope > g_cfg.defSlope);
+  // steady far ball: a trend IS available (flat), it is NOT approaching, and there is no prediction state
+  ballGone(); runWatch(3500);
+  word("stop"); simRun(50); word("defend"); simRun(1200);
+  g_visited = 0; ballAt(35, 0.3f); runWatch(3000);
+  CHECK(!visited(DEF_PREDICT) && !visited(DEF_INTERCEPT) && !g_defApproaching);
+  // receding
+  ballGone(); word("stop"); simRun(50); word("defend"); simRun(1200);
+  g_visited = 0;
+  for (int k = 0; k < 60; k++) { ballAt(35, 0.7f - 0.5f * (float)k / 60.0f); runWatch(20); }
+  CHECK(!visited(DEF_PREDICT));
+  // too few observations: no trend is claimed at all
+  ballGone(); word("stop"); simRun(50); word("defend"); simRun(1200);
+  ballAt(30, 0.5f); runWatch(240);
+  CHECK(!g_defPredOk && g_defLeadDeg == 0.0f && g_defStrSlope == 0.0f);
+}
+
+static void t_defend_hysteresis_and_limits() {
+  defendStart(); simRun(600);
+  g_cfg.defConfOn = 50; g_cfg.defConfOff = 35; g_cfg.defSlope = 2.0f;      // (no 'approaching' verdict in this test)
+  ballAt(0, 0.6f); runWatch(1000);                                         // one receiver sees it: confidence about 56
+  CHECK(g_defState == DEF_TRACK);
+  uint32_t tr = g_defTransitions;
+  for (int k = 0; k < 100; k++) { ballAt(0, (k & 1) ? 0.4f : 0.3f); runWatch(20); }       // confidence flips 44 <-> 38: between the two thresholds
+  CHECK(g_defTransitions == tr && g_defState == DEF_TRACK);                // no flicker
+  ballAt(0, 0.1f); runWatch(1500);                                         // really weak: below the off threshold
+  CHECK(visited(DEF_LOST) || g_defState == DEF_LOST || g_defState == DEF_POSITION || g_defState == DEF_SEARCH);
+  // interception limits: a ball held at 70 deg to the right never makes the robot wander off
+  word("stop"); simRun(50); g_cfg.defConfOn = 40; g_cfg.defConfOff = 25; word("defend"); simRun(800);
+  float maxLat = 0; uint32_t strafeRun = 0, longestRun = 0; bool paused = false; float maxW = 0;
+  ballAt(70, 0.6f);
+  for (int k = 0; k < 400; k++) {
+    simRun(50);
+    if (absf(g_defLat) > maxLat) maxLat = absf(g_defLat);
+    if (absf(g_reqVx) > 0.05f) { strafeRun += 50; if (strafeRun > longestRun) longestRun = strafeRun; } else { if (strafeRun) paused = true; strafeRun = 0; }
+    if (absf(g_reqW) > maxW) maxW = absf(g_reqW);
+  }
+  CHECK(maxLat <= (float)g_cfg.defLatMs + 120.0f);                         // the open-loop sideways budget holds
+  CHECK(longestRun <= (uint32_t)g_cfg.defStrafeMs + 400u);                 // no unbounded strafe
+  CHECK(paused);                                                           // it did pause between strafes
+  CHECK(maxW < 0.1f);                                                      // no unnecessary spinning
+  CHECK(maxLat > 200.0f);                                                  // it did move
+}
+
+static void t_defend_fault_stop() {
+  defendStart(); simRun(600);
+  ballAt(70, 0.6f); simRun(700);
+  CHECK(!allWheelsStopped() || g_defState != DEF_INTERCEPT);
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;                    // receiver wiring fault: every input pinned high
+  simRun(g_cfg.ringRailMs + 800);
+  CHECK(g_defState == DEF_FAULT && allWheelsStopped() && modeIs("FAULT"));
+  CHECK(outHas("sensing or drivetrain fault"));
+  Serial.out.clear(); word("defend"); simRun(100);
+  CHECK(outHas("REFUSED"));
+  word("stop"); simRun(60);
+  CHECK(!g_defendEnabled && allWheelsStopped());
+}
+
+static void t_estop_every_mode() {
+  for (int mode = 0; mode < 5; mode++) {
+    g_estop = false; g_remoteManual = false; g_defendEnabled = false; g_autoEnabled = false;      // (a reboot between the modes)
+    bootCal(); simRun(300); ballGone();
+    if (mode == 0) { bt("M"); for (int k = 0; k < 4; k++) { bt("W"); simRun(60); } }
+    else if (mode == 1) { ballFar(); word("attack"); simRun(800); }
+    else if (mode == 2) { word("defend"); simRun(600); ballAt(70, 0.6f); simRun(800); }
+    else if (mode == 3) { word("calibrate"); simRun(100); CHECK(modeIs("CALIBRATION")); }
+    else { simRun(50); }
+    bt("X"); loop();                                                       // ONE pass of the main loop
+    CHECK(allWheelsStopped() && g_estop && !g_autoEnabled && !g_defendEnabled && g_navState == NAV_IDLE);
+    CHECK(modeIs("FAULT"));
+    simRun(60);
+    Serial.out.clear(); word("defend"); word("attack"); word("manual"); lineBt("U"); simRun(100);
+    CHECK(allWheelsStopped() && !g_defendEnabled && !g_autoEnabled);       // nothing starts while the latch is set
+    send("!"); simRun(20); CHECK(allWheelsStopped());                      // USB emergency stop too
+  }
+}
+
+static void t_cmd_parser_limits() {
+  bootCal(); simRun(300);
+  word("DeFeNd"); simRun(100);
+  CHECK(g_defendEnabled);                                                  // case-insensitive
+  word("stop"); simRun(100);
+  anyWheelEverMoved = false;
+  Serial.out.clear();
+  word("defendx"); word("launch"); word("ff"); word("fbl"); simRunTracking(200);   // unknown words and multi-key bursts: nothing is executed
+  CHECK(!g_defendEnabled && !g_autoEnabled && !anyWheelEverMoved && outHas("NOTHING was executed"));
+  std::string big(100, 'a'); Serial.out.clear();
+  word(big.c_str()); simRun(100);
+  CHECK(outHas("too long") && !g_autoEnabled);                             // oversized input is rejected, not executed as 'a'
+  word("def\x01nd"); simRun(50);                                           // control byte inside a word: dropped
+  Serial.out.clear();
+  send("gyro"); simRun(30);                                                // no line ending: 8 ms of silence completes it
+  CHECK(outHas("MPU6050") || outHas("GYRO"));
+  Serial.out.clear(); send("  status  \r\n"); simRun(100);
+  CHECK(outHas("MODE "));
+  // Bluetooth side
+  Serial1.out.clear();
+  lineBt("123456789012345678901234567890"); simRun(100);                   // 30 characters
+  CHECK(btHas("ERR:TOO_LONG"));
+  lineBt("fly"); simRun(100);
+  CHECK(btHas("ERR:UNKNOWN") && allWheelsStopped() && !g_autoEnabled);
+  Serial1.feed("stop"); simRun(60);                                        // unterminated word is completed by silence
+  CHECK(btHas("OK:STOP"));
+  lineBt("  DEFEND \r"); simRun(100);
+  CHECK(g_defendEnabled);
+  lineBt("stop"); simRun(60);
+  Serial1.feed("dexfend\n"); simRun(60);                                   // an X inside the text is an emergency stop (fail-safe direction)
+  CHECK(g_estop);
+  // a Bluetooth word cannot name a pin, a register or a setting: only the fixed word table is reachable
+  bt("R"); simRun(50);
+  Serial1.out.clear(); lineBt("set maxauto 255"); lineBt("digitalwrite 22 1"); simRun(100);
+  CHECK(g_cfg.maxAuto == 170 && allWheelsStopped());
+}
+
+static void t_telemetry_frames() {
+  bootCal(); g_cfg.modEnable = 3; g_cfg.teleDetailEvery = 2; simRun(300);
+  ballAt(30, 0.5f); g_mockModDetect[1] = true; simRun(500);
+  Serial1.out.clear(); simRun(6000);
+  auto fr = btFrames();
+  TeleSnapshot sn; teleInit(&sn);
+  bool k[4] = {false, false, false, false}; size_t maxLen = 0; int bad = 0;
+  for (auto& f : fr) {
+    maxLen = std::max(maxLen, f.size() + 1);
+    char kind = teleParseLine(&sn, f.c_str(), 1000);
+    if (!kind) bad++; else k[kind == 'c' ? 0 : (kind == 'r' ? 1 : (kind == 'i' ? 2 : 3))] = true;
+    CHECK(f.find("current") == std::string::npos && f.find("dist") == std::string::npos);      // nothing the hardware cannot measure
+  }
+  CHECK(bad == 0 && k[0] && k[1] && k[2] && k[3]);
+  CHECK(sn.lost == 0 && sn.bad == 0);                                      // sequence numbers contiguous
+  CHECK(maxLen <= 299);
+  CHECK(fr.size() >= 8 && fr.size() <= 30);                                // limited by the 9600 baud link, well under the UART capacity
+  // content
+  CHECK(strcmp(sn.mode, "IDLE") == 0 && strcmp(sn.safety, "OK") == 0 && sn.ball);
+  CHECK(sn.bearingValid && absf(sn.bearing - 30.0f) < 8.0f && sn.conf > 20);
+  CHECK(sn.obst[1] == 1.0f && sn.obst[0] == 0.0f);
+  CHECK(sn.swing[0] >= 0 && sn.thresh[0] > 0 && sn.rawLevel[0] > 0);
+  CHECK(strcmp(sn.bearingMap, "operator") == 0);
+  CHECK(sn.imuOk && !isnan(sn.acc[2]) && absf(sn.acc[2] - 1.0f) < 0.05f);
+  // a missing ball is null, not zero
+  ballGone(); simRun(900); Serial1.out.clear(); simRun(2500);
+  TeleSnapshot s2; teleInit(&s2);
+  for (auto& f : btFrames()) teleParseLine(&s2, f.c_str(), 1000);
+  CHECK(!s2.ball && !s2.bearingValid && isnan(s2.bearing));
+  // faster link: more frames
+  g_cfg.btBaud100 = 1152; g_cfg.teleHz = 20; Serial1.out.clear(); simRun(2000);
+  CHECK(btFrames().size() >= 25);
+  // the HC-05 does not drain (no link): the control loop never waits and the queue does not overrun
+  Serial1.blocked = true; Serial1.out.clear();
+  uint64_t worst = 0; send("f"); send("\n");
+  for (int i = 0; i < 400; i++) { uint64_t t0 = g_mockUs; loop(); uint64_t dt = g_mockUs - t0; if (dt > worst) worst = dt; mockAdvance(50); }
+  CHECK(worst < 700);
+  CHECK(btTxUsed() < BT_TXQ_SIZE && g_navState == NAV_MANUAL);
+  uint32_t sent = g_tele.sent; simRun(2000);
+  CHECK(g_tele.sent <= sent + 1);                                          // no frames pile up behind a stuck UART
+  send("!"); simRun(30);
+  CHECK(allWheelsStopped());                                               // emergency stop is independent of the Bluetooth link
+}
+
+static void t_gyro_diagnostics() {
+  // (a) MPU6050 missing at startup
+  g_mpu.present = false; bootCal(); g_cfg.teleDetailEvery = 1; simRun(600);
+  CHECK(!g_imu.present && !g_imu.calibrated);
+  Serial.out.clear(); word("gyro"); simRun(300); CHECK(outHas("MISSING"));
+  word("gyro drift"); simRun(100); CHECK(outHas("refused"));
+  Serial1.out.clear(); simRun(3000);
+  { TeleSnapshot s; teleInit(&s); for (auto& f : btFrames()) teleParseLine(&s, f.c_str(), 1000); CHECK(!s.imuOk && isnan(s.acc[0]) && isnan(s.yaw) && isnan(s.roll)); }
+  g_mpu.present = true;
+  // (b) bias measured at startup while still
+  g_mpu.gz = 1.2f; bootCal(); simRun(500);
+  CHECK(g_imu.calibrated && absf(g_imu.bias - 1.2f) < 0.05f && absf(g_imu.calMean - 1.2f) < 0.05f && g_imu.calAtMs != 0);
+  // (c) rejected while moving, and (d) a bias beyond the limit is rejected
+  g_mpu.gz = 0; bootCal(); simRun(300);
+  word("gyro cal"); for (int i = 0; i < 300; i++) { g_mpu.gz = (i & 1) ? 40.0f : -40.0f; simRun(10); }
+  CHECK(g_imu.calState == 3);
+  g_mpu.gz = 15.0f; word("gyro cal"); simRun(3500);
+  CHECK(g_imu.calState == 3 && absf(g_imu.bias - 15.0f) > 1.0f);
+  // (e) drift test: the real bias has crept 0.05 dps away from the calibrated value
+  g_mpu.gz = 1.2f; bootCal(); simRun(500);
+  g_mpu.gz = 1.25f;
+  word("gyro drift 10"); simRun(200);
+  CHECK(g_imu.driftState == 1 && modeIs("CALIBRATION"));
+  simRun(10500);
+  CHECK(g_imu.driftState == 2);
+  CHECK(absf(g_imu.driftMeanDps - 1.25f) < 0.02f);                         // measured gyro bias
+  CHECK(absf(g_imu.driftRateDegMin) > 2.0f && absf(g_imu.driftRateDegMin) < 4.0f);   // heading drift: 0.05 dps = 3 deg/min
+  Serial.out.clear(); word("gyro"); simRun(300);
+  CHECK(outHas("measured BIAS ERROR") && outHas("measured HEADING DRIFT") && outHas("RELATIVE"));
+  // (f) motion during the test fails it; (g) shaking fails it
+  word("gyro drift 10"); simRun(300); send("f"); simRun(300);
+  CHECK(g_imu.driftState == 3 && g_imu.driftWhy == 1);
+  send("s"); simRun(1500);
+  word("gyro drift 10"); simRun(300); g_mpu.azg = 1.4f; simRun(100); g_mpu.azg = 1.0f; simRun(10500);
+  CHECK(g_imu.driftState == 3 && g_imu.driftWhy == 4);
+  // not allowed while a motor command is active
+  send("f"); simRun(100); Serial.out.clear(); word("gyro drift"); simRun(100);
+  CHECK(g_imu.driftState != 1 && outHas("refused"));
+  send("s"); simRun(300);
+  // (h) tilt from the accelerometer, (i) uncertainty estimate grows with time
+  g_mpu.ayg = 0.5f; g_mpu.azg = 0.866f; simRun(3000);
+  CHECK(absf(g_imu.roll - 30.0f) < 2.0f && g_imu.tiltValid);
+  g_mpu.ayg = 0; g_mpu.axg = -0.5f; simRun(3000);
+  CHECK(absf(g_imu.pitch - 30.0f) < 2.0f);
+  float u1 = imuYawUncertDeg(millis()); simRun(5000); float u2 = imuYawUncertDeg(millis());
+  CHECK(u2 > u1 && u1 >= 0);
+}
+
+static void t_motion_diagnostics() {
+  bootCal(); simRun(300);
+  send("f"); simRun(300);
+  Serial.out.clear(); word("motors"); simRun(300);
+  CHECK(outHas("FL: command FORWARD") && outHas("no encoder or current sensor"));
+  send("s"); simRun(300);
+  Serial.out.clear(); word("motors"); simRun(300);
+  CHECK(outHas("FL: command STOPPED") && !outHas("FORWARD"));
+  // continuous-motion watchdog
+  g_cfg.maxMoveSec = 3; bt("M"); simRun(50);
+  bool tripped = false;
+  for (int k = 0; k < 70 && !tripped; k++) { bt("W"); simRun(100); tripped = g_motion.wdTrips > 0; }
+  CHECK(tripped && allWheelsStopped() && g_motion.wdStopped && strcmp(safetyText(), "MOTION_WATCHDOG") == 0);
+  CHECK(outHas("motion watchdog"));
+  // a turn without translation is measured separately
+  g_cfg.maxMoveSec = 0; send("q"); simRun(350);
+  CHECK(g_motion.turnSinceMs != 0 && g_reqW != 0.0f);
+  send("s"); simRun(300);
+  // a motor command left behind by a mode that should not move anything is cleared and counted
+  bt("Q"); simRun(100);
+  // a mode transition that forgets to stop: attack ends without navStop, the approach keeps commanding motion
+  ballFar(); word("attack"); simRun(1500);
+  CHECK(!allWheelsStopped());
+  Serial.out.clear();
+  g_autoEnabled = false; simRun(200);
+  CHECK(allWheelsStopped() && g_motion.staleEvents >= 1 && outHas("stale motor command"));
+  // reset/boot: every motor pin low
+  setup();
+  for (int i = 0; i < 4; i++) CHECK(g_pinLevel[WHEEL_PINS[i].in1] == 0 && g_pinLevel[WHEEL_PINS[i].in2] == 0 && g_pwmDuty[WHEEL_PINS[i].en] == 0);
+}
+
+static void t_attack_side_ball() {
+  bootCal(); simRun(300); startAuto();
+  ballAt(90, 0.4f); simRun(600);
+  CHECK(g_navState == NAV_APPROACH && absf(g_reqVy) < 0.01f && absf(g_reqW) > 0.05f);       // turns first, does not charge forward at a ball on its side
+  ballAt(10, 0.4f); simRun(600);
+  CHECK(g_reqVy > 0.1f);
+  // sensor failure returns to a safe state
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;
+  simRun(g_cfg.ringRailMs + 800);
+  CHECK(allWheelsStopped() && !g_autoEnabled);
+}
+
+static void t_ring_polarity_and_calibration() {
+  // the swing measurement ignores the DC level: low or high resting level, same detection (no polarity assumption)
+  for (int dc = 0; dc < 2; dc++) {
+    bootCal(); simRun(300);
+    for (int i = 0; i < 8; i++) { g_mockRingBase[i] = dc ? 900 : 40; g_mockRingAmp[i] = 0; }
+    g_mockRingAmp[0] = 200; simRun(500);
+    CHECK(g_ball.valid && g_ball.bestCh == 0);
+  }
+  // calibration with the ball absent stores the floor; a weak signal then stays below the threshold
+  bootCal(); ballGone(); g_mockRingNoise = 6; g_cfg.ringCalDone = 0; simRun(300);
+  Serial.out.clear(); word("calibrate"); simRun(400);
+  CHECK(modeIs("CALIBRATION"));
+  simRun(2500);
+  CHECK(g_cfg.ringCalDone == 1 && !modeIs("CALIBRATION"));
+  float thr = ringThreshold(g_cfg, 0);
+  CHECK(thr >= (float)g_cfg.ringSeen);
+  g_mockRingAmp[0] = (uint16_t)(0.5f * thr); simRun(400);
+  CHECK(!g_ball.valid);                                                    // below threshold: no ball
+  g_mockRingAmp[0] = (uint16_t)(3.0f * thr); simRun(400);
+  CHECK(g_ball.valid);
+  // refused while a ball signal is present, and while moving
+  Serial.out.clear(); word("calibrate"); simRun(100);
+  CHECK(outHas("ball signal is present") && !g_ringCalActive);
+  g_mockRingAmp[0] = 0; simRun(1500); send("f"); simRun(100); Serial.out.clear(); word("calibrate"); simRun(100);
+  CHECK(outHas("stop first") && !g_ringCalActive);
+}
+
+static void t_direction_confidence() {
+  bootCal(); simRun(300);
+  ballAt(60, 0.5f); simRun(500);
+  CHECK(g_ball.valid && !g_ball.ambiguous && absf(g_ball.bearing - 60.0f) < 12.0f && g_ball.confidence >= 50);
+  uint8_t good = g_ball.confidence;
+  ballAt(60, 0.02f); simRun(500);                                          // too weak: below the detection threshold
+  CHECK(!g_ball.bearingKnown);
+  ballAt(60, 0.12f); simRun(500);                                          // barely above: low confidence
+  if (g_ball.bearingKnown) CHECK(g_ball.confidence < good);
+  // conflicting pattern: two strong receivers looking in opposite directions and nothing in between
+  ballGone();
+  for (int i = 0; i < 8; i++) g_mockRingAmp[i] = 0;
+  g_mockRingAmp[0] = 200; g_mockRingAmp[4] = 190; simRun(600);
+  CHECK(g_ball.ambiguous && g_ball.confidence <= 30);
+  Serial1.out.clear(); simRun(3000);
+  TeleSnapshot s; teleInit(&s); for (auto& f : btFrames()) teleParseLine(&s, f.c_str(), 1000);
+  CHECK(s.ambiguous && !s.bearingValid);                                   // no confident direction is reported
+  word("defend"); simRun(1500);
+  CHECK(g_defState != DEF_TRACK && g_defState != DEF_INTERCEPT);           // and defending does not act on it
+}
+
+static void t_esp32_protocol() {
+  bootCal(); simRun(300);
+  ballAt(25, 0.5f); simRun(500);
+  Serial1.out.clear(); simRun(8000);
+  auto fr = btFrames();
+  TeleSnapshot s; teleInit(&s);
+  TeleLineBuf lb; teleLineInit(&lb);
+  char line[TELE_MAX_LINE + 2];
+  uint32_t now = 10000;
+  int got = 0;
+  for (char ch : Serial1.out) if (teleLineFeed(&lb, ch, line, sizeof(line)) && line[0] == '{') { if (teleParseLine(&s, line, now)) got++; }
+  CHECK(got == (int)fr.size() && s.bad == 0 && s.lost == 0 && s.frames == (uint32_t)got);
+  CHECK(teleLinkState(&s, now + 100, true) == TL_OK);
+  CHECK(teleLinkState(&s, now + 2000, true) == TL_STALE);
+  CHECK(teleLinkState(&s, now + 6000, true) == TL_LOST);
+  CHECK(teleLinkState(&s, now + 100, false) == TL_LOST);                   // Bluetooth link down: lost, whatever was received before
+  TeleSnapshot fresh; teleInit(&fresh);
+  CHECK(teleLinkState(&fresh, now, true) == TL_NO_DATA);
+  char view[1000];
+  teleRender(&s, now + 100, true, view, sizeof(view));
+  CHECK(strstr(view, "robot link: OK") && strstr(view, "ESTIMATES") && strstr(view, "n/a") == nullptr);
+  teleRender(&s, now + 3000, true, view, sizeof(view));
+  CHECK(strstr(view, "STALE"));
+  teleRender(&s, now + 9000, false, view, sizeof(view));
+  CHECK(strstr(view, "LINK LOST") && strstr(view, "no current telemetry"));
+  // malformed input never crashes or corrupts the snapshot
+  TeleSnapshot m; teleInit(&m);
+  const char* badLines[] = {"", "{", "{}", "{\"v\":2,\"k\":\"c\",\"n\":1,\"ms\":5}", "{\"v\":1,\"k\":\"c\",\"n\":1", "garbage", "{\"v\":1,\"k\":\"z\",\"n\":1,\"ms\":5}", "{\"v\":1,\"n\":1,\"ms\":5}"};
+  for (const char* b : badLines) CHECK(teleParseLine(&m, b, 1) == 0);
+  CHECK(m.bad == 8 && m.frames == 0);
+  std::string huge = "{\"v\":1,\"k\":\"c\",\"n\":1,\"ms\":5,\"x\":\"" + std::string(500, 'a') + "\"}";
+  CHECK(teleParseLine(&m, huge.c_str(), 1) == 0);
+  TeleLineBuf lb2; teleLineInit(&lb2);
+  std::string stream = std::string(900, 'q') + "\n" + fr[0] + "\n";                    // an over-long line is dropped and the next one is read
+  int okLines = 0; for (char ch : stream) if (teleLineFeed(&lb2, ch, line, sizeof(line))) okLines++;
+  CHECK(okLines == 1 && lb2.dropped == 1);
+  // a missing frame is counted
+  TeleSnapshot g; teleInit(&g);
+  teleParseLine(&g, fr[0].c_str(), 1); teleParseLine(&g, fr[2].c_str(), 2);
+  CHECK(g.lost == 1);
+  // null / absent values render as n/a, never as zero
+  ballGone(); simRun(900); Serial1.out.clear(); g_mpu.present = false; simRun(3000);
+  TeleSnapshot nn; teleInit(&nn); for (auto& f : btFrames()) teleParseLine(&nn, f.c_str(), 100);
+  teleRender(&nn, 150, true, view, sizeof(view));
+  CHECK(strstr(view, "n/a"));
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2017,6 +2463,20 @@ static const TestCase TESTS[] = {
   T(t_shot_parallel_aims_while_reversing),
   T(t_shoot_pwm_limit_and_no_reverse),
   T(t_autostart),
+  T(t_defend_enter_exit),
+  T(t_defend_behaviour),
+  T(t_defend_prediction),
+  T(t_defend_hysteresis_and_limits),
+  T(t_defend_fault_stop),
+  T(t_estop_every_mode),
+  T(t_cmd_parser_limits),
+  T(t_telemetry_frames),
+  T(t_gyro_diagnostics),
+  T(t_motion_diagnostics),
+  T(t_attack_side_ball),
+  T(t_ring_polarity_and_calibration),
+  T(t_direction_confidence),
+  T(t_esp32_protocol),
   T(t_bt_protocol),
   T(t_bt_modes_and_estop),
   T(t_bt_link_loss),

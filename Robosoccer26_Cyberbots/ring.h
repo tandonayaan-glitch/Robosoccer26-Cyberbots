@@ -51,6 +51,7 @@ struct Ball {
   uint8_t bestCh;
   uint16_t seenMask;         // which ring channels see the ball
   uint8_t nSeen;
+  bool ambiguous;            // strong receivers disagree about the direction (more than ringblend degrees apart): a confident direction is NOT reported
   bool held;                 // front module reports the ball in the shooting position
   bool centered, ready;      // ready = held and the ring says it is straight ahead (or modneedring = 0) and the underside sensor agrees (when it is usable)
   bool positioned;           // the underside sensor says the ball is in the attack position, or it is not usable (then it does not vote)
@@ -200,6 +201,9 @@ static void ringUpdateBall(const Config& c, uint32_t nowMs) {
   float brg; uint8_t best;
   bool known = ringBearingFrom(amp, seen, c.ringBearing, RING_CH_MAX, (float)c.ringBlend, &brg, &best);
   g_ball.bearingKnown = known;
+  g_ball.ambiguous = false;
+  for (uint8_t i = 0; known && i < RING_CH_MAX; i++)                // conflicting pattern: another receiver nearly as strong looks the other way
+    if (seen[i] && i != best && amp[i] >= 0.5f * amp[best] && absf(angDiffDeg((float)c.ringBearing[best], (float)c.ringBearing[i])) > (float)c.ringBlend) g_ball.ambiguous = true;
   if (known) {
     g_ball.bearing = brg; g_ball.bestCh = best; g_ball.strength = g_ring[best].s;
     // Last bearing and its rate (where the ball went when it disappears) only from a healthy signal: near the detection threshold channels drop out
@@ -238,7 +242,7 @@ static void ringUpdateBall(const Config& c, uint32_t nowMs) {
   bool ready = other && (!c.underNeed || g_ball.positioned);
   if (known) { if (!g_ball.seenSinceMs) g_ball.seenSinceMs = nowMs ? nowMs : 1u; } else g_ball.seenSinceMs = 0;
   { int cf = 0;
-    if (known) { cf = (int)(clampf(g_ball.strength, 0.0f, 1.0f) * 60.0f) + (g_ball.nSeen >= 2 ? 20 : 0) + (elapsedMs(nowMs, g_ball.seenSinceMs) >= 100 ? 20 : 0); }
+    if (known) { cf = (int)(clampf(g_ball.strength, 0.0f, 1.0f) * 60.0f) + (g_ball.nSeen >= 2 && !g_ball.ambiguous ? 20 : 0) + (elapsedMs(nowMs, g_ball.seenSinceMs) >= 100 ? 20 : 0); if (g_ball.ambiguous && cf > 30) cf = 30; }
     g_ball.confidence = (uint8_t)(cf > 100 ? 100 : cf); }
   if (ready && !g_ball.ready) g_ball.readySinceMs = nowMs ? nowMs : 1u;
   if (!ready) g_ball.readySinceMs = 0;

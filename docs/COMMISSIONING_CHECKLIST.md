@@ -6,7 +6,7 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 ## Phase 0 – Robot unpowered (no battery, no USB)
 - [ ] The board is a genuine/clone **Arduino Mega 2560**; note which bootloader/USB chip it has (the watchdog stays disabled, `WIRING_MEGA.md` §8).
 - [ ] **Identify the two phototransistors** (part number or photo; lead order; emitter-collector breakdown voltage) and the MPU6050 breakout (GY-521 with regulator or bare chip) and the IR modules' supply range. Answer `BALL_SENSING.md` §6.
-- [ ] Build each receiver circuit: collector → 5 V, emitter → junction, **its own 10 kΩ** junction → GND, junction → its own analog input (A0, A1). The junctions are not joined.
+- [ ] Build each receiver circuit: collector → 5 V, emitter → junction, **its own 10 kΩ** junction → GND, junction → its own analog input (A0…A5). The junctions are not joined.
 - [ ] Transmitter LEDs: each with its own resistor (about 180 Ω for 20 mA from 5 V, from the datasheet's V_f/I_f), always on, no GPIO.
 - [ ] Remove the ENA/ENB jumpers on both L298N boards; fit **10 kΩ pull-downs on all 12 L298N control inputs** (IN1–IN4, ENA, ENB, both boards); a **fuse** and the **power switch** in the battery positive, reachable at all times.
 - [ ] Wiring check against `docs/WIRING_MEGA.md` §2 (every pin): continuity, no shorts between neighbours, **one common ground** (battery −, both L298N, Mega, MPU6050, sensors).
@@ -14,7 +14,7 @@ Do the phases in order. Stop and fix at the first failure. Tick a box only with 
 
 ## Phase 1 – Electrical checks with a meter (motor battery disconnected from the L298Ns)
 - [ ] Logic supply: 5 V rail correct under load (USB or converter).
-- [ ] Every receiver junction (measured at the Mega's A0/A1 pin) is about 0 V in the dark and stays ≤ ~4.8 V with a flashlight on the lens; it reacts to light (if not, swap the phototransistor leads).
+- [ ] Every receiver junction (measured at each Mega A0…A5 pin) is about 0 V in the dark and stays ≤ ~4.8 V with a flashlight on the lens; it reacts to light (if not, swap the phototransistor leads).
 - [ ] Each IR module OUT, measured before connecting, is within 0–5 V in both states (and ≤ 5 V; ≤ the Mega's VCC + 0.5 V).
 - [ ] MPU6050: supply voltage matches the breakout; with the robot idle, SDA/SCL read the breakout's logic level (about 3.3 V on a regulated GY-521).
 - [ ] Motor supply polarity; both L298N boards receive Vs; motors **not** connected to the supply yet (or the supply switch off).

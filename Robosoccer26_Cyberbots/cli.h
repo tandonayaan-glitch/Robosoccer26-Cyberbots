@@ -16,9 +16,14 @@ static bool g_lineMode = false, g_lineBad = false, g_lineOvf = false;
 static char g_line[64];
 static uint8_t g_lineLen = 0;
 static uint32_t g_lineStartMs = 0;
+static char g_word[40];
+static uint8_t g_wordLen = 0;
+static bool g_wordOvf = false;
+static uint32_t g_wordLastMs = 0;
 
 static void printHelp() {
-  say("INFO", "--- commands (115200 baud). Single keys act at once; words start with ':' and end with Enter ---");
+  say("INFO", "--- commands (115200 baud, line ending: Newline or Both NL & CR). A single key sent alone acts at once; a WORD ends with Enter; ':' commands take arguments ---");
+  say("INFO", "WORDS (same on USB and Bluetooth): defend | attack | manual | stop | status | sensors | gyro [drift [s]|cal|stop] | calibrate | motors | tele | help   ('!' or X = emergency stop)");
   say("INFO", "f b l r : manual forward/back/strafe-left/strafe-right   q e : rotate CCW/CW   (each key moves ~%u ms, repeat to continue)", (unsigned)g_cfg.manualHoldMs);
   say("INFO", "s : stop + disable autonomy    ! : emergency stop    a : ENABLE autonomous ball seeking (refused if unsafe)");
   say("INFO", "i : receivers + modules   I : live receiver view   m : IMU   d : nav/ball/PWM   h : health report   g : diagnostics   t : test mode help   ? : this help");
@@ -34,6 +39,7 @@ static void printHelp() {
   say("INFO", "--- settings (EEPROM) ---");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
+  say("INFO", ":tele [on|off|usb on|usb off|now] = telemetry to the ESP32 | :gyro drift [s] = stationary drift test | :motors = commanded motor state | :defend / :attack / :manual = modes (docs/DEFENDING.md)");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach.");
 }
 
@@ -47,6 +53,21 @@ static bool parseF(const char* s, float* out) {
 }
 
 #include "ringcli.h"
+
+// 'calibrate': gyro bias + receiver noise floor in one safe step. Refused unless everything is stopped and no ball signal is present.
+static void cmdCalibrate(uint32_t now) {
+  (void)now;
+  const Config& c = g_cfg;
+  if (g_estop) { say("SAFETY", "calibrate refused: emergency stop is latched"); return; }
+  if (g_autoEnabled || g_defendEnabled || g_navState == NAV_MANUAL || g_navState == NAV_TEST || !motorsAllZero()) { say("SAFETY", "calibrate refused: stop first ('stop') and wait for the wheels to rest"); return; }
+  if (g_ball.valid) { say("WARN", "calibrate refused: a ball signal is present (confidence %u). Remove or switch off the ball and any other infrared source, then repeat.", (unsigned)g_ball.confidence); return; }
+  if (ringCountEnabled(c) == 0) { say("WARN", "calibrate refused: no receiver channel is enabled"); return; }
+  if (g_imu.present && g_imu.ok) { imuStartCalibration(); say("INFO", "gyro bias calibration started (~%u samples): do not touch the robot", (unsigned)c.imuCalSamples); }
+  else say("WARN", "gyro part skipped: the MPU6050 is not delivering data");
+  memset(g_ringCalMax, 0, sizeof(g_ringCalMax));
+  g_ringCalActive = true; g_ringCalEndMs = millis() + 2000u;
+  say("INFO", "receiver noise floor calibration: measuring for 2 s with the ball OFF. Mode shows CALIBRATION meanwhile; ':save' keeps the result.");
+}
 
 static void cmdTestModeText() {
   say("TEST", "TEST MODE: motors are OFF and nothing moves by itself. Bench checklist:");
@@ -123,6 +144,31 @@ static void cliExecLine(char* line, uint32_t now) {
   const char* cmd = t[0];
   Config& c = g_cfg;
   if (STREQ(cmd, "help")) reportRequest(REP_HELP);
+  else if (STREQ(cmd, "defend")) { defendEnable(c, now); }
+  else if (STREQ(cmd, "attack")) { if (navEnableAuto(c, now)) say("NAV", "ATTACK mode (autonomous ball seeking) ENABLED. 'stop' ends it."); }
+  else if (STREQ(cmd, "idle")) { navStop(PSTR("operator: idle")); g_remoteManual = false; say("SAFETY", "idle: stopped, no mode active"); }
+  else if (STREQ(cmd, "sensors")) reportRequest(REP_SENSORS);
+  else if (STREQ(cmd, "motors")) reportRequest(REP_MOTORS);
+  else if (STREQ(cmd, "calibrate")) cmdCalibrate(now);
+  else if (STREQ(cmd, "gyro")) {
+    if (!t[1]) reportRequest(REP_GYRO);
+    else if (STREQ(t[1], "cal")) { if (!motorsAllZero()) say("WARN", "gyro calibration refused: motors are not stopped"); else if (!g_imu.present) say("WARN", "gyro calibration impossible: IMU not present"); else { imuStartCalibration(); say("INFO", "gyro bias calibration started - keep the robot completely still"); } }
+    else if (STREQ(t[1], "stop")) { imuDriftFail(5); say("INFO", "drift test stopped"); }
+    else if (STREQ(t[1], "drift")) {
+      float sec = (float)c.driftSec;
+      if (t[2] && (!parseF(t[2], &sec) || sec < 5 || sec > 300)) { say("WARN", "usage: gyro drift [5..300 seconds]"); }
+      else if (imuDriftStart(c, now, (uint32_t)(sec * 1000.0f), motorsAllZero() && elapsedMs(now, g_motorsStoppedSinceMs) > 1000 && !g_autoEnabled && !g_defendEnabled && g_navState != NAV_MANUAL)) say("INFO", "gyro drift test running for %u s: do not touch or move the robot; 'gyro' shows the result", (unsigned)sec);
+      else say("WARN", "gyro drift test refused: needs a calibrated, working MPU6050 and all motors stopped for at least 1 s (try 'calibrate' / 'gyro cal' first)");
+    } else say("WARN", "usage: gyro | gyro drift [s] | gyro cal | gyro stop");
+  }
+  else if (STREQ(cmd, "tele")) {
+    if (!t[1]) printTele(c, now);
+    else if (STREQ(t[1], "on")) { c.teleEnable = 1; say("INFO", "telemetry ON"); }
+    else if (STREQ(t[1], "off")) { c.teleEnable = 0; say("INFO", "telemetry OFF"); }
+    else if (STREQ(t[1], "now")) { teleSendNow(c, now, 'c'); teleSendNow(c, now, 'r'); }
+    else if (STREQ(t[1], "usb")) { g_tele.usb = t[2] && STREQ(t[2], "on"); say("INFO", "telemetry echo on USB %S", g_tele.usb ? PSTR("ON (frames also print here)") : PSTR("OFF")); }
+    else say("WARN", "usage: :tele [on|off|now|usb on|usb off]");
+  }
   else if (STREQ(cmd, "set")) cmdParamSet(t[1] ? t[1] : "", t[2]);
   else if (STREQ(cmd, "get")) cmdParamGet(t[1]);
   else if (STREQ(cmd, "save")) cmdSave();
@@ -191,6 +237,9 @@ static void cliExecLine(char* line, uint32_t now) {
   else if (STREQ(cmd, "stop")) { navStop(PSTR("operator stop")); say("SAFETY", "stopped; autonomy disabled"); }
   else if (STREQ(cmd, "estop")) { navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); }
   else if (STREQ(cmd, "bt")) printBt(c, now);
+  else if (STREQ(cmd, "manual") && !t[1]) {
+    if (!navEstopRefuses(PSTR("manual"))) { navStop(PSTR("operator: manual mode")); g_remoteManual = true; recAdd(REC_MODE, 1); say("NAV", "MANUAL mode: keys f b l r q e on USB, W S A D Z C on Bluetooth. 'stop' leaves it; 'attack' / 'defend' switch."); }
+  }
   else if (STREQ(cmd, "manual")) {
     char k1 = t[1] ? t[1][0] : 0;
     if (t[1] && !t[1][1] && (k1 == 'f' || k1 == 'b' || k1 == 'l' || k1 == 'r' || k1 == 'q' || k1 == 'e')) navManual(c, k1, now);
@@ -221,22 +270,43 @@ static void cliSingle(char ch, uint32_t now) {
   }
 }
 
+static void cliFinishWord(uint32_t now) {
+  uint8_t n = g_wordLen;
+  bool ovf = g_wordOvf;
+  g_wordLen = 0; g_wordOvf = false;
+  if (ovf) { say("WARN", "input line too long: ignored, nothing executed"); return; }
+  uint8_t s0 = 0;
+  while (s0 < n && (g_word[s0] == ' ' || g_word[s0] == '\t')) s0++;
+  while (n > s0 && (g_word[n - 1] == ' ' || g_word[n - 1] == '\t')) n--;
+  if (s0 >= n) return;
+  if (n - s0 == 1) { cliSingle(g_word[s0], now); return; }          // one key alone = the classic single-key command
+  char w[40]; uint8_t k = 0;
+  for (uint8_t i = s0; i < n; i++) w[k++] = (g_word[i] >= 'A' && g_word[i] <= 'Z') ? (char)(g_word[i] - 'A' + 'a') : g_word[i];
+  w[k] = 0;
+  char first[16]; uint8_t f = 0;
+  while (f < sizeof(first) - 1 && w[f] && w[f] != ' ' && w[f] != '\t') { first[f] = w[f]; f++; }
+  first[f] = 0;
+  if (!cliIsWord(first)) { say("WARN", "unknown input '%s': NOTHING was executed (single keys only act when sent alone; words: 'help')", first); return; }
+  cliExecLine(w, now);
+}
+
 static void cliPoll(uint32_t now) {
   if (g_lineMode && elapsedMs(now, g_lineStartMs) > 4000) { g_lineMode = false; say("WARN", "unterminated ':' line abandoned"); }
+  if (g_wordLen && elapsedMs(now, g_wordLastMs) >= 8) cliFinishWord(now);       // no line ending: 8 ms of silence completes the input
   int budget = 64;
   while (Serial.available() > 0 && budget-- > 0) {
     int v = Serial.read();
     if (v < 0) break;
     uint8_t ch = (uint8_t)v;
-    if (ch == '!') { cliSingle('!', now); g_lineMode = false; continue; }   // works even inside a ':' line
-    if (ch == 0x03 || ch == 0x1B) { g_lineMode = false; continue; }          // Ctrl-C / ESC cancels the line
+    if (ch == '!') { cliSingle('!', now); g_lineMode = false; g_wordLen = 0; g_wordOvf = false; continue; }   // works even inside a line or a word
+    if (ch == 0x03 || ch == 0x1B) { g_lineMode = false; g_wordLen = 0; g_wordOvf = false; continue; }          // Ctrl-C / ESC cancels the line
     if (ch == '\r' || ch == '\n') {
       if (g_lineMode) {
         g_line[g_lineLen] = 0;
         if (g_lineBad || g_lineOvf) say("WARN", "line rejected (%S)", g_lineOvf ? PSTR("too long") : PSTR("invalid characters"));
         else cliExecLine(g_line, now);
         g_lineMode = false;
-      }
+      } else if (g_wordLen || g_wordOvf) cliFinishWord(now);
       continue;
     }
     if (g_lineMode) {
@@ -244,9 +314,10 @@ static void cliPoll(uint32_t now) {
       if (g_lineLen < sizeof(g_line) - 1) g_line[g_lineLen++] = (char)ch; else g_lineOvf = true;
       continue;
     }
-    if (ch == ':') { g_lineMode = true; g_lineBad = g_lineOvf = false; g_lineLen = 0; g_lineStartMs = now; continue; }
-    if (ch == ' ' || ch == '\t') continue;
-    cliSingle((char)ch, now);
+    if (ch == ':' && g_wordLen == 0) { g_lineMode = true; g_lineBad = g_lineOvf = false; g_lineLen = 0; g_lineStartMs = now; continue; }
+    if (ch < 0x20 || ch > 0x7E) continue;
+    if (g_wordLen < sizeof(g_word) - 1) g_word[g_wordLen++] = (char)ch; else g_wordOvf = true;
+    g_wordLastMs = now;
   }
 }
 

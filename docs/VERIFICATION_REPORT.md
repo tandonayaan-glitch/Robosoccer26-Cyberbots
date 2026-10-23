@@ -47,3 +47,13 @@ Removed because the Mega has 8 KB of RAM, 256 KB of flash and no filesystem: CSV
 Verified (simulation and compile only): AVR build 92,008 B flash (36 %), 3,735 B RAM (45 %), 0 warnings; host suite 65/65 cases, 2,463 checks (ASan/UBSan), covering the BT protocol, E-stop latch and priority, link/lease loss, underside sensor fault handling, bounded reverse-and-reattack, layered search, no-goal shot, per-wheel trim. Static analysis run.
 
 NOT verified: everything on real hardware (HC-05 pairing and level shifting, the D40 sensor type/polarity, reverse distances, ESP32 sketch: not even compiled).
+
+
+## Intelligence / telemetry / defending update
+
+Verified by simulation and compilation only:
+* Mega build: 125,542 B flash (49 %), 5,031 B RAM (61 %), 3,161 B left for the stack, 0 warnings. Host suite 80/80 cases, 2,734 checks (ASan/UBSan); static analysis clean.
+* New simulated tests: defend enter/leave/refusals, defend state sequences, prediction (rising / flat / falling / too few observations), hysteresis and strafe/offset limits, fault stop, emergency stop from every mode, parser limits (case, oversize, unknown words, Bluetooth framing), telemetry framing (contiguous sequence, ≤ 299 B, all four kinds, nulls for missing data, no blocking with a stuck UART), gyro startup failure / bias / rejection / drift test / tilt, motion diagnostics (command directions, continuous-motion watchdog, stale command clearing), attack side-ball behaviour, receiver polarity independence and calibration, direction confidence and ambiguity, ESP32 protocol parsing and link-state logic.
+* Test-suite changes needed by the new design: single-key commands on USB/Bluetooth are now line framed (a lone key still works after 8 ms / 25 ms); the default receiver set is A0–A5.
+
+NOT verified: everything on the physical robot (see README "Unverified hardware assumptions"); the ESP32 sketch has never been built for an ESP32 (only parser tests and a stub type-check); real Bluetooth range, pairing, throughput; blocking or intercepting a real ball.

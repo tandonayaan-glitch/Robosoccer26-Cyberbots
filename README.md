@@ -1,18 +1,38 @@
 # Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware (Arduino Mega 2560)
 
-Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, two 5 mm IR phototransistor receivers (each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an MPU6050 for relative heading, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
-**No multiplexer. No kicker.** The earlier ESP32-S version is preserved in git as commit `1963a3f` (local tag `esp32-final`).
+Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, six 5 mm IR phototransistor receivers (A0–A5, each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an underside ball-position sensor (D40), an MPU6050 for a relative heading, an HC-05 Bluetooth module (Serial1) talking to an **ESP32 remote**, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
+Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **DEFEND** (`defend`: heading hold + sideways intercept/block), **MANUAL**, **CALIBRATION**, **IDLE**, **FAULT**. **No multiplexer. No kicker, no encoders, no current sensors.** The earlier ESP32-S version is preserved in git as commit `1963a3f` (local tag `esp32-final`).
 
 > **Status – read this first.**
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 83,928 B flash (33 %), 3,573 B static RAM (43 %), 4,619 B left for the stack |
-> | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM) | 57 test cases, 2,292 checks, all pass, ASan/UBSan clean |
-> | Upload / run on a Mega | **not done**: the firmware has never run on the board |
-> | Receivers, modules, motors, power, MPU6050 wiring on the real robot | **not done**: the pinout, junction voltages, response to the ball, mounting angles, polarity, reset states and the power supply are unverified |
+> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 125,542 B flash (49 %), 5,031 B static RAM (61 %), 3,161 B left for the stack |
+> | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM, Bluetooth) | 80 test cases, 2,734 checks, all pass, ASan/UBSan clean; static analysis (cppcheck, clang-tidy, valgrind) clean |
+> | **ESP32 sketch** | **not built for an ESP32** (no toolchain). Its protocol parser is unit-tested on the host; the sketch is only type-checked against host stubs (`tools/esp32_syntax_check.sh`) |
+> | Upload / run on a Mega, HC-05 pairing, range, receivers, modules, underside sensor, motors, power, MPU6050 on the real robot | **not done** – every behaviour below is unverified on hardware |
 >
-> **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md`. Details: `docs/VERIFICATION_REPORT.md`.
+> **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md` and the staged plan in `docs/CALIBRATION_AND_TEST_PLAN.md`. Details: `docs/VERIFICATION_REPORT.md`.
+
+## Commands (Serial Monitor 115200 baud, line ending **Newline** or **Both NL & CR**; the same words work over Bluetooth)
+
+`defend` · `attack` · `manual` · `stop` (or `idle`) · `status` · `sensors` · `gyro` (`gyro drift [s]`, `gyro cal`, `gyro stop`) · `calibrate` · `motors` · `tele` · `help`; emergency stop `!` (USB) / `X` (Bluetooth).
+Classic single keys (`f b l r q e s a h i m d g t ?`) work **when sent alone**; `:set`, `:get`, `:save`, `:ring`, `:mod`, `:log`, … are unchanged. A multi-letter burst that is not a known word executes nothing. Full list: `help`; protocol: `docs/BLUETOOTH.md`; telemetry: `docs/TELEMETRY.md`; defending: `docs/DEFENDING.md`.
+
+**Startup:** after a clean boot the robot starts ATTACK by itself after 1.5 s (`autostart`, team decision; `:set autostart 0` + `:save` for always-idle). DEFEND is never started automatically. Bluetooth is not required.
+
+## Build and test
+
+```
+tools/avr_build.sh            # real ATmega2560 compile (avr-gcc + Arduino AVR core from Debian packages); never uploads
+test/run_tests.sh             # host simulation, one process per test case, ASan/UBSan
+test/static_analysis.sh       # cppcheck, clang-tidy, valgrind
+tools/esp32_syntax_check.sh   # type-check of the ESP32 sketch against host STUBS (not an ESP32 build)
+```
+Arduino IDE: open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino`, board "Arduino Mega or Mega 2560". ESP32: open `remote_esp32/remote_esp32.ino`, an **original ESP32** board (Classic Bluetooth), partition "Huge APP".
+
+## Unverified hardware assumptions (all of them)
+HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · phototransistor pinout and junction voltages · where each receiver looks (angles are a guess until `:ring bearing`) · receiver response to the real ball · D40 sensor type and active level · module polarity · MPU6050 axis signs, pull-ups and supply · motor directions and the power supply · strafe speed/slip · everything about defending or shooting a real ball · Bluetooth range · the exact ESP32 board.
 
 ## Pin map (fixed in `pins.h`)
 
@@ -22,20 +42,21 @@ Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers,
 | **D24 / D25 / D6** | Right L298N IN3 / IN4 / ENB (PWM) → OUT3/OUT4 = **back-right** motor |
 | **D26 / D27 / D9** | **Left** L298N IN1 / IN2 / ENA (PWM) → OUT1/OUT2 = **front-left** motor |
 | **D28 / D29 / D10** | Left L298N IN3 / IN4 / ENB (PWM) → OUT3/OUT4 = **back-left** motor |
-| **A0** | phototransistor receiver 0 (its own junction and 10 kΩ load resistor) |
-| **A1** | phototransistor receiver 1 (its own junction and 10 kΩ load resistor) |
-| A2 … A7 | reserved for more receivers (off until fitted: `:ring on <n>`) |
+| **A0 … A5** | phototransistor receivers 0–5 (each its own junction and 10 kΩ load resistor); bearings via `:ring bearing` |
+| A6, A7 | spare (off until fitted: `:ring on <n>`) |
+| **D18 / D19** | HC-05 RXD (through a 1 kΩ/2 kΩ divider) / HC-05 TXD (Serial1) |
+| **D40** | underside ball-position sensor (active level is the `underlow` setting) |
 | **D34** | front IR obstacle module OUT (ball in the shooting position) |
-| **D35** | second IR obstacle module OUT (read and logged only) |
+| **D35** | second IR obstacle module OUT (obstacle input for defend mode, logged) |
 | **D20 / D21** | MPU6050 SDA / SCL (hardware I2C) |
 | D0 / D1 | USB serial (115200 baud) |
 
-Receiver circuit: phototransistor **collector → 5 V**, **emitter → its junction**, **10 kΩ junction → GND**, junction → its analog input; the receivers are never joined. The IR transmitter LEDs (940 nm, 5 V) are hard-wired through their own resistors (about 180 Ω for 20 mA, assumed V_f 1.3 V) and are **not controlled by the firmware**. **Verify the phototransistor pinout before applying 5 V.**
+Receiver circuit: phototransistor **collector → 5 V**, **emitter → its junction**, **10 kΩ junction → GND**, junction → its analog input; the receivers are never joined. Any IR transmitter LEDs that are fitted are hard-wired and **not controlled by the firmware**. **Verify the phototransistor pinout before applying 5 V.**
 Battery + goes through the power switch to both L298N motor-supply inputs; **all grounds are common**; **never put the battery's ~11 V on the Mega's 5 V pin**; do not power the electronics from the L298N's onboard 5 V. Full wiring, voltage checks, power options and pull-down advice: **`docs/WIRING_MEGA.md`**.
 
 ## Hardware (what the firmware is written for)
 
-1 Arduino Mega 2560 · 2 L298N · 4 BO motors + 4 mecanum wheels · battery pack + power switch · 2 IR phototransistors (5 mm, 2-pin) · 2 IR transmitter LEDs · 2 IR obstacle modules · 1 MPU6050 · breadboard, wires, resistors.
+1 Arduino Mega 2560 · 2 L298N · 4 BO motors + 4 mecanum wheels · battery pack + power switch · 6 IR phototransistors (5 mm, 2-pin) · 2 IR obstacle modules · 1 underside IR sensor · 1 HC-05 · (ESP32 remote) · 1 MPU6050 · breadboard, wires, resistors.
 
 ## How the ball is sensed (`docs/BALL_SENSING.md`)
 
