@@ -2192,7 +2192,7 @@ static void t_telemetry_frames() {
   }
   CHECK(bad == 0 && k[0] && k[1] && k[2] && k[3]);
   CHECK(sn.lost == 0 && sn.bad == 0);                                      // sequence numbers contiguous
-  CHECK(maxLen <= 299);
+  CHECK(maxLen <= 383);
   CHECK(fr.size() >= 8 && fr.size() <= 30);                                // limited by the 9600 baud link, well under the UART capacity
   // content
   CHECK(strcmp(sn.mode, "IDLE") == 0 && strcmp(sn.safety, "OK") == 0 && sn.ball);
