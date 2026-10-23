@@ -28,7 +28,10 @@ static int outCountOf(const std::string& hay, const char* s) { int n = 0; size_t
 static bool outHas(const char* s) { return Serial.out.find(s) != std::string::npos; }
 static int outCount(const char* s) { int n = 0; size_t p = 0; while ((p = Serial.out.find(s, p)) != std::string::npos) { n++; p += strlen(s); } return n; }
 static void freshEeprom(const char* name) {          // a private EEPROM image per test case; erased (0xFF) unless the file already exists
-  g_eepromPath = std::string("/tmp/mockeeprom_") + name;
+  const char* tempDir = getenv("TMPDIR");
+  if (!tempDir || !*tempDir) tempDir = getenv("TEMP");
+  if (!tempDir || !*tempDir) tempDir = "/tmp";
+  g_eepromPath = std::string(tempDir) + "/mockeeprom_" + name;
   ::remove(g_eepromPath.c_str());
   EEPROM.reset();
 }

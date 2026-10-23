@@ -33,7 +33,7 @@ Wheels lifted and motor battery disconnected for all of this.
 ```
 python laptop\laptop_remote.py --port COM6
 ```
-(use **your** Bluetooth port). It authenticates by itself and then shows a `robot>` prompt. Type `help` for everything.
+(use **your** Bluetooth port). At the `robot>` prompt, type `connect` and wait for **AUTHENTICATED**. Type `help` for everything.
 
 | Type | What it does |
 |---|---|
@@ -81,9 +81,9 @@ Anyone who has the key file can control the robot. The key proves that someone *
 
 Wheels lifted and motor battery disconnected until step 5.
 
-1. Pair and find the COM port; run the program: it must reach **AUTHENTICATED**.
+1. Pair and find the COM port; run the program, type `connect`, and wait for **AUTHENTICATED**.
 2. Stop the program, then connect from a phone/laptop Bluetooth terminal **without** the key: `M`, `W`, `defend` must answer `ERR:AUTH`, and `X` must still stop the robot.
-3. Type `ir`, `imu`, `motors`: data appears. `back` returns.
+3. Close the unauthenticated terminal, restart the laptop program and type `connect`. After **AUTHENTICATED**, type `ir`, `imu`, `motors`: data appears. `back` returns.
 4. Switch the HC-05 off or walk out of range: the program reports the link lost; switch it on again: it logs in again by itself.
 5. Connect the motor battery (wheels still lifted): `manual`, `w`: wheels turn for 0.4 s; `drive` and release the key: they stop; `x`: everything stops; `r` after login clears the latch.
 6. Only then try on the floor.

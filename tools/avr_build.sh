@@ -36,7 +36,9 @@ build_core() {  # compile core + Wire once (cached by timestamp)
 }
 build_core
 # The sketch: what the Arduino builder does with a .ino (prepend Arduino.h, compile as C++). Warnings ON for our own code.
-printf '#include <Arduino.h>\n#include "%s/Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino"\n' "$PWD" > "$OUT/sketch/sketch.cpp"
+# Use the sketch include directory below: a generated /c/... include path from
+# Git Bash is not understood inside source code by the native Windows compiler.
+printf '#include <Arduino.h>\n#include "Robosoccer26_Cyberbots.ino"\n' > "$OUT/sketch/sketch.cpp"
 LOG="$OUT/sketch.log"
 avr-g++ $CXXFLAGS -Wall -Wextra $INC -I"$PWD/Robosoccer26_Cyberbots" "$OUT/sketch/sketch.cpp" -o "$OUT/sketch/sketch.o" >"$LOG" 2>&1
 RC=$?
