@@ -17,7 +17,7 @@ Wheels lifted and motor battery disconnected for all of this.
    ```
    python -m pip install -r laptop\requirements.txt
    ```
-3. **Pair Windows with the HC-05:** Settings → Bluetooth & devices → Add device → Bluetooth → pick `HC-05` (or the name you gave it). The PIN is usually `1234` (check yours). Pairing only opens a Bluetooth link; it does **not** let anyone drive the robot.
+3. **Pair Windows with the HC-05:** Settings → Bluetooth & devices → Add device → Bluetooth → pick `HC-05` (or the name you gave it). Enter the PIN `2114` (the HC-05 must actually be set to it; the factory value is usually `1234`). Pairing only opens a Bluetooth link; it does **not** let anyone drive the robot.
 4. **Find the Bluetooth COM port:** Settings → Bluetooth & devices → Devices → More Bluetooth options → **COM Ports** tab → the entry whose direction is **Outgoing** for the HC-05 (for example `COM6`). Or run:
    ```
    python laptop\laptop_remote.py --list-ports

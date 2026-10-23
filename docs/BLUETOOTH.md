@@ -89,7 +89,7 @@ your revision), then `:set btbaud100 384`, `:save`, reset. Allowed values: 96, 1
 
 ## Pairing and connection (Windows)
 
-1. Leave the HC-05 as it is if it already talks to the Mega. Do not change its name, PIN or baud rate unless you must (AT commands differ between HC-05 revisions; nothing in this repository changes them for you). Typical factory values: name `HC-05`, PIN `1234`, 9600 baud, slave role - **unverified for your module**.
+1. Leave the HC-05 as it is if it already talks to the Mega. Do not change its name, PIN or baud rate unless you must (AT commands differ between HC-05 revisions; nothing in this repository changes them for you). Your pairing PIN is documented as `2114`; typical factory values are name `HC-05`, PIN `1234`, 9600 baud, slave role - **unverified for your module**, and the firmware never sets the PIN.
 2. Power the robot. The HC-05 LED blinks fast while unpaired and slowly (about every 2 s) when connected.
 3. Windows: Settings > Bluetooth & devices > Add device > Bluetooth > `HC-05`, enter the PIN. Pairing creates two virtual serial ports.
 4. Find the right one: Settings > Bluetooth & devices > Devices > More Bluetooth options > **COM Ports**: use the **Outgoing** entry for the HC-05 (the Incoming one is for devices that connect to the laptop). `python laptop\laptop_remote.py --list-ports` lists them too.
