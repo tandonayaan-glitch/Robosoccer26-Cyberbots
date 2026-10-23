@@ -7,3 +7,4 @@ __pycache__/
 robot.key
 *.key
 *.secret
+.venv/
