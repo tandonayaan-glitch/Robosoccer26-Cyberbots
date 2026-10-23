@@ -248,7 +248,7 @@ static void t_commands() {
   Serial.out.clear(); send(":status\n"); simRun(800);
   CHECK(outHas("uptime") && outHas("receivers: 8 on") && outHas("IMU present") && outHas("records"));
   Serial.out.clear(); send(":pins\n"); simRun(800);
-  CHECK(outHas("FR: IN1 D22 IN2 D23 ENA D5") && outHas("BL: IN3 D28 IN4 D29 ENB D10") && outHas("front D34, second D35") && outHas("SDA D20 SCL D21"));
+  CHECK(outHas("FR: IN1 D22 IN2 D23 ENA D5") && outHas("BL: IN3 D28 IN4 D29 ENB D10") && outHas("bottom sensor D34, second D35") && outHas("SDA D20 SCL D21"));
   Serial.out.clear(); send(":raw\n"); simRun(800);
   CHECK(outHas("raw analog") && outHas("A0=") && outHas("A7=") && outHas("raw module 0 (D34)") && outHas("raw module 1 (D35)") && outHas("IMU: present"));
   Serial.out.clear(); send(":ver\n"); simRun(100);
@@ -1002,10 +1002,10 @@ static void t_ring_pure_rules() {
 }
 
 static void t_ring_pins_and_isolation() {
-  ballGone(); setup();                                                   // default configuration: A0..A5 (six receivers)
+  ballGone(); setup();                                                   // default configuration: A0 and A1 (the two receivers fitted)
   simRun(300);
-  for (int ch = 0; ch < 6; ch++) CHECK(g_ring[ch].scans > 0);
-  for (int ch = 6; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A6, A7 are not scanned until switched on
+  for (int ch = 0; ch < 2; ch++) CHECK(g_ring[ch].scans > 0);
+  for (int ch = 2; ch < 8; ch++) CHECK(g_ring[ch].scans == 0);          // A2..A7 are not scanned until switched on (a floating input reads noise)
   for (int k = 0; k < 8; k++) CHECK(g_pinMode[PIN_RECV[k]] == INPUT);   // analog inputs, no pull-up
   CHECK(g_pinMode[PIN_MOD[0]] == INPUT_PULLUP && g_pinMode[PIN_MOD[1]] == INPUT);   // active-LOW front module: internal pull-up; the disabled second module is left alone
   CHECK(allWheelsStopped());
@@ -1251,8 +1251,10 @@ static void t_modules() {
 }
 
 static void t_ring_autonomy_refused() {
-  ballGone(); setup();                                                   // defaults: noise floor not calibrated
+  ballGone(); setup();                                                   // defaults; the start-up measured the quiet receivers by itself
   simRun(200);
+  CHECK(g_cfg.ringCalDone == 1 && g_start.autoCal);
+  g_cfg.ringCalDone = 0;                                                 // (a robot whose receivers were NOT quiet at start-up, or with autocal off)
   Serial.out.clear(); startAuto();
   CHECK(!g_autoEnabled && outHas("noise floor not calibrated"));
   calibrateAll();
@@ -1599,7 +1601,7 @@ static void t_old_hardware_removed() {
   CHECK(!outHas("TSOP") && !outHas("emitter"));            // no emitter / digital-receiver hardware is described
   CHECK(outHas("ball receivers") || outHas("[Ring]"));
   // pins: 8 direction + 4 PWM + 2 modules + 2 I2C + 2 serial + 2 Bluetooth + 1 underside sensor, all distinct (the compile-time asserts in pins.h); the receivers on A0..A7
-  CHECK(__builtin_popcountll(ALL_DIGITAL_MASK) == 21 && __builtin_popcountll(RECV_MASK) == 8 && (MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0 && __builtin_popcountll(MEGA_PWM_MASK) == 15);
+  CHECK(__builtin_popcountll(ALL_DIGITAL_MASK) == 20 && __builtin_popcountll(RECV_MASK) == 8 && (MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0 && __builtin_popcountll(MEGA_PWM_MASK) == 15);
   CHECK(outHas("ball receivers: ") && !outHas("GPIO") && !outHas("CD74") && !outHas("multiplex"));                    // no ESP32 pin names are left in the output
 }
 
@@ -1729,50 +1731,29 @@ static void t_bt_link_loss() {
 }
 
 // ================================================================================================
-// underside ball-position sensor (D40)
+// bottom alignment IR sensor: ONE module on D34 (the same input as module 0)
 
 static void t_under_sensor() {
   bootCal();
   simRun(200);
-  CHECK(g_cfg.underEnable == 1 && g_pinMode[P_UNDER] == INPUT_PULLUP);          // active-LOW default: pull-up on, so a missing sensor reads "no ball"
-  CHECK(!g_under.active && g_ball.positioned == false);
-  // debounce
-  bool ever = false;
-  g_mockUnderDetect = true; for (int k = 0; k < 3; k++) { simRun(1); ever |= g_under.active; }
-  g_mockUnderDetect = false; for (int k = 0; k < 60; k++) { simRun(1); ever |= g_under.active; }
-  CHECK(!ever);
-  // it is a confirmation, not a replacement: module + receivers alone are not enough while the underside sensor says "no ball"
-  ballAt(0, 0.5f); g_mockModDetect[0] = true; simRun(500);
-  CHECK(g_ball.held && !g_ball.ready && underUsable(g_cfg));
-  g_mockUnderDetect = true; simRun(100);
-  CHECK(g_ball.ready && g_ball.positioned);                                     // all three agree
-  // the receivers alone with only the underside sensor: not ready
-  ballAt(0, 0.5f); g_mockModDetect[0] = false; simRun(200);
-  CHECK(!g_ball.ready);
-  // no answer: everything else says "ball in place" but the sensor never reports it (disconnected, wrong polarity): it is ignored after understuck
-  g_mockUnderDetect = false; g_mockModDetect[0] = true; simRun(200);
-  CHECK(!g_ball.ready && !g_under.suspectMiss);
-  simRun(g_cfg.underStuckMs + 600);
-  CHECK(g_under.suspectMiss && !underUsable(g_cfg) && g_ball.ready);
-  g_mockUnderDetect = true; simRun(100);                                        // it answers: trusted again
-  CHECK(!g_under.suspectMiss && underUsable(g_cfg));
-  // stuck active while the receivers see no ball at all: ignored (and does not fake a position)
-  ballGone(); g_mockUnderDetect = true; simRun(g_cfg.underStuckMs + 600);
-  CHECK(g_under.suspectStuck && !underUsable(g_cfg) && !g_ball.valid);
-  g_mockUnderDetect = false; simRun(100);
-  CHECK(!g_under.suspectStuck);
-  // wrong polarity guess is survivable: the sensor really is active-HIGH but the setting says LOW
-  g_mockUnderActiveHigh = true; g_mockUnderDetect = false; simRun(g_cfg.underStuckMs + 800);
-  CHECK(g_under.active && g_under.suspectStuck && !g_ball.valid);               // read as "ball" forever with no receiver ball: ignored
-  send(":set underlow 0\n"); simRun(200);
-  CHECK(!g_under.active && g_pinMode[P_UNDER] == INPUT);
-  g_mockUnderDetect = true; simRun(100);
-  CHECK(g_under.active);
-  // switched off: it does not vote
-  send(":set underenable 0\n"); simRun(100);
-  CHECK(!g_under.active && g_ball.positioned);
+  CHECK(P_UNDER == 34 && P_MOD0 == 34);                                        // the single bottom sensor is on D34
+  CHECK(g_cfg.underEnable == 0 && modEnabled(g_cfg, 0) && !modEnabled(g_cfg, 1));
+  CHECK(g_pinMode[34] == INPUT_PULLUP && g_pinMode[40] == 0);                  // D40 is no longer touched
+  CHECK(!g_ball.held && !g_ball.ready && g_ball.positioned);
+  // alignment: the sensor alone is "held", ready needs the receivers straight ahead too (modneedring)
+  ballGone(); g_mockModDetect[0] = true; simRun(200);
+  CHECK(g_ball.held && !g_ball.ready);
+  ballAt(0, 0.5f); simRun(300);
+  CHECK(g_ball.held && g_ball.ready);
+  g_mockModDetect[0] = false; simRun(200);
+  CHECK(!g_ball.held && !g_ball.ready);
+  // active-HIGH wiring is a setting
+  g_mockModActiveHigh[0] = true; send(":mod level 0 high\n"); simRun(100);
+  g_mockModDetect[0] = true; simRun(100);
+  CHECK(g_ball.held);
+  g_mockModDetect[0] = false; g_mockModActiveHigh[0] = false; simRun(100);
   Serial.out.clear(); send(":raw\n"); simRun(800);
-  CHECK(outHas("raw underside sensor (D40)"));
+  CHECK(outHas("raw module 0 (D34)"));
 }
 
 // ================================================================================================
@@ -1933,6 +1914,7 @@ static void t_shoot_no_goal_and_wheel_scale() {
 }
 
 static void t_autostart() {
+  g_hostAutostart = true;                                                        // setup() leaves the automatic start armed
   // real boot sequence with the default settings: no command needed
   ballGone(); setup(); layout8(); calibrateAll();
   CHECK(g_cfg.autoStart == 1 && g_autoStartPending && !g_autoEnabled && allWheelsStopped());   // motors stay stopped through initialisation
@@ -2676,6 +2658,502 @@ static void t_auth_nokey_and_open() {
 
 
 
+// ================================================================================================
+// Start-up state machine, fresh-robot behaviour, USB serial parser, heading correction, fault recovery, config migration (debug session after the competition)
+
+static uint64_t worstLoopUs = 0;
+// Runs `ms` of simulated time one loop() at a time and remembers the longest single loop() in virtual time (a delay()/blocking wait would show here).
+static void runMeasured(uint32_t ms, bool trackMoves = false) {
+  uint64_t end = g_mockUs + (uint64_t)ms * 1000ULL;
+  while (g_mockUs < end) {
+    uint64_t t0 = g_mockUs; loop(); uint64_t dt = g_mockUs - t0; if (dt > worstLoopUs) worstLoopUs = dt;
+    if (trackMoves) trackWheelMotion();
+    mockAdvance(1000);
+  }
+}
+// runs until the start-up has finished (stops at once, before the automatic attack delay can elapse)
+static void runStartup(uint32_t maxMs, bool trackMoves = false) {
+  for (uint32_t i = 0; i < maxMs && !startupFinished(); i++) { loop(); if (trackMoves) trackWheelMotion(); mockAdvance(1000); }
+}
+static void asyncBoot() {                       // setup() returns at once; the stages run in loop()
+  g_hostStartupAsync = true; g_hostAutostart = true;
+  ballGone(); setup();
+}
+
+static void t_startup_stages_and_gate() {
+  asyncBoot();
+  CHECK(g_start.st == ST_MOTOR_INIT || g_start.st == ST_IMU_CHECK);
+  CHECK(allWheelsStopped() && !g_autoEnabled);
+  worstLoopUs = 0; anyWheelEverMoved = false;
+  // before READY: movement is refused with the reason, but the emergency stop and diagnostics are served from the first millisecond
+  send("f\n"); runMeasured(50, true);
+  CHECK(!anyWheelEverMoved && outHas("manual motion REFUSED: start-up is still running"));
+  send("a\n"); runMeasured(50, true);
+  CHECK(!g_autoEnabled && outHas("autonomous REFUSED: start-up is still running"));
+  send(":mtest FL\n"); runMeasured(50, true);
+  CHECK(g_mtest.state == 0);
+  send(":startup\n"); runMeasured(50);
+  CHECK(outHas("[START] ") && outHas("state "));
+  runStartup(12000, true);                                                         // IMU check (gyro bias) + 2 s IR settling + 1 s IR check + safety check
+  CHECK(g_start.st == ST_READY && !anyWheelEverMoved);
+  // every stage announced itself, in order
+  runMeasured(400);                                                               // let the queued messages drain (stays well inside the autostart delay)
+  size_t p0 = Serial.out.find("MOTOR INIT"), p1 = Serial.out.find("IMU CHECK", p0 == std::string::npos ? 0 : p0), p2 = Serial.out.find("IR SETTLING", p1 == std::string::npos ? 0 : p1),
+         p3 = Serial.out.find("IR CHECK:", p2 == std::string::npos ? 0 : p2), p4 = Serial.out.find("SAFETY CHECK", p3 == std::string::npos ? 0 : p3), p5 = Serial.out.find("READY.", p4 == std::string::npos ? 0 : p4);
+  CHECK(p0 != std::string::npos && p1 != std::string::npos && p2 != std::string::npos && p3 != std::string::npos && p4 != std::string::npos && p5 != std::string::npos);
+  CHECK(outHas("ignoring the receivers for 2000 ms") && outHas("no infrared LED is switched off"));
+  CHECK(outHas("receivers quiet") && g_start.autoCal && g_cfg.ringCalDone == 1);   // no saved calibration: measured by itself
+  CHECK(worstLoopUs < 3000);                                                       // nothing in the loop waited for a device
+  CHECK(g_start.armed && g_autoStartPending);                                      // READY, IMU ok, receivers quiet: the automatic attack is armed (not started yet)
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  // now movement works
+  send("f\n"); runMeasured(200);
+  CHECK(!allWheelsStopped() && g_navState == NAV_MANUAL);
+}
+
+static void t_startup_emergency_stop_during_startup() {
+  asyncBoot();
+  runMeasured(500);
+  send("!"); runMeasured(30);
+  CHECK(g_estop && allWheelsStopped());
+  runStartup(9000);
+  CHECK(g_start.st == ST_READY && g_estop && !g_autoEnabled && !g_autoStartPending == false ? true : (g_estop && !g_autoEnabled));
+  CHECK(!g_autoEnabled && allWheelsStopped());                                     // the latch also cancels the automatic start
+  send(":recover\n"); runMeasured(100);
+  CHECK(!g_estop && !g_autoEnabled && allWheelsStopped());
+}
+
+static void t_startup_imu_absent_or_invalid() {
+  // (a) MPU6050 absent
+  g_mpu.present = false;
+  asyncBoot();
+  runStartup(9000);
+  runMeasured(400);
+  CHECK(g_start.st == ST_READY_DEGRADED && !g_start.imuOk);
+  CHECK(outHas("IMU CHECK: MPU6050 NOT FOUND") && outHas("READY (degraded") && outHas("autostart NOT armed"));
+  CHECK(!g_autoStartPending && !g_autoEnabled && allWheelsStopped());
+  send("f\n"); runMeasured(200);
+  CHECK(!allWheelsStopped());                                                       // explicit manual control still works
+  send("s\n"); runMeasured(300);
+  send("a\n"); runMeasured(300);
+  CHECK(g_autoEnabled && outHas("running DEGRADED"));                                  // an explicit attack request is honoured, at reduced speed, with the warning
+  send("s\n"); runMeasured(200);
+  send(":hdgtest\n"); runMeasured(50);
+  CHECK(g_hdgt.state == 0 && outHas("heading test REFUSED"));                       // tests that need the IMU refuse
+  send(":yawcheck\n"); runMeasured(50);
+  CHECK(g_yawck.state == 0 && outHas("yaw check REFUSED"));
+  g_mpu.present = true;
+  // (b) present but returning invalid frames: the calibration can never finish, the start-up gives up after 6 s instead of hanging
+  g_mpu.mode = 3;
+  asyncBoot();
+  worstLoopUs = 0;
+  runStartup(11000);
+  runMeasured(400);
+  CHECK(g_start.st == ST_READY_DEGRADED && !g_start.imuOk && outHas("TIMED OUT"));
+  g_mpu.mode = 0;
+  // (c) the gyro is moving during the calibration: rejected, degraded
+  asyncBoot();
+  for (int i = 0; i < 700; i++) { g_mpu.gz = (i & 1) ? 60.0f : -60.0f; runMeasured(10); }
+  g_mpu.gz = 0;
+  runMeasured(5000);
+  CHECK(!g_start.imuOk && outHas("gyro calibration REJECTED") && g_start.st == ST_READY_DEGRADED);
+}
+
+static void t_startup_ir_interference_and_disconnect() {
+  // (a) an infrared signal (ball or external source) is present while the robot is still: no noise-floor from it, autostart waits, then gives up
+  g_hostStartupAsync = true; g_hostAutostart = true;
+  ballGone(); setup(); ballFar();
+  runStartup(9000);
+  runMeasured(400);
+  CHECK(g_start.st == ST_READY_DEGRADED && !g_start.irQuiet && !g_start.autoCal && g_cfg.ringCalDone == 0);
+  CHECK(outHas("see an infrared signal while the robot is still") && outHas("waits up to"));
+  CHECK(!g_autoStartPending && !g_autoEnabled && allWheelsStopped());
+  send("a\n"); runMeasured(100);
+  CHECK(!g_autoEnabled && outHas("noise floor not calibrated"));                    // refused with the reason, not silently
+  send("f\n"); runMeasured(200);
+  CHECK(!allWheelsStopped());                                                       // manual driving and motor tests do not depend on the receivers
+  send("s\n"); runMeasured(300);
+  send(":mtest FL\n"); runMeasured(50);
+  CHECK(g_mtest.state == 1);
+  send("s\n"); runMeasured(100);
+  runMeasured(g_cfg.irWaitMs + 1000);
+  CHECK(outHas("autostart given up"));
+  // (b) the signal clears in time (the ball is taken away): the noise floor is measured and the automatic start is armed
+  ballGone(); setup(); ballFar();
+  runStartup(9000);
+  runMeasured(400);
+  CHECK(!g_start.irQuiet);
+  ballGone(); runMeasured(3000);
+  CHECK(g_start.irQuiet && g_start.autoCal && g_cfg.ringCalDone == 1 && (g_autoStartPending || g_autoEnabled));
+  // (c) receivers wired wrong / disconnected so that every input sits at the rail: the start-up still finishes, motors never move by themselves
+  asyncBoot();
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;
+  anyWheelEverMoved = false;
+  runStartup(12000, true);
+  runMeasured(400);
+  CHECK(startupFinished() && !anyWheelEverMoved && !g_autoEnabled);
+  CHECK(g_cond == COND_SAFE_STOP && g_start.st == ST_READY_DEGRADED);
+  send("f\n"); runMeasured(200);
+  CHECK(!allWheelsStopped());                                                       // a sensing fault never blocks the operator's manual control or motor tests
+  send("a\n"); runMeasured(100);
+  CHECK(!g_autoEnabled);                                                            // but the attack is refused
+  // (d) noisy receivers (random swing)
+  asyncBoot();
+  for (int i = 0; i < 8; i++) { g_mockRingBase[i] = 300; g_mockRingAmp[i] = 0; }
+  g_mockRingNoise = 40;
+  runStartup(12000);
+  runMeasured(400);
+  CHECK(startupFinished() && !g_start.irQuiet && !g_autoEnabled);
+  g_mockRingNoise = 0;
+}
+
+static void t_fresh_robot_moves() {
+  // A robot whose settings were lost (blank EEPROM or an incompatible saved image): defaults, nothing calibrated. It used to refuse the attack forever
+  // ("noise floor not calibrated") while the manual keys worked. Now the start-up measures the quiet receivers and the attack starts by itself.
+  g_hostAutostart = true;
+  ballGone(); setup();
+  CHECK(g_cfg.ringCalDone == 1 && g_start.autoCal && g_autoStartPending);
+  ballFar();
+  simRun(g_cfg.autoStartDelayMs + 800);
+  CHECK(g_autoEnabled && (g_navState == NAV_APPROACH || g_navState == NAV_SEEK));
+  simRun(1500);
+  CHECK(g_navState == NAV_APPROACH && g_reqVy > 0.1f && !allWheelsStopped());      // ball seen -> the selected movement reaches the motors
+  CHECK(g_ball.valid && g_ball.bearingKnown);
+  // a temporary sensor loss does not strand the controller: the ball disappears, the search is bounded, the ball returns, the approach resumes
+  ballGone(); simRun(2500);
+  CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE || g_navState == NAV_WAIT);
+  ballFar(); simRun(1500);
+  CHECK(g_navState == NAV_APPROACH && !allWheelsStopped());
+  // an IMU dropout in the middle of it: ball seeking continues without heading hold, and the hold returns when the IMU does
+  g_mpu.mode = 1; simRun(1500);
+  CHECK(g_autoEnabled && !imuHeadingUsable(g_cfg, millis()));
+  g_mpu.mode = 0; simRun(4000);
+  CHECK(g_autoEnabled);
+}
+
+static void t_serial_line_endings_and_framing() {
+  bootCal(); simRun(300);
+  const char* endings[] = {"\n", "\r", "\r\n"};
+  for (const char* e : endings) {
+    send((std::string("f") + e).c_str()); simRun(150);
+    CHECK(g_navState == NAV_MANUAL && !allWheelsStopped());                          // single key, any line ending
+    send((std::string("s") + e).c_str()); simRun(300);
+    CHECK(allWheelsStopped() && g_navState == NAV_IDLE);
+    send((std::string("defend") + e).c_str()); simRun(150);
+    CHECK(g_defendEnabled);                                                           // a longer word, any line ending
+    send((std::string("stop") + e).c_str()); simRun(300);
+    CHECK(!g_defendEnabled && allWheelsStopped());
+  }
+  // no line ending at all: 8 ms of silence completes the input
+  send("f"); simRun(40);
+  CHECK(g_navState == NAV_MANUAL);
+  send("s"); simRun(300);
+  // whitespace is ignored
+  send("   f   \n"); simRun(150);
+  CHECK(g_navState == NAV_MANUAL);
+  send("s\n"); simRun(300);
+  // a word typed in two pieces (the Serial Monitor may deliver it across two USB packets): completed by the newline, executed once
+  send("def"); simRun(2); send("end\n"); simRun(150);
+  CHECK(g_defendEnabled);
+  send("stop\n"); simRun(300);
+  // the letters of a word are never executed as keys: "defend" must not run 'd' (report), 'e' (rotate), 'f' (forward)
+  anyWheelEverMoved = false;
+  send("defend\n"); simRunTracking(400);
+  CHECK(!anyWheelEverMoved);                                                          // (defend with no ball stands still)
+  send("stop\n"); simRun(200);
+  // ':' commands work with every ending and keep their case
+  send(":set maxmanual 120\r\n"); simRun(100);
+  CHECK(g_cfg.maxManual == 120);
+  send(":set maxmanual 130\r"); simRun(100);
+  CHECK(g_cfg.maxManual == 130);
+  // '?' prints the command list
+  Serial.out.clear(); send("?\n"); simRun(1200);
+  CHECK(outHas("commands (115200 baud"));
+}
+
+static void t_serial_malformed_input() {
+  bootCal(); simRun(300);
+  anyWheelEverMoved = false;
+  const char* junk[] = {"ff\n", "fbl\n", "xyzzy\n", "fff", "\x01\x02\x03\n", "forward\n", "  \n", "\n\n\n", "::\n", ":\n", ":nosuchcommand 1 2 3\n", "defendx\n"};
+  for (const char* j : junk) { Serial.out.clear(); send(j); simRunTracking(60); }
+  CHECK(!anyWheelEverMoved && !g_defendEnabled && !g_autoEnabled);
+  Serial.out.clear(); send("ff\n"); simRun(60);
+  CHECK(outHas("unknown input") && outHas("NOTHING was executed"));                  // rejected with a message, not silently
+  Serial.out.clear(); send(":nosuchcommand\n"); simRun(60);
+  CHECK(outHas("unknown word command"));
+  Serial.out.clear(); send(":set maxauto\n"); simRun(60);
+  CHECK(outHas("usage"));
+  // oversized lines (1 KB) with and without ':'
+  std::string big(1000, 'q');
+  Serial.out.clear(); send((big + "\n").c_str()); simRun(100);
+  CHECK(outHas("too long") && !anyWheelEverMoved);
+  Serial.out.clear(); send((":set maxauto " + big + "\n").c_str()); simRun(100);
+  CHECK(outHas("too long") && g_cfg.maxAuto == 170);
+  // a stream of random bytes never moves a motor and never crashes (the parser state survives it)
+  uint32_t r = 12345;
+  for (int k = 0; k < 40; k++) { std::string s; for (int i = 0; i < 60; i++) { r = r * 1664525u + 1013904223u; char ch = (char)((r >> 16) & 0xFF); if (ch == '!' || ch == 'f' || ch == 'b' || ch == 'l' || ch == 'r' || ch == 'q' || ch == 'e' || ch == 'a' || ch == ':' ) ch = 'z'; s += ch; } send(s.c_str()); send("\n"); simRunTracking(30); }
+  CHECK(!anyWheelEverMoved);
+  send("f\n"); simRun(150);
+  CHECK(!allWheelsStopped());                                                         // still alive and obeying
+  send("s\n"); simRun(300);
+}
+
+static void t_serial_emergency_stop_priority() {
+  bootCal(); simRun(300);
+  // while moving
+  send("f\n"); simRun(150);
+  CHECK(!allWheelsStopped());
+  send("!"); simRun(5);
+  CHECK(allWheelsStopped() && g_estop);
+  // movement and autonomy are refused while latched, with a message
+  Serial.out.clear(); send("f\n"); simRun(100); send("a\n"); simRun(100); send("defend\n"); simRun(100);
+  CHECK(allWheelsStopped() && !g_autoEnabled && !g_defendEnabled && outHas("REFUSED"));
+  send(":recover\n"); simRun(100);
+  CHECK(!g_estop && allWheelsStopped());
+  // in the middle of a ':' line and in the middle of a word
+  send("f\n"); simRun(150);
+  send(":set maxauto 1"); send("!"); simRun(5);
+  CHECK(g_estop && allWheelsStopped() && g_cfg.maxAuto == 170);
+  send(":recover\n"); simRun(100);
+  send("def"); send("!"); simRun(5);
+  CHECK(g_estop && !g_defendEnabled);
+  send("end\n"); simRun(100);
+  CHECK(!g_defendEnabled);
+  send(":recover\n"); simRun(100);
+  // many commands queued behind the stop are not executed after it
+  send("fffffffffff\n"); send("!"); send("f\nf\nf\n"); simRun(300);
+  CHECK(g_estop && allWheelsStopped());
+  send(":recover\n"); simRun(100);
+  // during a motor test
+  send(":mtest FL\n"); simRun(100); send(":confirm\n"); simRun(300);
+  CHECK(wheelDir(W_FL) != 0);
+  send("!"); simRun(5);
+  CHECK(allWheelsStopped() && g_mtest.state == 0);
+  send(":recover\n"); simRun(100);
+  // during autonomous
+  ballFar(); send("a\n"); simRun(600);
+  CHECK(g_autoEnabled && !allWheelsStopped());
+  send("!"); simRun(5);
+  CHECK(allWheelsStopped() && !g_autoEnabled);
+}
+
+static void t_serial_while_sensors_update() {
+  bootCal(); simRun(300);
+  ballFar(); send("a\n"); simRun(500);
+  worstLoopUs = 0;
+  // a command every 20 ms for 4 s while the ring scans, the IMU is read and the navigation runs
+  for (int k = 0; k < 200; k++) { send(k % 3 == 0 ? "d\n" : (k % 3 == 1 ? "?\n" : ":get maxauto\n")); runMeasured(20); }
+  CHECK(worstLoopUs < 3000);
+  CHECK(g_autoEnabled && g_ring[0].scans > 100 && g_imu.samples > 100);              // sensing and navigation kept running
+  send("s\n"); simRun(300);
+  CHECK(allWheelsStopped());
+  CHECK(g_outDropped < 200);                                                          // diagnostics are paced; they do not starve the loop
+}
+
+static void t_fault_blocks_then_recovery() {
+  bootCal(); simRun(300);
+  faultRaise(F_MOTOR_INIT, "test: enable pin not PWM"); simRun(60);
+  CHECK(g_cond == COND_SAFE_STOP && drivetrainFault());
+  anyWheelEverMoved = false;
+  Serial.out.clear(); send("a\n"); simRun(100); send("f\n"); simRunTracking(100); send(":mtest FL\n"); simRun(100); send("defend\n"); simRun(100);
+  CHECK(!g_autoEnabled && !anyWheelEverMoved && !g_defendEnabled && g_mtest.state == 0);
+  CHECK(outHas("REFUSED"));
+  // the fault latches: it does not clear by itself
+  simRun(3000);
+  CHECK(drivetrainFault());
+  // explicit recovery
+  g_fault[F_MOTOR_INIT].active = false; send(":recover\n"); simRun(200);
+  CHECK(!drivetrainFault() && g_cond == COND_NORMAL);
+  ballFar(); send("a\n"); simRun(600);
+  CHECK(g_autoEnabled && !allWheelsStopped());
+  send("s\n"); simRun(300);
+  // an emergency-stop latch is cleared the same explicit way and leaves the robot idle
+  send("!"); simRun(20);
+  send("a\n"); simRun(100);
+  CHECK(!g_autoEnabled);
+  send(":recover\n"); simRun(100);
+  CHECK(!g_estop && !g_autoEnabled && allWheelsStopped());
+  send("a\n"); simRun(500);
+  CHECK(g_autoEnabled);
+  // a sensing fault (all receivers at the rail) stops the attack, and it recovers by itself when the readings return
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;
+  simRun(g_cfg.ringRailMs + 800);
+  CHECK(g_cond == COND_SAFE_STOP && !g_autoEnabled && allWheelsStopped());
+  for (int i = 0; i < 8; i++) g_mockRingBase[i] = 300;
+  simRun(12000);
+  CHECK(g_cond == COND_NORMAL && !g_autoEnabled);                                     // available again, but it does not restart on its own
+  send("a\n"); simRun(500);
+  CHECK(g_autoEnabled);
+}
+
+static void t_wheel_pin_map_and_outputs() {
+  // the documented wiring (pins.h / docs/WIRING_MEGA.md): right L298N FR D22 D23 ENA D5, BR D24 D25 ENB D6; left L298N FL D26 D27 ENA D9, BL D28 D29 ENB D10
+  struct W { int w; int in1, in2, en; } expect[] = {{W_FL, 26, 27, 9}, {W_FR, 22, 23, 5}, {W_BL, 28, 29, 10}, {W_BR, 24, 25, 6}};
+  for (auto& e : expect) CHECK(WHEEL_PINS[e.w].in1 == e.in1 && WHEEL_PINS[e.w].in2 == e.in2 && WHEEL_PINS[e.w].en == e.en);
+  bootCal(); simRun(300);
+  for (auto& e : expect) {
+    // each wheel on its own: forward then backward; only that wheel's three pins ever leave the stopped state
+    send((std::string(":mtest ") + WHEEL_PINS[e.w].name + "\n").c_str()); simRun(100);
+    send(":confirm\n"); simRun(500);
+    for (auto& o : expect) {
+      bool mine = o.w == e.w;
+      CHECK(mine ? (g_pinLevel[o.in1] == 1 && g_pinLevel[o.in2] == 0 && g_pwmDuty[o.en] > 0 && g_pwmDuty[o.en] <= g_cfg.testPwm) : (g_pinLevel[o.in1] == 0 && g_pinLevel[o.in2] == 0 && g_pwmDuty[o.en] == 0));
+    }
+    simRun(1600);                                                                      // 1 s forward + pause, now backward
+    for (auto& o : expect) {
+      bool mine = o.w == e.w;
+      CHECK(mine ? (g_pinLevel[o.in1] == 0 && g_pinLevel[o.in2] == 1 && g_pwmDuty[o.en] > 0) : (g_pinLevel[o.in1] == 0 && g_pinLevel[o.in2] == 0 && g_pwmDuty[o.en] == 0));
+    }
+    simRun(2500);
+    CHECK(allWheelsStopped());
+  }
+  // the diagnostic reports what was requested and the stop / fault state
+  Serial.out.clear();
+  send(":dtest\n"); simRun(100); send(":confirm\n"); simRun(13000);
+  CHECK(outHas("req vx=0 vy=1 w=0") && outHas("cmd PWM FL 100") && outHas("| running.") && outHas("COMMAND only"));
+  // software reversal flips exactly that wheel
+  send(":rev FR 1\n"); simRun(50);
+  send(":mtest FR\n"); simRun(100); send(":confirm\n"); simRun(500);
+  CHECK(g_pinLevel[22] == 0 && g_pinLevel[23] == 1 && g_pwmDuty[5] > 0);
+  send("s\n"); simRun(400);
+}
+
+// A crude plant for the heading tests: the yaw rate (deg/s, clockwise positive) is 180 deg/s per unit of commanded rotation plus a disturbance; the gyro reports it with the
+// opposite sign (gz is counter-clockwise positive). SIMULATED: it says nothing about the real robot's response.
+static float g_plantDist = 0.0f;
+static void plantStep() { g_mpu.gz = -(180.0f * g_reqW + g_plantDist); }
+static void runPlant(uint32_t ms) { uint64_t end = g_mockUs + (uint64_t)ms * 1000ULL; while (g_mockUs < end) { plantStep(); loop(); mockAdvance(1000); } }
+
+static void t_heading_correction_closed_loop() {
+  bootCal(); simRun(300);
+  CHECK(imuHeadingUsable(g_cfg, millis()));
+  // sign: a positive yaw error (robot turned clockwise away from the reference) must command a counter-clockwise (negative) correction, and the other way round
+  g_refYaw = g_imu.yaw; g_mpu.gz = -30.0f; simRun(300); g_mpu.gz = 0;                  // knocked ~9 deg clockwise
+  float w = 0; CHECK(navHeading(g_cfg, millis(), &w));
+  CHECK(g_hdgErr < -5 && w < 0 && w >= -g_cfg.hdgMaxRot - 1e-6f);
+  g_refYaw = g_imu.yaw; g_mpu.gz = 30.0f; simRun(300); g_mpu.gz = 0;                   // knocked ~9 deg counter-clockwise
+  CHECK(navHeading(g_cfg, millis(), &w) && g_hdgErr > 5 && w > 0 && w <= g_cfg.hdgMaxRot + 1e-6f);
+  // inside the dead band: no correction; far outside: bounded
+  g_refYaw = g_imu.yaw; CHECK(navHeading(g_cfg, millis(), &w) && w == 0.0f);
+  g_refYaw = g_imu.yaw + 120.0f; navHeading(g_cfg, millis(), &w); CHECK(w == g_cfg.hdgMaxRot);
+  g_refYaw = g_imu.yaw - 120.0f; navHeading(g_cfg, millis(), &w); CHECK(w == -g_cfg.hdgMaxRot);
+  // manual straight drive with a constant disturbance (a stronger side of the drivetrain): without the correction the heading runs away, with it the error stays small
+  for (int pass = 0; pass < 2; pass++) {
+    g_cfg.hdgManual = pass == 0 ? 0 : 1;
+    g_plantDist = 8.0f;                                                                // 8 deg/s clockwise drift
+    float y0 = g_imu.yaw;
+    send("f\n"); runPlant(40);
+    float maxErr = 0;
+    for (int k = 0; k < 20; k++) {                                                    // hold the key (repeat) for 3 s
+      send("f\n"); runPlant(150);
+      float e = absf(angDiffDeg(y0, g_imu.yaw)); if (e > maxErr) maxErr = e;
+    }
+    send("s\n"); runPlant(500);
+    if (pass == 0) { CHECK(maxErr > 15.0f); } else { CHECK(maxErr < 6.0f); }          // without: ~24 deg off; with: stays near the dead band
+    g_plantDist = 0.0f;
+    runPlant(500);
+  }
+  // the correction is bounded and does not oscillate: the sign of the correction does not flip every tick
+  g_cfg.hdgManual = 1; g_plantDist = 8.0f;
+  send("f\n"); int flips = 0, last = 0; 
+  for (int k = 0; k < 60; k++) { send("f\n"); runPlant(40); int sg = g_reqW > 0.001f ? 1 : (g_reqW < -0.001f ? -1 : 0); if (sg && last && sg != last) flips++; if (sg) last = sg; CHECK(absf(g_reqW) <= g_cfg.hdgMaxRot + 1e-6f); }
+  CHECK(flips <= 4);
+  send("s\n"); runPlant(500); g_plantDist = 0.0f;
+  // IMU data goes stale while a correction is active: no stuck correction, plain driving continues, nothing crashes
+  g_cfg.hdgManual = 1;
+  send("f\n"); runPlant(100);
+  g_mpu.mode = 1; runPlant(800);
+  CHECK(!imuHeadingUsable(g_cfg, millis()));
+  send("f\n"); runPlant(100);
+  CHECK(!allWheelsStopped() && absf(g_reqW) < 1e-6f);
+  g_mpu.mode = 0;
+  send("s\n"); simRun(400);
+}
+
+static void t_heading_test_and_yaw_check() {
+  bootCal(); simRun(300);
+  // the floor test: refused without a usable IMU, armed otherwise, nothing moves before ':confirm'
+  anyWheelEverMoved = false;
+  send(":hdgtest\n"); simRunTracking(300);
+  CHECK(g_hdgt.state == 1 && !anyWheelEverMoved && outHas("ON THE FLOOR"));
+  simRun(16000);
+  CHECK(g_hdgt.state == 0 && g_navState == NAV_IDLE && allWheelsStopped());           // the confirmation timed out: nothing ran
+  // a correct drivetrain: the clockwise pulse gives positive yaw, the counter-clockwise one negative, and the correction beats no correction
+  g_plantDist = 6.0f;
+  send(":hdgtest\n"); runPlant(100); send(":confirm\n");
+  runPlant(9000);
+  CHECK(g_hdgt.state == 0 && allWheelsStopped());
+  CHECK(g_hdgt.res[0] > 3.0f && g_hdgt.res[1] < -3.0f);
+  CHECK(absf(g_hdgt.res[3]) < absf(g_hdgt.res[2]));
+  CHECK(outHas("RESULT sign: OK") && outHas("RESULT straight drive: drift"));
+  // a wrong sign (gyro mounted the other way / yawsign wrong) is reported, not hidden
+  g_plantDist = 0.0f; g_cfg.imuYawSign = 1; g_imu.yaw = 0;
+  Serial.out.clear();
+  send(":hdgtest\n"); runPlant(100); send(":confirm\n"); runPlant(9000);
+  CHECK(outHas("RESULT sign: WRONG"));
+  g_cfg.imuYawSign = -1;
+  // a robot that does not rotate (held off the ground): "no yaw response", nothing concluded
+  Serial.out.clear();
+  send(":hdgtest\n"); simRun(100); send(":confirm\n"); simRun(9000);
+  CHECK(outHas("NO yaw response"));
+  // the IMU fails during the test: the motors stop at once
+  send(":hdgtest\n"); simRun(100); send(":confirm\n"); simRun(700);
+  CHECK(g_hdgt.state != 0);
+  g_mpu.mode = 1; simRun(600);
+  CHECK(g_hdgt.state == 0 && allWheelsStopped() && outHas("heading test ABORTED"));
+  g_mpu.mode = 0; simRun(1500);
+  // abort with the stop key
+  send(":hdgtest\n"); simRun(100); send(":confirm\n"); simRun(300);
+  send("s\n"); simRun(300);
+  CHECK(g_hdgt.state == 0 && allWheelsStopped());
+  // yaw sign check by hand: turn it clockwise (positive yaw in the plant), nothing moves by itself
+  simRun(1500);
+  anyWheelEverMoved = false;
+  Serial.out.clear();
+  send(":yawcheck\n"); simRunTracking(300);
+  CHECK(g_yawck.state == 1 && !anyWheelEverMoved);
+  g_mpu.gz = -45.0f; simRun(2000); g_mpu.gz = 0; simRun(1500);
+  CHECK(g_yawck.state == 0 && outHas("SIGN IS OK"));
+  g_cfg.imuYawSign = 1; simRun(500);
+  Serial.out.clear(); send(":yawcheck\n"); simRun(300);
+  g_mpu.gz = -45.0f; simRun(2000); g_mpu.gz = 0; simRun(1500);
+  CHECK(outHas("sign is WRONG") && outHas(":set yawsign -1"));
+  g_cfg.imuYawSign = -1;
+  Serial.out.clear(); send(":yawcheck\n"); simRun(16000);
+  CHECK(g_yawck.state == 0 && outHas("only"));
+}
+
+static void t_config_migration() {
+  freshEeprom("t_config_migration");
+  bootCal(); simRun(200);
+  g_cfg.maxAuto = 133; g_cfg.ringNoise[0] = 17; g_cfg.ringNoise[1] = 19; g_cfg.ringCalDone = 1; g_cfg.bearingsSet = 1; g_cfg.reverse[2] = 1;
+  CHECK(cfgSave(g_cfg));
+  // rewrite the image as the previous firmware layout (version 20: no start-up settings at the end) with its own CRC
+  size_t firstNew = offsetof(Config, startSettleMs);
+  uint16_t oldSize = (uint16_t)(((firstNew + 3) & ~3u) + 4);
+  Config cur; EEPROM.get(EEPROM_CFG_ADDR, cur);
+  uint8_t raw[sizeof(Config)]; memcpy(raw, &cur, sizeof(raw));
+  uint16_t ver = CFG_MIN_COMPAT; memcpy(raw + offsetof(Config, version), &ver, 2); memcpy(raw + offsetof(Config, size), &oldSize, 2);
+  uint32_t crc = crc32Update(0, raw, oldSize - 4u); memcpy(raw + oldSize - 4, &crc, 4);
+  for (size_t i = 0; i < oldSize; i++) EEPROM.update((int)(EEPROM_CFG_ADDR + i), raw[i]);
+  Config loaded; char rep[48];
+  CfgLoadResult r = cfgLoad(loaded, rep, sizeof(rep));
+  CHECK(r == CL_MIGRATED);
+  CHECK(loaded.maxAuto == 133 && loaded.ringNoise[0] == 17 && loaded.ringNoise[1] == 19 && loaded.ringCalDone == 1 && loaded.bearingsSet == 1 && loaded.reverse[2] == 1);   // old settings and calibration kept
+  CHECK(loaded.startSettleMs == 2000 && loaded.startCalMs == 1000 && loaded.autoCalNoise == 1 && loaded.hdgManual == 1 && loaded.version == CFG_VERSION && loaded.size == sizeof(Config));
+  // a corrupted old image is not trusted
+  EEPROM.update((int)(EEPROM_CFG_ADDR + 20), (uint8_t)(raw[20] ^ 0x55));
+  CHECK(cfgLoad(loaded, rep, sizeof(rep)) == CL_BADCRC);
+  // a layout older than the oldest migratable one, and a blank EEPROM, fall back to defaults with the right result code
+  ver = 3; memcpy(raw + offsetof(Config, version), &ver, 2); crc = crc32Update(0, raw, oldSize - 4u); memcpy(raw + oldSize - 4, &crc, 4);
+  for (size_t i = 0; i < oldSize; i++) EEPROM.update((int)(EEPROM_CFG_ADDR + i), raw[i]);
+  CHECK(cfgLoad(loaded, rep, sizeof(rep)) == CL_BADVERSION && loaded.maxAuto == 170);
+  // the boot message tells the operator what happened
+  freshEeprom("t_config_migration2");
+  ballGone(); setup();
+  CHECK(outHas("no saved config (EEPROM blank)"));
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2736,6 +3214,20 @@ static const TestCase TESTS[] = {
   T(t_shot_parallel_aims_while_reversing),
   T(t_shoot_pwm_limit_and_no_reverse),
   T(t_autostart),
+  T(t_startup_stages_and_gate),
+  T(t_startup_emergency_stop_during_startup),
+  T(t_startup_imu_absent_or_invalid),
+  T(t_startup_ir_interference_and_disconnect),
+  T(t_fresh_robot_moves),
+  T(t_serial_line_endings_and_framing),
+  T(t_serial_malformed_input),
+  T(t_serial_emergency_stop_priority),
+  T(t_serial_while_sensors_update),
+  T(t_fault_blocks_then_recovery),
+  T(t_wheel_pin_map_and_outputs),
+  T(t_heading_correction_closed_loop),
+  T(t_heading_test_and_yaw_check),
+  T(t_config_migration),
   T(t_defend_enter_exit),
   T(t_defend_behaviour),
   T(t_defend_prediction),

@@ -14,6 +14,8 @@ static bool g_autoStartPending = false;       // boot decided to start autonomy 
 static uint32_t g_autoStartAtMs = 0;
 static bool g_defendEnabled = false;          // defend mode is active (defend.h); exclusive with autonomous attack and manual driving
 static void defendTick(const Config& c, uint32_t now);
+static bool startupGate(const char* what);
+static void hdgTestTick(const Config& c, uint32_t now);            // startup.h: false (with the reason printed) until the start-up reached READY
 static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
 static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
 static uint8_t g_rePhase = 0, g_reCount = 0, g_appTimeouts = 0;
@@ -69,6 +71,14 @@ struct MotorTest {
   uint8_t step;
   uint32_t until;
 };
+// Floor test of the heading controller (':hdgtest'): measured yaw response to a rotation, then a straight drive without and with the correction.
+struct HdgTest { uint8_t state, step; uint32_t until; float yaw0, res[4]; };
+static HdgTest g_hdgt;                                 // state 0 idle, 1 armed (needs :confirm), 2 running a step, 3 settling after a step
+// Hand-rotation check of the yaw SIGN (':yawcheck'): the operator turns the robot clockwise by hand; nothing moves by itself.
+struct YawCheck { uint8_t state; uint32_t until, quietSince; float yaw0; };
+static YawCheck g_yawck;
+static float g_manVx = 0, g_manVy = 0;                 // the translation of the manual command being held straight
+static bool g_manHold = false;
 static const char DT_STEP_NAME[6][26] PROGMEM = {"FORWARD", "BACKWARD", "STRAFE LEFT", "STRAFE RIGHT", "ROTATE CLOCKWISE", "ROTATE COUNTER-CLOCKWISE"};
 static const float DT_VEC[6][3] PROGMEM = {{0, 1, 0}, {0, -1, 0}, {-1, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0, -1}};
 static MotorTest g_mtest;
@@ -101,6 +111,7 @@ static void navStop(PGM_P why) {
   g_autoEnabled = false;
   g_defendEnabled = false;
   g_mtest.state = 0;
+  g_hdgt.state = 0; g_yawck.state = 0; g_manHold = false;
   g_hdgErr = NAN;
   if (g_cond == COND_SAFE_STOP) navSetState(NAV_SAFE_STOP, why);
   else navSetState(NAV_IDLE, why);
@@ -131,6 +142,7 @@ static void navMarkLoss(PGM_P where) {
 
 static bool navEnableAuto(const Config& c, uint32_t now) {
   if (navEstopRefuses(PSTR("autonomous"))) return false;
+  if (!startupGate("autonomous")) return false;
   if (g_cond == COND_SAFE_STOP || sensingFault() || drivetrainFault()) {
     say("SAFETY", "autonomous REFUSED: robot is in SAFE_STOP (see 'h'); fix the fault and use :recover");
     return false;
@@ -257,6 +269,10 @@ static void navTick(const Config& c, uint32_t now) {
       break;
 
     case NAV_MANUAL:
+      if (g_manHold && !deadlineReached(now, g_manualUntilMs)) {          // straight / strafe command: keep the gyro heading (bounded by hdgmax; off with ':set hdgmanual 0')
+        float wm = 0;
+        if (navHeading(c, now, &wm)) motorsDrive(c, g_manVx, g_manVy, wm, c.maxManual); else g_manHold = false;     // IMU stale or invalid: plain manual driving
+      }
       if (deadlineReached(now, g_manualUntilMs)) { motorsDrive(c, 0, 0, 0, c.maxManual); navSetState(g_cond == COND_SAFE_STOP ? NAV_SAFE_STOP : NAV_IDLE, "manual timeout"); }
       break;
 
@@ -404,6 +420,7 @@ static void navTick(const Config& c, uint32_t now) {
     case NAV_COUNT: break;
 
     case NAV_TEST: {
+      if (g_hdgt.state) { hdgTestTick(c, now); break; }
       MotorTest& t = g_mtest;
       if (t.state == 1) {
         if (deadlineReached(now, t.until)) { t.state = 0; navSetState(NAV_IDLE, PSTR("motor test confirmation timed out")); }
@@ -413,7 +430,12 @@ static void navTick(const Config& c, uint32_t now) {
         if (t.state == 2) motorsDrive(c, pgm_read_float(&DT_VEC[t.step][0]), pgm_read_float(&DT_VEC[t.step][1]), pgm_read_float(&DT_VEC[t.step][2]), c.testPwm);
         else motorsDrive(c, 0, 0, 0, c.testPwm);
         if (deadlineReached(now, t.until)) {
-          if (t.state == 2) { t.state = 3; t.until = now + 700; }
+          if (t.state == 2) {
+            t.state = 3; t.until = now + 700;
+            say("TEST", "  %u/6 %S: req vx=%.0f vy=%.0f w=%.0f -> cmd PWM FL %d FR %d BL %d BR %d | %S. COMMAND only: you confirm the wheels really turned that way.",
+                (unsigned)t.step + 1, (PGM_P)DT_STEP_NAME[t.step], (double)pgm_read_float(&DT_VEC[t.step][0]), (double)pgm_read_float(&DT_VEC[t.step][1]), (double)pgm_read_float(&DT_VEC[t.step][2]),
+                (int)g_wheelOut[W_FL], (int)g_wheelOut[W_FR], (int)g_wheelOut[W_BL], (int)g_wheelOut[W_BR], g_estop ? PSTR("E-STOP LATCHED") : (drivetrainFault() ? PSTR("FAULT") : PSTR("running")));
+          }
           else if (++t.step >= 6) {
             say("TEST", "drivetrain test finished. Each motion should have matched its label. If strafe was mirrored use ':roller O'; a wrong single wheel -> ':mrev <wheel>'.");
             t.state = 0; motorsDrive(c, 0, 0, 0, c.testPwm);
@@ -426,7 +448,7 @@ static void navTick(const Config& c, uint32_t now) {
       if (t.state == 2) motorsSetWheelTarget(t.wheel, (float)c.testPwm);
       if (t.state == 4) motorsSetWheelTarget(t.wheel, -(float)c.testPwm);
       if (deadlineReached(now, t.until)) {
-        if (t.state == 2) { t.state = 3; t.until = now + 600; }
+        if (t.state == 2) { t.state = 3; t.until = now + 600; say("TEST", "  %s forward: commanded PWM %d (requested %u) | stop/fault state: %S", WHEEL_PINS[t.wheel].name, (int)g_wheelOut[t.wheel], (unsigned)c.testPwm, g_estop ? PSTR("E-STOP LATCHED") : (drivetrainFault() ? PSTR("FAULT") : PSTR("running"))); }
         else if (t.state == 3) { t.state = 4; t.until = now + 1000; }
         else if (t.state == 4) { t.state = 5; t.until = now + 600; }
         else if (t.state == 5) {
@@ -444,6 +466,7 @@ static void navTick(const Config& c, uint32_t now) {
 // Manual keys. Manual control always cancels autonomy until 'a' is sent again.
 static void navManual(const Config& c, char key, uint32_t now, uint16_t holdMs = 0) {
   if (navEstopRefuses(PSTR("manual motion"))) return;
+  if (!startupGate("manual motion")) return;
   if (drivetrainFault()) { say("SAFETY", "manual motion REFUSED: drivetrain fault active (use :recover after fixing)"); return; }
   g_autoEnabled = false;
   g_defendEnabled = false;
@@ -460,6 +483,11 @@ static void navManual(const Config& c, char key, uint32_t now, uint16_t holdMs =
     default: return;
   }
   if (g_cond == COND_SAFE_STOP) sayRL(1, 5000, "SAFETY", "manual motion in SAFE_STOP (sensing fault): operator responsibility, autonomy stays off");
+  if ((vx != 0 || vy != 0) && w == 0 && c.hdgManual && imuHeadingUsable(c, now)) {            // translation: hold the heading it had when the key was first pressed
+    bool cont = g_navState == NAV_MANUAL && g_manHold && absf(vx - g_manVx) < 0.01f && absf(vy - g_manVy) < 0.01f && !deadlineReached(now, g_manualUntilMs);
+    if (!cont) g_refYaw = g_imu.yaw;
+    g_manHold = true; g_manVx = vx; g_manVy = vy;
+  } else g_manHold = false;
   motorsDrive(c, vx, vy, w, c.maxManual);
   g_manualUntilMs = now + (holdMs ? holdMs : c.manualHoldMs);
   navSetState(NAV_MANUAL, PSTR("manual command"));
@@ -470,9 +498,83 @@ static int wheelByName(const char* s) {
   return -1;
 }
 
+static bool navHdgTestArm(const Config& c, uint32_t now) {
+  if (navEstopRefuses(PSTR("heading test"))) return false;
+  if (!startupGate("heading test")) return false;
+  if (!imuHeadingUsable(c, now)) { say("TEST", "heading test REFUSED: no usable, calibrated MPU6050 ('gyro' / ':gcal' with the robot still)"); return false; }
+  if (drivetrainFault()) { say("SAFETY", "heading test REFUSED: drivetrain fault active"); return false; }
+  g_autoEnabled = false; g_defendEnabled = false; g_mtest.state = 0;
+  motorsStopNow();
+  g_hdgt.state = 1; g_hdgt.step = 0; g_hdgt.until = now + 15000;
+  navSetState(NAV_TEST, PSTR("heading test armed"));
+  say("TEST", "HEADING TEST: put the robot ON THE FLOOR with about 1 m free in front, hand on the power switch. ':confirm' within 15 s starts: a clockwise pulse, a counter-clockwise pulse, then a straight drive without and with the heading correction, all at PWM %u (about 7 s). 's' or '!' aborts.", (unsigned)c.testPwm);
+  say("TEST", "A robot held off the ground cannot rotate, so a lifted-wheel run only shows 'no yaw response'.");
+  return true;
+}
+
+static void hdgTestTick(const Config& c, uint32_t now) {
+  HdgTest& h = g_hdgt;
+  if (h.state == 1) { if (deadlineReached(now, h.until)) { h.state = 0; navSetState(NAV_IDLE, PSTR("heading test confirmation timed out")); } return; }
+  if (!imuHeadingUsable(c, now)) {                                       // the IMU went away while a correction was being tested: stop at once
+    motorsStopNow(); h.state = 0; navSetState(NAV_IDLE, PSTR("heading test aborted"));
+    say("TEST", "heading test ABORTED: the IMU data became stale or invalid. Motors stopped.");
+    return;
+  }
+  static const float VEC[4][3] PROGMEM = {{0, 0, 0.5f}, {0, 0, -0.5f}, {0, 0.5f, 0}, {0, 0.5f, 0}};
+  static const uint16_t DUR[4] PROGMEM = {500, 500, 1200, 1200};
+  if (h.state == 2) {
+    float w = pgm_read_float(&VEC[h.step][2]);
+    if (h.step == 3) { float wc = 0; if (navHeading(c, now, &wc)) w = wc; }          // step 4: straight WITH the correction (reference = yaw at the start of the step)
+    motorsDrive(c, pgm_read_float(&VEC[h.step][0]), pgm_read_float(&VEC[h.step][1]), w, c.testPwm);
+    if (deadlineReached(now, h.until)) { motorsDrive(c, 0, 0, 0, c.testPwm); h.state = 3; h.until = now + 900; }
+  } else if (h.state == 3) {
+    motorsDrive(c, 0, 0, 0, c.testPwm);
+    if (deadlineReached(now, h.until)) {
+      h.res[h.step] = -angDiffDeg(h.yaw0, g_imu.yaw);                    // yaw change during the step (+ = clockwise)
+      say("TEST", "step %u/4 %S: requested vx=%.1f vy=%.1f w=%.1f at PWM %u -> yaw change %+.1f deg (measured by the gyro)", (unsigned)h.step + 1,
+          h.step == 0 ? PSTR("clockwise pulse") : (h.step == 1 ? PSTR("counter-clockwise pulse") : (h.step == 2 ? PSTR("straight, NO correction") : PSTR("straight WITH correction"))),
+          (double)pgm_read_float(&VEC[h.step][0]), (double)pgm_read_float(&VEC[h.step][1]), (double)pgm_read_float(&VEC[h.step][2]), (unsigned)c.testPwm, (double)h.res[h.step]);
+      if (++h.step >= 4) {
+        h.state = 0; navSetState(NAV_IDLE, PSTR("heading test complete"));
+        bool resp = absf(h.res[0]) > 2.0f || absf(h.res[1]) > 2.0f;
+        say("TEST", "RESULT sign: %S", !resp ? PSTR("NO yaw response (robot lifted, wheels slipping, or the IMU is not rigidly mounted) - nothing can be concluded") :
+            ((h.res[0] > 0 && h.res[1] < 0) ? PSTR("OK - a clockwise command gives positive yaw") : PSTR("WRONG - a clockwise command gave negative yaw: check ':roller', ':rev' and ':set yawsign'")));
+        say("TEST", "RESULT straight drive: drift %+.1f deg without correction, %+.1f deg with it (limit %.2f of full rotation, deadband %.1f deg). One run is an observation, not proof; repeat it. Gyro heading is RELATIVE and drifts.", (double)h.res[2], (double)h.res[3], (double)c.hdgMaxRot, (double)c.hdgDeadbandDeg);
+      } else {
+        h.state = 2; h.until = now + pgm_read_word(&DUR[h.step]); h.yaw0 = g_imu.yaw;
+        if (h.step == 3) g_refYaw = g_imu.yaw;
+      }
+    }
+  }
+}
+
+static void yawCheckService(const Config& c, uint32_t now) {
+  YawCheck& y = g_yawck;
+  if (!y.state) return;
+  float d = -angDiffDeg(y.yaw0, g_imu.yaw);                              // yaw now - yaw at the start
+  bool still = absf(g_imu.gz - g_imu.bias) < 3.0f;
+  if (still) { if (!y.quietSince) y.quietSince = now ? now : 1u; } else y.quietSince = 0;
+  bool done = absf(d) >= 30.0f && y.quietSince && elapsedMs(now, y.quietSince) >= 500;
+  if (!imuHeadingUsable(c, now)) { y.state = 0; say("TEST", "yaw check ABORTED: the IMU data became stale or invalid."); return; }
+  if (done || deadlineReached(now, y.until)) {
+    y.state = 0;
+    if (absf(d) < 30.0f) say("TEST", "yaw check: only %+.0f deg measured - turn the robot CLOCKWISE (seen from above) by 60-90 degrees and hold it still, then repeat ':yawcheck'. (Or the IMU does not respond.)", (double)d);
+    else if (d > 0) say("TEST", "yaw check: yaw changed %+.0f deg for a clockwise turn: the SIGN IS OK (yawsign %d). If you actually turned it counter-clockwise this proves nothing.", (double)d, (int)c.imuYawSign);
+    else say("TEST", "yaw check: yaw changed %+.0f deg: NEGATIVE for what should have been a clockwise turn. If you are sure it was clockwise (seen from above), the sign is WRONG: ':set yawsign %d' and repeat. Otherwise repeat the turn clockwise.", (double)d, (int)(-c.imuYawSign));
+  }
+}
+static bool yawCheckArm(const Config& c, uint32_t now) {
+  if (!imuHeadingUsable(c, now)) { say("TEST", "yaw check REFUSED: no usable, calibrated MPU6050"); return false; }
+  if (!motorsAllZero()) { say("TEST", "yaw check REFUSED: the motors are not stopped"); return false; }
+  g_yawck.state = 1; g_yawck.yaw0 = g_imu.yaw; g_yawck.until = now + 15000; g_yawck.quietSince = 0;
+  say("TEST", "YAW CHECK: within 15 s pick the robot up and turn it CLOCKWISE (seen from above) by 60-90 degrees, then hold it still. Nothing will move by itself.");
+  return true;
+}
+
 static bool navMotorTestArm(const Config& c, int wheel, uint32_t now, bool drive = false) {
   if (wheel >= 0 && navEstopRefuses(PSTR("motor test"))) return false;
   if (wheel < 0) return false;
+  if (!startupGate("motor test")) return false;
   if (drivetrainFault()) { say("SAFETY", "motor test REFUSED: drivetrain fault active"); return false; }
   g_autoEnabled = false;
   motorsStopNow();
@@ -492,6 +594,11 @@ static bool navMotorTestArm(const Config& c, int wheel, uint32_t now, bool drive
 }
 
 static bool navMotorTestConfirm(uint32_t now) {
+  if (g_hdgt.state == 1) {                                               // the heading test
+    g_hdgt.state = 2; g_hdgt.step = 0; g_hdgt.until = now + 500; g_hdgt.yaw0 = g_imu.yaw;
+    say("TEST", "running the heading test... ('s' or '!' aborts)");
+    return true;
+  }
   if (g_mtest.state != 1) { say("TEST", "nothing to confirm (use :mtest <FL|FR|BL|BR> first)"); return false; }
   g_mtest.state = 2;
   if (g_mtest.drive) { g_mtest.step = 0; g_mtest.until = now + 900; say("TEST", "step 1/6: %S", (PGM_P)DT_STEP_NAME[0]); return true; }
@@ -520,3 +627,4 @@ static void onCondChange(Cond from, Cond to) {
 
 #include "defend.h"
 #include "diag.h"
+#include "startup.h"

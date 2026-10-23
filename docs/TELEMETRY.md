@@ -19,7 +19,7 @@ Requested on demand by the words `status` (core), `sensors` (receivers + core), 
 | `estop`, `cmd` | latch state; last single-key command received |
 | `ball`, `bearing_deg`, `conf`, `ambiguous`, `centered` | ball seen (also during the loss hold); bearing 0 = straight ahead, + clockwise/right — **null when no ball or when the receivers disagree**; confidence 0–100 (a diagnostic figure, not a probability); conflicting receivers; within `centerdeg` |
 | `obst` | `[module D34, module D35]` detecting (0 also when a module is switched off) |
-| `under`, `under_ok`, `shot_pos` | underside sensor (D40) active; 1 = trusted (0 = ignored as stuck/never answering); ball in the shooting position |
+| `under`, `under_ok`, `shot_pos` | same-pin underside vote (D34, off by default) active; 1 = trusted (0 = ignored as stuck/never answering); ball in the shooting position |
 | `motor_command_pwm` | `[FL, FR, BL, BR]` signed PWM last written (logical direction) |
 
 ## `"k":"r"` receivers (arrays are A0..A5; `-1` = channel not enabled)

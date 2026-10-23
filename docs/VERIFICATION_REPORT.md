@@ -46,7 +46,7 @@ Removed because the Mega has 8 KB of RAM, 256 KB of flash and no filesystem: CSV
 
 Verified (simulation and compile only): AVR build 92,008 B flash (36 %), 3,735 B RAM (45 %), 0 warnings; host suite 65/65 cases, 2,463 checks (ASan/UBSan), covering the BT protocol, E-stop latch and priority, link/lease loss, underside sensor fault handling, bounded reverse-and-reattack, layered search, no-goal shot, per-wheel trim. Static analysis run.
 
-NOT verified: everything on real hardware (HC-05 pairing and level shifting, the D40 sensor type/polarity, reverse distances, ESP32 sketch: not even compiled).
+NOT verified: everything on real hardware (HC-05 pairing and level shifting, the D34 sensor polarity (`:mod level`), reverse distances, ESP32 sketch: not even compiled).
 
 
 ## Intelligence / telemetry / defending update

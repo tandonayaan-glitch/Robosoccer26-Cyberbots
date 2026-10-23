@@ -22,7 +22,7 @@ The only wired level problem is the Mega (5 V) to the HC-05 (3.3 V logic), below
 | Serial3 | TX3 D14, RX3 D15 | – | free |
 | I2C | SDA D20, SCL D21 | MPU6050 | in use |
 
-Motors use D5, D6, D9, D10 (PWM) and D22–D29; receivers A0–A5; modules D34/D35; underside sensor D40. Serial1 was already implemented and tested, so it stays;
+Motors use D5, D6, D9, D10 (PWM) and D22–D29; receivers A0–A5; modules D34/D35; bottom sensor D34. Serial1 was already implemented and tested, so it stays;
 moving to Serial2 is a pin change in `pins.h` plus `Serial1`→`Serial2` in `bt.h`/`telemetry.h` and is not needed. SoftwareSerial on D10/D11 is **not** used (D10 is the back-left motor PWM).
 
 ## HC-05 wiring

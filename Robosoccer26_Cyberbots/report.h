@@ -138,7 +138,7 @@ static void printRaw(const Config& c) {
   for (uint8_t i = 0; i < MOD_COUNT; i++)
     say("INFO", "raw module %u (D%u): pin %S | enabled %S | active when %S | decoded %S", (unsigned)i, (unsigned)PIN_MOD[i], digitalRead(PIN_MOD[i]) ? PSTR("HIGH") : PSTR("LOW"),
         modEnabled(c, i) ? PSTR("yes") : PSTR("no"), ((c.modActiveLow >> i) & 1u) ? PSTR("LOW") : PSTR("HIGH"), g_mod[i].active ? PSTR("DETECTING") : PSTR("clear"));
-  say("INFO", "raw underside sensor (D40): pin %S | enabled %S | active when %S | decoded %S%S", digitalRead(P_UNDER) ? PSTR("HIGH") : PSTR("LOW"), c.underEnable ? PSTR("yes") : PSTR("no"),
+  say("INFO", "raw bottom sensor (D34 = module 0): pin %S | enabled %S | active when %S | decoded %S%S", digitalRead(P_UNDER) ? PSTR("HIGH") : PSTR("LOW"), c.underEnable ? PSTR("yes") : PSTR("no"),
       c.underActiveLow ? PSTR("LOW") : PSTR("HIGH"), g_under.active ? PSTR("BALL") : PSTR("clear"), g_under.suspectStuck ? PSTR(" (suspect: stuck)") : (g_under.suspectMiss ? PSTR(" (suspect: never answers)") : PSTR("")));
   say("INFO", "IMU: %S%S | free RAM %d B | EEPROM records %u", g_imu.present ? PSTR("present at 0x") : PSTR("NOT FOUND (no answer on D20/D21 at 0x68/0x69)"), g_imu.present ? (g_imu.addr == 0x69 ? PSTR("69") : PSTR("68")) : PSTR(""), freeRam(), (unsigned)g_recCount);
 }
@@ -147,7 +147,7 @@ static void printRaw(const Config& c) {
 static void printPins() {
   say("INFO", "motors  FR: IN1 D%u IN2 D%u ENA D%u | BR: IN3 D%u IN4 D%u ENB D%u (right L298N)", (unsigned)P_FR_IN1, (unsigned)P_FR_IN2, (unsigned)P_FR_EN, (unsigned)P_BR_IN1, (unsigned)P_BR_IN2, (unsigned)P_BR_EN);
   say("INFO", "motors  FL: IN1 D%u IN2 D%u ENA D%u | BL: IN3 D%u IN4 D%u ENB D%u (left L298N)", (unsigned)P_FL_IN1, (unsigned)P_FL_IN2, (unsigned)P_FL_EN, (unsigned)P_BL_IN1, (unsigned)P_BL_IN2, (unsigned)P_BL_EN);
-  say("INFO", "receivers A0..A5 fitted (A6, A7 spare) | modules: front D%u, second D%u (not fitted yet) | underside sensor D%u | MPU6050 SDA D%u SCL D%u", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_UNDER, (unsigned)P_SDA, (unsigned)P_SCL);
+  say("INFO", "receivers A0..A5 fitted (A6, A7 spare) | IR: bottom sensor D%u, second D%u (not fitted) | same-pin vote D%u | MPU6050 SDA D%u SCL D%u", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_UNDER, (unsigned)P_SDA, (unsigned)P_SCL);
   say("INFO", "HC-05 on Serial1: TX1 D%u -> divider -> HC-05 RXD, HC-05 TXD -> RX1 D%u | USB serial D0/D1", (unsigned)P_BT_TX, (unsigned)P_BT_RX);
 }
 
@@ -176,7 +176,7 @@ static void printSensors(const Config& c, uint32_t now) {
   }
   say("SENS", "ball %S bearing %.1f deg confidence %u strength %.2f centered %S | noise floor %S | bearing map %S", g_ball.valid ? PSTR("DETECTED") : PSTR("none"), (double)(g_ball.bearingKnown ? g_ball.bearing : 0.0f), (unsigned)g_ball.confidence, (double)g_ball.strength,
       g_ball.centered ? PSTR("yes") : PSTR("no"), c.ringCalDone ? PSTR("calibrated") : PSTR("NOT calibrated"), c.bearingsSet ? PSTR("set by operator") : PSTR("default guess - UNVERIFIED"));
-  say("SENS", "obstacle modules: D34 %S, D35 %S | underside D40 %S (%S) | shooting position %S", !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")),
+  say("SENS", "obstacle modules: D34 %S, D35 %S | bottom/underside vote on D34 %S (%S) | shooting position %S", !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")),
       !modEnabled(c, 1) ? PSTR("off") : (g_mod[1].active ? PSTR("DETECTING") : PSTR("clear")), !c.underEnable ? PSTR("off") : (g_under.active ? PSTR("BALL") : PSTR("clear")),
       underUsable(c) ? PSTR("trusted") : PSTR("ignored"), g_ball.ready ? PSTR("YES") : PSTR("no"));
   say("SENS", "IMU %S: accel %.2f %.2f %.2f g | gyro %.2f %.2f %.2f dps | roll %.1f pitch %.1f yaw %.1f deg (relative ESTIMATES)", g_imu.present && g_imu.ok ? PSTR("ok") : PSTR("NOT delivering data"),
@@ -230,6 +230,7 @@ static void reportRun(uint8_t kind, const Config& c, uint32_t now) {
   }
 }
 static void reportRequest(uint8_t kind) { g_repKind = kind; g_repSkip = 0; }
+static void startupHealthReport() { reportRequest(REP_HEALTH); }
 static void reportService(const Config& c, uint32_t now) {
   if (g_repKind == REP_NONE || outUsed() > OUTQ_SIZE / 8) return;     // wait until the queue has drained
   g_repActive = true; g_repLine = 0; g_repOverflow = false;

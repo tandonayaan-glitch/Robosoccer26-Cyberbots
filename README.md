@@ -1,6 +1,6 @@
 # Robosoccer26 Cyberbots – RoboCup Junior 2026 autonomous soccer robot firmware (Arduino Mega 2560)
 
-Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, six 5 mm IR phototransistor receivers (A0–A5, each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, an underside ball-position sensor (D40), an MPU6050 for a relative heading, an HC-05 Bluetooth module (Serial1) that a **Windows laptop** connects to directly, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
+Firmware for an **Arduino Mega 2560**: four mecanum wheels on two L298N drivers, six 5 mm IR phototransistor receivers (A0–A5, each on its own analog input) that see the ball's own infrared emission, two digital IR obstacle modules, a single bottom IR alignment sensor (D34, 3.3 V / GND / OUT), an MPU6050 for a relative heading, an HC-05 Bluetooth module (Serial1) that a **Windows laptop** connects to directly, EEPROM-stored settings and a Hardware Health Monitor that degrades or stops instead of guessing.
 Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **DEFEND** (`defend`: heading hold + sideways intercept/block), **MANUAL**, **CALIBRATION**, **IDLE**, **FAULT**. **No multiplexer. No kicker, no encoders, no current sensors.** An earlier version for a different controller board is preserved in git as commit `1963a3f`.
 
 > **Status – read this first.**
@@ -33,7 +33,7 @@ python -m unittest discover -s laptop/tests -p "test_*.py"   # Python client vs 
 Arduino IDE: open `Robosoccer26_Cyberbots/Robosoccer26_Cyberbots.ino`, board "Arduino Mega or Mega 2560". Windows laptop: `python -m pip install -r laptop\requirements.txt`.
 
 ## Unverified hardware assumptions (all of them)
-HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · phototransistor pinout and junction voltages · where each receiver looks (angles are a guess until `:ring bearing`) · receiver response to the real ball · D40 sensor type and active level · module polarity · MPU6050 axis signs, pull-ups and supply · motor directions and the power supply · strafe speed/slip · everything about defending or shooting a real ball · Bluetooth range and pairing with Windows.
+HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · phototransistor pinout and junction voltages · where each receiver looks (angles are a guess until `:ring bearing`) · receiver response to the real ball · D34 sensor active level (`:mod level`) · module polarity · MPU6050 axis signs, pull-ups and supply · motor directions and the power supply · strafe speed/slip · everything about defending or shooting a real ball · Bluetooth range and pairing with Windows.
 
 ## Pin map (fixed in `pins.h`)
 
@@ -46,8 +46,7 @@ HC-05 breakout supply voltage and AT syntax · the divider on Mega TX1 · photot
 | **A0 … A5** | phototransistor receivers 0–5 (each its own junction and 10 kΩ load resistor); bearings via `:ring bearing` |
 | A6, A7 | spare (off until fitted: `:ring on <n>`) |
 | **D18 / D19** | HC-05 RXD (through a 1 kΩ/2 kΩ divider) / HC-05 TXD (Serial1) |
-| **D40** | underside ball-position sensor (active level is the `underlow` setting) |
-| **D34** | front IR obstacle module OUT (ball in the shooting position) |
+| **D34** | the single bottom IR sensor OUT (ball alignment / shooting position; wired 3.3 V, GND, D34) |
 | **D35** | second IR obstacle module OUT (obstacle input for defend mode, logged) |
 | **D20 / D21** | MPU6050 SDA / SCL (hardware I2C) |
 | D0 / D1 | USB serial (115200 baud) |
@@ -176,6 +175,6 @@ tools/avr_build.sh         # REAL ATmega2560 compile + link, flash / RAM report 
 
 ## Bluetooth remote, underside sensor, re-attack (update)
 
-HC-05 on Serial1 (D18/D19), controlled from a Windows laptop (`laptop/`); protocol and wiring in `docs/BLUETOOTH.md`. Underside ball-position sensor on D40. After a failed shot the robot judges, reverses a bounded distance and re-attacks at most `remax` times, then pauses. Host tests: `test/run_tests.sh` (65 cases); AVR build: `tools/avr_build.sh`. Nothing in this update has been tested on the robot.
+HC-05 on Serial1 (D18/D19), controlled from a Windows laptop (`laptop/`); protocol and wiring in `docs/BLUETOOTH.md`. Bottom alignment IR sensor on D34. After a failed shot the robot judges, reverses a bounded distance and re-attacks at most `remax` times, then pauses. Host tests: `test/run_tests.sh` (65 cases); AVR build: `tools/avr_build.sh`. Nothing in this update has been tested on the robot.
 
 **Startup is automatic:** after a clean boot the robot begins autonomous mode by itself after 1.5 s (`autostart`, `startdelay`); no serial command and no Bluetooth link needed. See `docs/BLUETOOTH.md` ("Startup") for cancelling and switching modes safely.

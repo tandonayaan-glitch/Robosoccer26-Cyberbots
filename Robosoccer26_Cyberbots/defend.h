@@ -51,6 +51,7 @@ static void defSet(DefState s, PGM_P why) {
 
 static bool defendEnable(const Config& c, uint32_t now) {
   if (navEstopRefuses(PSTR("defend"))) return false;
+  if (!startupGate("defend")) return false;
   if (g_cond == COND_SAFE_STOP || sensingFault() || drivetrainFault()) { say("SAFETY", "defend REFUSED: robot is in SAFE_STOP or has a sensing/drivetrain fault (see 'status')"); return false; }
   if (g_mtest.state) { say("SAFETY", "defend REFUSED: motor test in progress"); return false; }
   if (ringCountUsable(c) == 0) { say("SAFETY", "defend REFUSED: no usable ball receiver"); return false; }

@@ -121,8 +121,7 @@ __attribute__((unused)) static bool hexToBytes(const char* s, uint8_t* out, size
   return s[2 * n] == 0;
 }
 __attribute__((unused)) static void bytesToHex(const uint8_t* in, size_t n, char* out) {
-  static const char hx[] = "0123456789abcdef";
-  for (size_t i = 0; i < n; i++) { out[2 * i] = hx[in[i] >> 4]; out[2 * i + 1] = hx[in[i] & 15]; }
+  for (size_t i = 0; i < n; i++) { uint8_t hi = in[i] >> 4, lo = in[i] & 15; out[2 * i] = (char)(hi < 10 ? '0' + hi : 'a' + hi - 10); out[2 * i + 1] = (char)(lo < 10 ? '0' + lo : 'a' + lo - 10); }
   out[2 * n] = 0;
 }
 

@@ -9,7 +9,10 @@
 #ifndef RS_USE_WATCHDOG
 #define RS_USE_WATCHDOG 0              // hardware watchdog off by default (see the .ino); also reported in telemetry
 #endif
-#define CFG_VERSION 20
+// Layout rule: a new setting is ALWAYS appended directly before `crc` (never inserted in the middle, never reordered). Then a config saved by an older version is a byte-wise
+// prefix of the new struct and is migrated on load (storage.h) instead of being thrown away - a firmware update must not silently wipe the saved calibration.
+#define CFG_VERSION 21
+#define CFG_MIN_COMPAT 20              // oldest saved layout that can be migrated
 
 struct Config {
   uint32_t magic;
@@ -30,7 +33,7 @@ struct Config {
   uint16_t manualHoldMs;         // manual motion auto-stops after this long without a repeated key
 
   // ---- ball receivers: phototransistors, each on its own analog input (A0..A5 fitted; A6, A7 spare), 10-bit ADC ----
-  uint16_t ringEnable;           // bit n = receiver on analog input An is fitted and scanned. A0..A5 on by default (the six fitted receivers)
+  uint16_t ringEnable;           // bit n = receiver on analog input An is fitted and scanned. A0 and A1 on by default (the two fitted receivers)
   int16_t ringBearing[RING_CH_MAX]; // where each receiver looks, degrees: 0 = straight ahead, + clockwise (right), +-180 = behind. PLACEHOLDERS until you measure (':ring bearing')
   uint16_t ringNoise[RING_CH_MAX];  // per-channel noise floor in ADC counts (0..1023) (peak-to-peak with no ball emitting), set by ':ring cal noise'
   uint8_t ringCalDone;           // 1 = ':ring cal noise' has been run on this robot (autonomy is refused otherwise)
@@ -49,8 +52,8 @@ struct Config {
   uint8_t modActiveLow;          // bit n set = module n output goes LOW when something is detected (typical for these boards; NOT assumed: check with ':mod' and set with ':mod level <n> low|high')
   uint8_t modDebounce;           // consecutive 5 ms samples needed to change a module's state
   uint8_t modNeedRing;           // 1 = the shooting position also needs the ring to see the ball near the front (a wall or a robot also trips the module)
-  // ---- underside ball-position sensor on D40 (its active level is NOT documented: check with ':raw') ----
-  uint8_t underEnable;           // 1 = used (default); 0 = ignored
+  // ---- bottom IR sensor = module 0 on D34 (shared pin, so the separate vote is off by default) ----
+  uint8_t underEnable;           // 1 = also vote with the same D34 reading; 0 = ignored (default)
   uint8_t underActiveLow;        // 1 = the pin is LOW when the ball is there (default), 0 = HIGH
   uint8_t underDebounce;         // consecutive 5 ms samples needed to change its state
   uint16_t underStuckMs;         // active this long while the receivers see no ball, or inactive this long while everything else says "ball in place": the sensor is ignored (suspect)
@@ -142,6 +145,13 @@ struct Config {
   uint8_t defConfOn, defConfOff;
   uint16_t defDwellMs, defConfirmMs, defLostMs, defRecoverMs, defLeadMs, defPosMs, defStrafeMs, defLatMs;
 
+  // ---- startup (added in version 21; append new settings here, before crc) ----
+  uint16_t startSettleMs;        // IR SETTLING: receiver readings are ignored for startup decisions this long after power-on
+  uint16_t startCalMs;           // IR CHECK: stationary measurement of the receivers after the settling time
+  uint16_t irWaitMs;             // if an IR signal is present at start-up: wait this long for it to clear before the automatic start is given up
+  uint8_t autoCalNoise;          // 1 = measure the receivers' noise floor by itself at start-up when they are quiet (RAM only; ':save' keeps it)
+  uint8_t hdgManual;             // 1 = hold the gyro heading during manual straight / strafe commands (f b l r)
+
   uint32_t crc;                  // CRC32 of every byte before this field
 };
 
@@ -197,6 +207,11 @@ static const ParamDef PARAMS[] PROGMEM = {
   PD("btlease", PT_U16, btLeaseMs, 100, 3000),
   PD("btlink", PT_U16, btLinkMs, 500, 30000),
   PD("autostart", PT_U8, autoStart, 0, 1),
+  PD("startsettle", PT_U16, startSettleMs, 500, 10000),
+  PD("startcal", PT_U16, startCalMs, 300, 5000),
+  PD("irwait", PT_U16, irWaitMs, 0, 60000),
+  PD("autocal", PT_U8, autoCalNoise, 0, 1),
+  PD("hdgmanual", PT_U8, hdgManual, 0, 1),
   PD("teleenable", PT_U8, teleEnable, 0, 1),
   PD("telehz", PT_U8, teleHz, 1, 20),
   PD("teledetail", PT_U8, teleDetailEvery, 1, 20),
@@ -310,7 +325,7 @@ static void cfgDefaults(Config& c) {
   c.decelPwmPerS = 1200;
   c.reverseDeadMs = 60;
   c.manualHoldMs = 600;
-  c.ringEnable = 0x003F;         // A0..A5 (the six fitted phototransistors, each with its own 10 kOhm)
+  c.ringEnable = 0x0003;         // A0 and A1: the two 2-pin receivers fitted on the current robot. Switch more on with ':ring on <n>' - an enabled input with nothing connected FLOATS and reads noise
   for (int i = 0; i < RING_CH_MAX; i++) {
     // PLACEHOLDER: the firmware does not know where the receivers look. All channels default to straight ahead (0 deg): the robot then sees THAT a ball is
     // in front but cannot tell left from right. Set the real mounting angles with ':ring bearing <ch> <deg>' (0 = ahead, + = right, +-180 = behind).
@@ -321,13 +336,14 @@ static void cfgDefaults(Config& c) {
   c.ringWinUs = 900; c.ringSeen = 20; c.ringNoiseX10 = 30; c.ringNear = 375; c.ringDebounce = 2;
   c.ringFovHalf = 45; c.ringBlend = 100; c.ringMaxGap = 360; c.ringRailMs = 2000; c.ringRailHi = 1000;
   c.modEnable = 1; c.modActiveLow = 3; c.modDebounce = 3; c.modNeedRing = 1;
-  c.underEnable = 1; c.underActiveLow = 1; c.underDebounce = 3; c.underStuckMs = 4000; c.underNeed = 1;
+  c.underEnable = 0; c.underActiveLow = 1; c.underDebounce = 3; c.underStuckMs = 4000; c.underNeed = 1;
   c.shootNeedGoal = 1;
   c.reJudgeMs = 250; c.reBackMs = 350; c.reBackSpeed = 0.7f; c.reSettleMs = 200; c.reMax = 3; c.reCooldownMs = 3000;
   c.approachTimeoutMs = 8000; c.researchMs = 5000; c.giveUpMs = 60000;
   for (int i = 0; i < WHEEL_COUNT; i++) c.wheelScale[i] = 100;
   c.btEnable = 1; c.btLeaseMs = 400; c.btLinkMs = 3000;
   c.autoStart = 1; c.autoStartDelayMs = 1500;
+  c.startSettleMs = 2000; c.startCalMs = 1000; c.irWaitMs = 8000; c.autoCalNoise = 1; c.hdgManual = 1;
   c.teleEnable = 1; c.teleHz = 5; c.teleDetailEvery = 4; c.btBaud100 = 96;
   c.imuMaxBiasDps = 10.0f; c.driftSec = 20; c.maxMoveSec = 45; c.bearingsSet = 0;
   c.defSpeed = 0.4f; c.defAlignSpeed = 0.2f; c.defTurnSpeed = 0.3f; c.defAlignDeg = 12.0f; c.defFrontArcDeg = 100.0f; c.defBlockStrength = 0.7f; c.defSlope = 0.15f;

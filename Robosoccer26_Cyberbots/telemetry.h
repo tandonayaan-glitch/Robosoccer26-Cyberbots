@@ -31,10 +31,11 @@ static void jsonOpen(char kind, uint32_t now) {
   g_teleN = 0;
   JADD("{\"v\":1,\"k\":\"%c\",\"n\":%u,\"ms\":%lu", kind, (unsigned)g_tele.seq, UL(now));
 }
-static void jsonFloatOrNull(const char* key, bool ok, float v, uint8_t prec) {
-  if (!ok || !isfinite(v)) { JADD(",\"%s\":null", key); return; }
-  JADD(",\"%s\":%.*f", key, (int)prec, (double)v);
+static void jsonFloatOrNull(PGM_P key, bool ok, float v, uint8_t prec) {             // key lives in flash (the macro below), not in the 8 KB of RAM
+  if (!ok || !isfinite(v)) { JADD(",\"%S\":null", key); return; }
+  JADD(",\"%S\":%.*f", key, (int)prec, (double)v);
 }
+#define JNULL(key, ok, v, prec) jsonFloatOrNull(PSTR(key), (ok), (v), (prec))
 
 static void teleBuildCore(const Config& c, uint32_t now) {
   jsonOpen('c', now);
@@ -42,7 +43,7 @@ static void teleBuildCore(const Config& c, uint32_t now) {
        g_defendEnabled ? (PGM_P)DEF_NAME[g_defState] : (PGM_P)NAV_NAME[g_navState], safetyText(), firstFaultName(), condName(g_cond));
   JADD(",\"bt\":%u,\"estop\":%u,\"cmd\":\"%c\"", g_btLink ? 1u : 0u, g_estop ? 1u : 0u, g_btLast ? g_btLast : '-');
   JADD(",\"ball\":%u", g_ball.valid ? 1u : 0u);
-  jsonFloatOrNull("bearing_deg", g_ball.bearingKnown && !g_ball.ambiguous, g_ball.bearing, 1);   // null when the receivers disagree
+  JNULL("bearing_deg", g_ball.bearingKnown && !g_ball.ambiguous, g_ball.bearing, 1);   // null when the receivers disagree
   JADD(",\"conf\":%u,\"ambiguous\":%u,\"centered\":%u", (unsigned)g_ball.confidence, g_ball.ambiguous ? 1u : 0u, g_ball.centered ? 1u : 0u);
   JADD(",\"obst\":[%u,%u],\"under\":%u,\"under_ok\":%u,\"shot_pos\":%u", g_mod[0].active ? 1u : 0u, g_mod[1].active ? 1u : 0u, g_under.active ? 1u : 0u,
        underUsable(c) ? 1u : 0u, g_ball.ready ? 1u : 0u);
@@ -51,9 +52,8 @@ static void teleBuildCore(const Config& c, uint32_t now) {
 
 static void teleBuildRecv(const Config& c, uint32_t now) {
   jsonOpen('r', now);
-  const char* keys[5] = {"raw_level", "swing", "filtered", "noise_floor", "threshold"};
   for (uint8_t k = 0; k < 5; k++) {
-    JADD(",\"%s\":[", keys[k]);
+    JADD(",\"%S\":[", k == 0 ? PSTR("raw_level") : (k == 1 ? PSTR("swing") : (k == 2 ? PSTR("filtered") : (k == 3 ? PSTR("noise_floor") : PSTR("threshold")))));
     for (uint8_t i = 0; i < 6; i++) {
       long v = -1;
       if (ringEnabled(c, i)) {
@@ -76,15 +76,15 @@ static void teleBuildImu(const Config& c, uint32_t now) {
   jsonOpen('i', now);
   bool ok = g_imu.present && g_imu.ok;
   JADD(",\"imu\":%u,\"imu_cal\":%u", ok ? 1u : 0u, (unsigned)g_imu.calState);       // imu_cal: 0 none, 1 running, 2 done, 3 rejected
-  jsonFloatOrNull("ax_g", ok, g_imu.ax, 3); jsonFloatOrNull("ay_g", ok, g_imu.ay, 3); jsonFloatOrNull("az_g", ok, g_imu.az, 3);
-  jsonFloatOrNull("gx_dps", ok, g_imu.gx, 2); jsonFloatOrNull("gy_dps", ok, g_imu.gy, 2); jsonFloatOrNull("gz_dps", ok, g_imu.gz, 2);
-  jsonFloatOrNull("roll_est_deg", ok && g_imu.tiltValid, g_imu.roll, 1); jsonFloatOrNull("pitch_est_deg", ok && g_imu.tiltValid, g_imu.pitch, 1);
-  jsonFloatOrNull("yaw_rel_est_deg", ok && g_imu.yawValid, g_imu.yaw, 1);
-  jsonFloatOrNull("yaw_unc_est_deg", g_imu.calibrated, imuYawUncertDeg(now), 2);
-  jsonFloatOrNull("gyro_bias_dps", g_imu.calibrated, g_imu.bias, 3);
+  JNULL("ax_g", ok, g_imu.ax, 3); JNULL("ay_g", ok, g_imu.ay, 3); JNULL("az_g", ok, g_imu.az, 3);
+  JNULL("gx_dps", ok, g_imu.gx, 2); JNULL("gy_dps", ok, g_imu.gy, 2); JNULL("gz_dps", ok, g_imu.gz, 2);
+  JNULL("roll_est_deg", ok && g_imu.tiltValid, g_imu.roll, 1); JNULL("pitch_est_deg", ok && g_imu.tiltValid, g_imu.pitch, 1);
+  JNULL("yaw_rel_est_deg", ok && g_imu.yawValid, g_imu.yaw, 1);
+  JNULL("yaw_unc_est_deg", g_imu.calibrated, imuYawUncertDeg(now), 2);
+  JNULL("gyro_bias_dps", g_imu.calibrated, g_imu.bias, 3);
   JADD(",\"drift\":%u", (unsigned)g_imu.driftState);
-  jsonFloatOrNull("drift_deg_min", g_imu.driftState == 2, g_imu.driftRateDegMin, 2);
-  jsonFloatOrNull("drift_bias_dps", g_imu.driftState == 2, g_imu.driftMeanDps, 3);
+  JNULL("drift_deg_min", g_imu.driftState == 2, g_imu.driftRateDegMin, 2);
+  JNULL("drift_bias_dps", g_imu.driftState == 2, g_imu.driftMeanDps, 3);
   JADD("}");
 }
 

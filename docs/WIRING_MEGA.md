@@ -117,7 +117,7 @@ No wheel feedback (PWM shown is the commanded value), no battery voltage or curr
 |---|---|---|
 | HC-05 TX -> Mega | D19 (RX1) | direct |
 | Mega -> HC-05 RX | D18 (TX1) | 1 kΩ / 2 kΩ divider, see docs/BLUETOOTH.md |
-| Underside ball-position sensor | D40 | digital; type and active level not documented: default active-LOW with pull-up, change with `:set underlow` |
+| Bottom IR alignment sensor (single, = module 0) | D34 | 3.3 V, GND, OUT; active level `:mod level` |
 | Second module | D35 | not fitted, disabled |
 
 D36 is not used. Per-wheel trim: `wscalefl/fr/bl/br`.
@@ -129,7 +129,7 @@ D36 is not used. Per-wheel trim: `wscalefl/fr/bl/br`.
 |---|---|---|
 | Ball receivers 0–5 | A0, A1, A2, A3, A4, A5 | each junction to its own input; A6, A7 spare |
 | Obstacle modules | D34 (front, shooting position), D35 | active level is a setting (`:mod level`) |
-| Underside sensor | D40 | type / active level undocumented: `underlow` setting |
+| Bottom IR sensor (the only one) | D34 (3.3 V, GND, OUT) | same input as module 0; active level: `:mod level` (default LOW when detecting) |
 | HC-05 TXD → Mega | D19 (RX1) | direct |
 | Mega → HC-05 RXD | D18 (TX1) | 1 kΩ / 2 kΩ divider; HC-05 VCC per your breakout (docs/BLUETOOTH.md) |
 | MPU6050 | SDA D20, SCL D21 | |

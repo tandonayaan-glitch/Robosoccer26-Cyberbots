@@ -61,7 +61,7 @@ struct Ball {
 };
 static Ball g_ball;
 
-// Underside ball-position sensor (D40). Type and active level are NOT documented: the level is a setting. It confirms a ball position, it never replaces the receivers.
+// Bottom ball-position vote (same D34 input as module 0, off by default). Type and active level are NOT documented: the level is a setting. It confirms a ball position, it never replaces the receivers.
 // Suspect (= ignored, the shooting position is then decided by the other sensors) when:
 //   stuck     : it reports "ball" for underStuckMs while the receivers see no ball at all (stuck active, or the wrong polarity with the pull-up on)
 //   no answer : everything else says "ball in place" for underStuckMs but it never reports it (disconnected, wrong polarity, mis-aimed)

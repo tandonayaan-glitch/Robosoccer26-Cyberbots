@@ -77,7 +77,7 @@ Wheels off the ground (robot on a stand) until step 9.
 5. `X`: stops at once; `W`, `M`, `U` are refused (`ERR:ESTOP`); `R` clears; robot stays idle.
 6. Per-wheel trim: `:set wscalefl/fr/bl/br` (50-150 %); compare wheel speeds by eye/tachometer; open-loop only.
 7. Receivers A0/A1: `:ring cal noise` in the dark, then check swing with the ball at several bearings; note the blind regions.
-8. Underside sensor D40: with `:raw` watch its reading with and without the ball; set `underlow` to the real active level; check the stuck/never-answers warnings.
+8. Bottom sensor D34: with `:raw` watch its reading with and without the ball; set `underlow` to the real active level; check the stuck/never-answers warnings.
 9. Floor, low speed: `U` with the ball ahead; check approach, hold, shot burst.
 10. Failed push: place the ball so the push fails; confirm at most `remax` reverse tries, then a pause (`recooldown`), and a manual `X` during a reverse.
 11. Search: hide the ball; confirm search sweeps, WAIT, fresh search (`researchms`), give-up (`giveupms`).
@@ -93,7 +93,7 @@ Wheels off the ground (robot on a stand) until step 12. Motor battery switch wit
 4. Telemetry: frames arrive in the laptop client (`ir`, `imu` views); `n` increments without gaps; check the real rate against the table in `docs/BLUETOOTH.md`; raise the HC-05 baud to 38400 and repeat.
 5. Receivers: with no ball, `calibrate`; then `sensors` with the ball at 8 positions around the robot. Write the bearing of each receiver down and enter it with `:ring bearing <n> <deg>`, `:save`. Confirm telemetry `map` = `operator` and that the bearing follows the ball. Look for blind arcs, and for ambiguity when the ball is beside two receivers.
 6. Receiver polarity: with a flashlight on one receiver the junction voltage and the swing must rise; if not, check the pinout (wiring doc).
-7. Underside sensor D40: watch `:raw` with and without the ball; set `underlow`; confirm `under_ok` stays 1.
+7. Bottom sensor D34: watch `:raw` with and without the ball; set `underlow`; confirm `under_ok` stays 1.
 8. IMU: robot still: `gyro cal`; `gyro drift 60` and note deg/min; tilt the robot by hand: roll/pitch follow gravity, yaw does not (it must not); move it during a drift test: the test must fail.
 9. Manual: `manual`, then W/S/A/D/Z/C over Bluetooth with wheels lifted: directions; release the button (stop within ~0.4 s); switch the remote off (link lost, stop).
 10. Emergency stop: from manual, attack and defend, send `X` and `!`: all four wheels stop at once and nothing restarts until `R`.

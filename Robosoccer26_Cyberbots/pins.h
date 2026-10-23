@@ -57,8 +57,8 @@ static const uint8_t RING_CH_FIXED = 6;            // A0..A5 are fitted; A6, A7 
 // Module 0 sits at the front and reports "the ball is in the right position to shoot" (trimmer sets the distance). Module 1 is the second module
 // (position undecided): it is read and logged only. The active level (HIGH or LOW when something is detected) is a SETTING per module (':mod level'),
 // it is not assumed.
-#define P_MOD0 34                                  // front module OUT
-#define P_MOD1 35                                  // second module OUT
+#define P_MOD0 34                                  // the bottom / front alignment sensor OUT (the only one fitted)
+#define P_MOD1 35                                  // second module OUT (NOT fitted, off by default)
 static const uint8_t PIN_MOD[2] = {P_MOD0, P_MOD1};
 static const uint8_t MOD_COUNT = 2;
 
@@ -73,10 +73,12 @@ static const uint8_t MOD_COUNT = 2;
 #define P_BT_RX 19
 static const uint32_t BT_BAUD = 9600;               // HC-05 factory data-mode speed (AT mode is usually 38400)
 
-// ---- Underside ball-position IR sensor (middle of the robot, right side) -------------------------------------------------------------
-// Wired to D40 (digital input), as stated by the team. Its exact TYPE (obstacle module or other) and its ACTIVE LEVEL are not documented: the level is the setting
-// `underlow` (default: LOW when the ball is there, internal pull-up on), to be checked with ':raw'. If it is wrong the firmware notices (see ring.h) and ignores the sensor.
-#define P_UNDER 40
+// ---- Bottom IR sensor used for ball alignment: ONE 3-pin obstacle module (VCC 3.3 V / GND / OUT) on D34 --------------------------------
+// There is a single such sensor on the robot and it is wired to D34 (it used to be D40). It is the same input as module 0 above: when it detects the ball the
+// ball is in the alignment / shooting position (`held`; with `modneedring` 1 the receivers must also see the ball straight ahead). The separate "underside" vote
+// (`underenable`) reads the same pin, so it is OFF by default (it would only count the same signal twice); P_UNDER is kept so `:raw` and `underenable 1` still work.
+// Its ACTIVE LEVEL is a setting (`:mod level`, default LOW when detecting, check with ':raw'). Powered from 3.3 V: its OUT then swings 0..3.3 V, which the Mega reads as HIGH/LOW.
+#define P_UNDER P_MOD0
 
 // ---- MPU6050 (hardware I2C, Wire library) -----------------------------------------
 #define P_SDA 20
@@ -100,16 +102,16 @@ static const uint32_t SERIAL_BAUD = 115200;
 #define SERIAL_MASK (PIN_BIT(0) | PIN_BIT(1))
 // Arduino Mega 2560 PWM pins: D2..D13, D44, D45, D46
 #define MEGA_PWM_MASK (((1ULL << 14) - (1ULL << 2)) | PIN_BIT(44) | PIN_BIT(45) | PIN_BIT(46))
-// All digital pins used, counted once each: 8 direction + 4 PWM + 2 modules + 2 I2C + D0/D1 serial + 2 Bluetooth (D18/D19) + 1 underside sensor (D40) = 21; the receivers use the analog inputs A0..A7
-#define ALL_DIGITAL_MASK (MOTOR_DIR_MASK | MOTOR_PWM_MASK | MOD_MASK | I2C_MASK | SERIAL_MASK | BT_MASK | PIN_BIT(P_UNDER))
+// All digital pins used, counted once each: 8 direction + 4 PWM + 2 modules + 2 I2C + D0/D1 serial + 2 Bluetooth (D18/D19); the bottom sensor shares D34 with module 0 = 20; the receivers use the analog inputs A0..A7
+#define ALL_DIGITAL_MASK (MOTOR_DIR_MASK | MOTOR_PWM_MASK | MOD_MASK | I2C_MASK | SERIAL_MASK | BT_MASK)
 static_assert(__builtin_popcountll(MOTOR_DIR_MASK) == 8, "the 8 motor direction pins must be distinct");
 static_assert(__builtin_popcountll(MOTOR_PWM_MASK) == 4, "the 4 motor PWM pins must be distinct");
 static_assert(__builtin_popcountll(RECV_MASK) == 8, "the 8 receiver analog inputs must be distinct");
 static_assert((RECV_MASK & ALL_DIGITAL_MASK) == 0, "a receiver analog input collides with a digital function");
 static_assert(__builtin_popcountll(MOD_MASK) == 2, "the 2 module pins must be distinct");
-static_assert(__builtin_popcountll(ALL_DIGITAL_MASK) == 8 + 4 + 2 + 2 + 2 + 2 + 1, "a pin is assigned to two functions");
+static_assert(__builtin_popcountll(ALL_DIGITAL_MASK) == 8 + 4 + 2 + 2 + 2 + 2, "a pin is assigned to two functions");
 static_assert((MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0, "every motor enable pin must be a PWM-capable Mega pin (D2..D13, D44..D46)");
 static_assert((I2C_MASK == (PIN_BIT(20) | PIN_BIT(21))), "the Mega hardware I2C pins are D20 (SDA) and D21 (SCL)");
 static_assert(P_BT_TX == 18 && P_BT_RX == 19, "HC-05 on the Mega UART1 pins TX1 = D18, RX1 = D19");
-static_assert(P_UNDER == 40, "the underside ball-position sensor is on D40");
+static_assert(P_UNDER == 34, "the single bottom alignment IR sensor is on D34");
 static_assert(P_RECV0 == 54 && P_RECV7 == 61, "the receivers must be on A0..A7");

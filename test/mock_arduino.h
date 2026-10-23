@@ -39,7 +39,7 @@ static uint16_t g_mockRingAmp[16], g_mockRingBase[16];
 static uint16_t g_mockRingNoise = 0;                 // +- counts of deterministic jitter added to every reading
 static bool g_mockModDetect[2];
 static bool g_mockModActiveHigh[2];
-static bool g_mockUnderDetect = false, g_mockUnderActiveHigh = false;   // underside sensor on D40
+static bool g_mockUnderDetect = false, g_mockUnderActiveHigh = false;   // (legacy) separate underside vote: shares D34 with module 0 now, unused by the mock pin
 static uint32_t g_mockAdcReads = 0;
 static uint32_t g_mockRng = 12345;
 
@@ -70,7 +70,6 @@ static inline void digitalWrite(uint8_t p, uint8_t v) { mockTouch(p); g_pinLevel
 static inline void analogWrite(uint8_t p, int duty) { mockTouch(p); g_pwmDuty[p] = (uint32_t)(duty < 0 ? 0 : (duty > 255 ? 255 : duty)); }
 static inline int digitalRead(uint8_t p) {
   if (p == 34 || p == 35) { bool d = g_mockModDetect[p - 34]; return (g_mockModActiveHigh[p - 34] ? d : !d) ? 1 : 0; }
-  if (p == 40) return (g_mockUnderActiveHigh ? g_mockUnderDetect : !g_mockUnderDetect) ? 1 : 0;
   if (p == 20 || p == 21) return 1;
   return g_pinLevel[p];
 }
@@ -188,4 +187,6 @@ struct MockEEPROM {
   void update(int a, uint8_t v) { ensure(); mem[a] = v; flush(); }
 };
 static MockEEPROM EEPROM;
+static bool g_hostAutostart = false;             // true: setup() leaves the automatic attack start armed (t_autostart)
+static bool g_hostStartupAsync = false;          // true: setup() returns at once and the start-up stages run in loop() (the start-up tests); false: setup() runs them to READY
 static bool g_mockAuthEnforced = false;          // read by authBegin() in the host build only

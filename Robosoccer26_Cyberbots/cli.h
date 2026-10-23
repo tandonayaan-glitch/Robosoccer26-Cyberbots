@@ -36,6 +36,7 @@ static void printHelp() {
   say("INFO", ":auto on|off (= a / s) | :stop | :estop (latched) | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover (also clears the e-stop latch)");
   say("INFO", ":bt = Bluetooth remote status (commands M U W S A D Z C Q X R P ?; docs/BLUETOOTH.md)");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel>");
+  say("INFO", ":startup = start-up stage | :yawcheck = turn the robot clockwise BY HAND to check the yaw sign | :hdgtest then :confirm = heading test ON THE FLOOR (about 7 s)");
   say("INFO", "--- settings (EEPROM) ---");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
@@ -237,6 +238,9 @@ static void cliExecLine(char* line, uint32_t now) {
   }
   else if (STREQ(cmd, "stop")) { navStop(PSTR("operator stop")); say("SAFETY", "stopped; autonomy disabled"); }
   else if (STREQ(cmd, "estop")) { navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); }
+  else if (STREQ(cmd, "startup")) printStartup(now);
+  else if (STREQ(cmd, "hdgtest")) navHdgTestArm(c, now);
+  else if (STREQ(cmd, "yawcheck")) yawCheckArm(c, now);
   else if (STREQ(cmd, "bt")) printBt(c, now);
   else if (STREQ(cmd, "authkey")) {                    // USB only. The key is never echoed, logged or recorded.
     if (!t[1]) { char fp[9] = "--------"; if (g_auth.keySet) authFingerprint(fp); say("INFO", "Bluetooth key %S, fingerprint %s (the laptop client prints the same value)", g_auth.keySet ? PSTR("SET") : PSTR("NOT SET: the remote cannot control the robot"), fp); }
