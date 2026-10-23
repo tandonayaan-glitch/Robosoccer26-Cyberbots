@@ -151,3 +151,7 @@ Diagnostic commands never start motors; motor tests require `:mtest`/`:dtest` **
 ./test/static_analysis.sh  # cppcheck, clang-tidy, Valgrind
 tools/avr_build.sh         # REAL ATmega2560 compile + link, flash / RAM report (no upload)
 ```
+
+## Bluetooth remote, underside sensor, re-attack (update)
+
+HC-05 on Serial1 (D18/D19) with an ESP32 remote (`remote_esp32/`, not compiled); protocol and wiring in `docs/BLUETOOTH.md`. Underside ball-position sensor on D40. After a failed shot the robot judges, reverses a bounded distance and re-attacks at most `remax` times, then pauses. Host tests: `test/run_tests.sh` (65 cases); AVR build: `tools/avr_build.sh`. Nothing in this update has been tested on the robot.

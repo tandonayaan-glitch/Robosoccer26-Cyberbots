@@ -55,7 +55,7 @@ struct Stats {
 static Stats g_stats;
 
 // Event records kept in the EEPROM (logger.h): what happened, in order, survives a power cycle.
-enum RecType : uint8_t { REC_BOOT = 1, REC_FAULT, REC_RECOVER, REC_NAV, REC_BALL_LOST, REC_SHOT, REC_SAFE_STOP, REC_CFG_SAVED, REC_NOTE };
+enum RecType : uint8_t { REC_BOOT = 1, REC_FAULT, REC_RECOVER, REC_NAV, REC_BALL_LOST, REC_SHOT, REC_SAFE_STOP, REC_CFG_SAVED, REC_NOTE, REC_ESTOP, REC_MODE, REC_REATTACK };
 static void recAdd(uint8_t type, uint16_t arg);
 
 // Implemented later (logger.h / nav.h).

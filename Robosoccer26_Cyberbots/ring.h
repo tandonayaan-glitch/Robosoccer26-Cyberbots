@@ -52,11 +52,21 @@ struct Ball {
   uint16_t seenMask;         // which ring channels see the ball
   uint8_t nSeen;
   bool held;                 // front module reports the ball in the shooting position
-  bool centered, ready;      // ready = held and the ring says it is straight ahead (or modneedring = 0)
-  uint32_t lastSeenMs, readySinceMs;
+  bool centered, ready;      // ready = held and the ring says it is straight ahead (or modneedring = 0) and the underside sensor agrees (when it is usable)
+  bool positioned;           // the underside sensor says the ball is in the attack position, or it is not usable (then it does not vote)
+  uint8_t confidence;        // 0..100 diagnostic figure: signal strength, number of receivers that agree, how long it has been seen
+  uint32_t lastSeenMs, readySinceMs, seenSinceMs;
   bool lostEvent;            // set when the ball is lost; the navigation clears it
 };
 static Ball g_ball;
+
+// Underside ball-position sensor (D40). Type and active level are NOT documented: the level is a setting. It confirms a ball position, it never replaces the receivers.
+// Suspect (= ignored, the shooting position is then decided by the other sensors) when:
+//   stuck     : it reports "ball" for underStuckMs while the receivers see no ball at all (stuck active, or the wrong polarity with the pull-up on)
+//   no answer : everything else says "ball in place" for underStuckMs but it never reports it (disconnected, wrong polarity, mis-aimed)
+struct Under { bool raw, active, suspectStuck, suspectMiss; uint8_t cnt, pinMode; uint32_t activeNoBallSinceMs, missSinceMs, samples; };
+static Under g_under;
+static bool underUsable(const Config& c) { return c.underEnable && !g_under.suspectStuck && !g_under.suspectMiss; }
 static float g_lastBearing = 0.0f, g_bearingRate = 0.0f;   // last seen bearing, and how fast it was changing (deg/s, + = moving to the right)
 static uint32_t g_lastBearingMs = 0, g_rateRefMs = 0;
 static float g_rateRef = 0.0f;
@@ -141,6 +151,7 @@ static void ringBegin() {
   for (uint8_t i = 0; i < MOD_COUNT; i++) { pinMode(PIN_MOD[i], INPUT); g_modPinMode[i] = INPUT; }   // pull-up chosen per module polarity in modService()
   memset(g_ring, 0, sizeof(g_ring));
   memset(g_mod, 0, sizeof(g_mod));
+  memset(&g_under, 0, sizeof(g_under));
   memset(&g_ball, 0, sizeof(g_ball));
   g_lastBearing = 0; g_bearingRate = 0; g_lastBearingMs = 0; g_rateRefMs = 0; g_rateRef = 0; g_bHistMs = 0;
   g_ringNext = 0; g_ringLastScanMs = 0; g_ringCycleMs = 0; g_ringCycles = 0; g_modLastMs = 0;
@@ -215,15 +226,40 @@ static void ringUpdateBall(const Config& c, uint32_t nowMs) {
   bool ringFront = known && absf(g_ball.bearing) <= c.centerDeg;
   g_ball.held = modEnabled(c, 0) && g_mod[0].active;
   g_ball.centered = ringFront || (!c.modNeedRing && g_ball.held);
-  bool ready = g_ball.held && (c.modNeedRing ? ringFront : true);
+  bool other = g_ball.held && (c.modNeedRing ? ringFront : true);          // "ball in place" according to everything except the underside sensor
+  if (!c.underEnable) { g_under.suspectStuck = g_under.suspectMiss = false; g_under.activeNoBallSinceMs = g_under.missSinceMs = 0; }
+  else {
+    if (g_under.active && !g_ball.valid) { if (!g_under.activeNoBallSinceMs) g_under.activeNoBallSinceMs = nowMs ? nowMs : 1u; if (elapsedMs(nowMs, g_under.activeNoBallSinceMs) > c.underStuckMs) g_under.suspectStuck = true; }
+    else { g_under.activeNoBallSinceMs = 0; if (!g_under.active) g_under.suspectStuck = false; }
+    if (other && !g_under.active) { if (!g_under.missSinceMs) g_under.missSinceMs = nowMs ? nowMs : 1u; if (elapsedMs(nowMs, g_under.missSinceMs) > c.underStuckMs) g_under.suspectMiss = true; }
+    else { g_under.missSinceMs = 0; if (other && g_under.active) g_under.suspectMiss = false; }      // it answered when it should: trusted again
+  }
+  g_ball.positioned = !underUsable(c) || g_under.active;
+  bool ready = other && (!c.underNeed || g_ball.positioned);
+  if (known) { if (!g_ball.seenSinceMs) g_ball.seenSinceMs = nowMs ? nowMs : 1u; } else g_ball.seenSinceMs = 0;
+  { int cf = 0;
+    if (known) { cf = (int)(clampf(g_ball.strength, 0.0f, 1.0f) * 60.0f) + (g_ball.nSeen >= 2 ? 20 : 0) + (elapsedMs(nowMs, g_ball.seenSinceMs) >= 100 ? 20 : 0); }
+    g_ball.confidence = (uint8_t)(cf > 100 ? 100 : cf); }
   if (ready && !g_ball.ready) g_ball.readySinceMs = nowMs ? nowMs : 1u;
   if (!ready) g_ball.readySinceMs = 0;
   g_ball.ready = ready;
 }
 
+static void underService(const Config& c) {
+  if (!c.underEnable) { g_under.raw = g_under.active = false; g_under.cnt = 0; return; }
+  // Active-LOW (the default) gets the internal pull-up: a disconnected sensor reads HIGH = "no ball". (No pull-down exists on the AVR for active-HIGH.)
+  uint8_t want = c.underActiveLow ? INPUT_PULLUP : INPUT;
+  if (g_under.pinMode != want + 1u) { pinMode(P_UNDER, want); g_under.pinMode = (uint8_t)(want + 1u); }
+  bool level = digitalRead(P_UNDER) != 0;
+  g_under.raw = c.underActiveLow ? !level : level;
+  g_under.samples++;
+  if (g_under.raw != g_under.active) { if (++g_under.cnt >= c.underDebounce) { g_under.active = g_under.raw; g_under.cnt = 0; } } else g_under.cnt = 0;
+}
+
 static void modService(const Config& c, uint32_t nowMs) {
   if (g_modLastMs && elapsedMs(nowMs, g_modLastMs) < MOD_SAMPLE_MS) return;
   g_modLastMs = nowMs ? nowMs : 1u;
+  underService(c);
   for (uint8_t i = 0; i < MOD_COUNT; i++) {
     Module& m = g_mod[i];
     if (!modEnabled(c, i)) { m.raw = m.active = false; m.cnt = 0; continue; }

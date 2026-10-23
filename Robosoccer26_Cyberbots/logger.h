@@ -12,9 +12,9 @@
 // t_ms,type,cond,nav,ringmask,ball,bearing_deg,strength,flags,imu,yaw_deg,herr_deg,gz_dps,vx,vy,w,pwm_fl,pwm_fr,pwm_bl,pwm_br,faults,loop_us,note
 
 enum NavState : uint8_t {
-  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT
+  NAV_IDLE, NAV_MANUAL, NAV_SEEK, NAV_APPROACH, NAV_SEARCH, NAV_SEARCH_PAUSE, NAV_WAIT, NAV_TEST, NAV_SAFE_STOP, NAV_SHOOT, NAV_REVERSE, NAV_COUNT
 };
-static const char NAV_NAME[][13] PROGMEM = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP", "SHOOT"};
+static const char NAV_NAME[NAV_COUNT][13] PROGMEM = {"IDLE", "MANUAL", "SEEK", "APPROACH", "SEARCH", "SEARCH_PAUSE", "WAIT", "TEST", "SAFE_STOP", "SHOOT", "REVERSE"};
 static NavState g_navState = NAV_IDLE;
 static float g_hdgErr = NAN;               // degrees; NaN when heading hold is not active
 static uint32_t g_loopMaxUs = 0;           // longest loop() iteration since the last snapshot
@@ -36,7 +36,7 @@ static void logRow(char type, const char* note) {
   if (!isnan(g_hdgErr)) snprintf(herr, sizeof(herr), "%.1f", (double)g_hdgErr);
   if (g_imu.present && g_imu.ok) snprintf(gz, sizeof(gz), "%.1f", (double)g_imu.gz);
   if (g_ball.bearingKnown) snprintf(brg, sizeof(brg), "%.1f", (double)g_ball.bearing);
-  uint8_t flags = (uint8_t)((g_ball.held ? 1 : 0) | (g_ball.ready ? 2 : 0) | (g_mod[0].active ? 4 : 0) | (g_mod[1].active ? 8 : 0));
+  uint8_t flags = (uint8_t)((g_ball.held ? 1 : 0) | (g_ball.ready ? 2 : 0) | (g_mod[0].active ? 4 : 0) | (g_mod[1].active ? 8 : 0) | (g_under.active ? 16 : 0));
   snprintf(b, sizeof(b), "%lu,%c,%u,%u,%04X,%u,%s,%.2f,%u,%u,%s,%s,%s,%.2f,%.2f,%.2f,%d,%d,%d,%d,%04X,%lu,",
            UL(millis()), type, (unsigned)g_cond, (unsigned)g_navState, (unsigned)g_ball.seenMask, g_ball.valid ? 1u : 0u, brg, (double)g_ball.strength, (unsigned)flags,
            g_imu.present ? (g_imu.ok ? 2u : 1u) : 0u, yaw, herr, gz, (double)g_reqVx, (double)g_reqVy, (double)g_reqW,
@@ -104,6 +104,9 @@ static PGM_P recName(uint8_t t) {
     case REC_SHOT: return PSTR("SHOT");
     case REC_SAFE_STOP: return PSTR("SAFE_STOP");
     case REC_CFG_SAVED: return PSTR("CFG_SAVED");
+    case REC_ESTOP: return PSTR("ESTOP");
+    case REC_MODE: return PSTR("MODE");
+    case REC_REATTACK: return PSTR("REATTACK");
     default: return PSTR("NOTE");
   }
 }
@@ -114,9 +117,12 @@ static void recPrint(const Rec& r) {
   char* d = b + p; size_t room = sizeof(b) - (size_t)p - 2;
   switch (r.type) {
     case REC_FAULT: case REC_RECOVER: snprintf(d, room, "%S", r.arg < F_COUNT ? faultCode((uint8_t)r.arg) : PSTR("?")); break;
-    case REC_NAV: { uint8_t f = (uint8_t)(r.arg >> 8), to = (uint8_t)r.arg; snprintf(d, room, "%S>%S", f < 10 ? (PGM_P)NAV_NAME[f] : PSTR("?"), to < 10 ? (PGM_P)NAV_NAME[to] : PSTR("?")); break; }
+    case REC_NAV: { uint8_t f = (uint8_t)(r.arg >> 8), to = (uint8_t)r.arg; snprintf(d, room, "%S>%S", f < NAV_COUNT ? (PGM_P)NAV_NAME[f] : PSTR("?"), to < NAV_COUNT ? (PGM_P)NAV_NAME[to] : PSTR("?")); break; }
     case REC_BALL_LOST: snprintf(d, room, "last_bearing_deg=%d", (int)(int16_t)r.arg); break;
     case REC_SHOT: snprintf(d, room, "shot_number=%u", (unsigned)r.arg); break;
+    case REC_MODE: snprintf(d, room, "%S", r.arg == 2 ? PSTR("AUTO") : (r.arg == 1 ? PSTR("MANUAL") : PSTR("IDLE"))); break;
+    case REC_ESTOP: snprintf(d, room, "%S", r.arg ? PSTR("latched") : PSTR("cleared")); break;
+    case REC_REATTACK: snprintf(d, room, "try=%u", (unsigned)r.arg); break;
     default: snprintf(d, room, "%u", (unsigned)r.arg); break;
   }
   size_t l = strlen(b); b[l] = '\n'; b[l + 1] = 0;

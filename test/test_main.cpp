@@ -20,6 +20,7 @@ static void simRun(uint32_t ms, uint32_t loopCostUs = 50) {
   while (g_mockUs < end) { loop(); mockAdvance(loopCostUs); }
 }
 static void send(const char* s) { Serial.feed(s); }
+static int outCountOf(const std::string& hay, const char* s) { int n = 0; size_t p = 0; while ((p = hay.find(s, p)) != std::string::npos) { n++; p += strlen(s); } return n; }
 static bool outHas(const char* s) { return Serial.out.find(s) != std::string::npos; }
 static int outCount(const char* s) { int n = 0; size_t p = 0; while ((p = Serial.out.find(s, p)) != std::string::npos) { n++; p += strlen(s); } return n; }
 static void freshEeprom(const char* name) {          // a private EEPROM image per test case; erased (0xFF) unless the file already exists
@@ -51,9 +52,9 @@ static void ballAt(float deg, float strength = 0.4f) {
     g_mockRingAmp[ch] = (uint16_t)(strength * (float)g_cfg.ringNear * f + 0.5f);
   }
 }
-static void ballGone() { ballAt(0.0f, 0.0f); g_mockModDetect[0] = false; }
-static void ballFar() { ballAt(0.0f, 0.35f); g_mockModDetect[0] = false; }          // ahead, not near
-static void ballHeld() { ballAt(0.0f, 1.0f); g_mockModDetect[0] = true; }           // ahead, front module detecting: the shooting position
+static void ballGone() { ballAt(0.0f, 0.0f); g_mockModDetect[0] = false; g_mockUnderDetect = false; }
+static void ballFar() { ballAt(0.0f, 0.35f); g_mockModDetect[0] = false; g_mockUnderDetect = false; }          // ahead, not near
+static void ballHeld() { ballAt(0.0f, 1.0f); g_mockModDetect[0] = true; g_mockUnderDetect = true; }           // ahead, front module detecting: the shooting position
 static void calibrateAll() { g_cfg.ringCalDone = 1; }
 // The default configuration has only A0 and A1 (both "straight ahead"). Most tests want 8 receivers 45 deg apart: A0 = 0 deg, clockwise.
 static void layout8() {
@@ -252,6 +253,7 @@ static void t_commands() {
   CHECK(!g_autoEnabled);
   send(":auto on\n"); simRun(100); send(":estop\n"); simRun(100);
   CHECK(!g_autoEnabled && allWheelsStopped());
+  send(":recover\n"); simRun(50);                                       // :estop latched the emergency stop; :recover clears the latch
   send(":manual l\n"); simRun(200);
   CHECK(wheelsMatchStrafeRight() == false && wheelDir(W_FL) < 0);        // strafe left
   send(":manual x\n"); simRun(50);
@@ -482,7 +484,7 @@ static void t_config() {
   for (size_t i = 0; i < PARAM_COUNT; i++) { ParamDef p; paramAt(i, &p); CHECK(strstr(p.name, "gpio") == nullptr && strncmp(p.name, "pin", 3) != 0); }
   // and no ParamDef offset can reach outside the Config struct (and every name fits the 16-byte field)
   for (size_t i = 0; i < PARAM_COUNT; i++) { ParamDef p; paramAt(i, &p); CHECK(p.off + 1u <= offsetof(Config, crc) && strlen(p.name) < sizeof(p.name)); }
-  CHECK(sizeof(Config) < 400);                                   // the EEPROM image and the RAM copy stay small
+  CHECK(sizeof(Config) < 460);                                   // the EEPROM image and the RAM copy stay small
 }
 
 // A "reboot" (power cycle): the EEPROM image survives, everything else restarts from setup(). Settings, calibrations and mounting angles come back;
@@ -695,6 +697,9 @@ static void t_cli_manual() {
   // '!' emergency stop
   send("f"); simRun(100); send("!"); simRun(10);
   CHECK(allWheelsStopped());
+  Serial.out.clear(); send("f"); simRun(100);
+  CHECK(allWheelsStopped() && outHas("LATCHED"));                        // the emergency stop is latched: no movement from any source
+  send(":recover\n"); simRun(50);
   // 'a' refused with an uncalibrated ring
   g_cfg.ringCalDone = 0;
   Serial.out.clear(); send("a"); simRun(100);
@@ -1024,7 +1029,7 @@ static void t_ring_boot_sequence() {
   }
   for (int k = 0; k < 8; k++) CHECK(g_pinFirstTouchMs[PIN_RECV[k]] >= motorFirst);     // after the motor pins were made safe
   for (int p = 0; p < 70; p++) {
-    bool assigned = p == PIN_MOD[0] || p == PIN_MOD[1] || p == PIN_I2C_SDA || p == PIN_I2C_SCL;   // the bus-recovery clocking touches SDA / SCL before Wire.begin()
+    bool assigned = p == PIN_MOD[0] || p == PIN_MOD[1] || p == P_UNDER || p == PIN_I2C_SDA || p == PIN_I2C_SCL;   // the bus-recovery clocking touches SDA / SCL before Wire.begin()
     for (int i = 0; i < 4; i++) assigned |= p == WHEEL_PINS[i].in1 || p == WHEEL_PINS[i].in2 || p == WHEEL_PINS[i].en;
     for (int k = 0; k < 8; k++) assigned |= p == PIN_RECV[k];
     if (!assigned) CHECK(g_pinFirstTouchMs[p] == 0);                     // no unassigned pin is touched (D30..D33 in particular: no multiplexer)
@@ -1203,6 +1208,7 @@ static void t_ring_cli() {
 
 static void t_modules() {
   bootCal();
+  g_cfg.underEnable = 0;                                                 // the modules alone here; the underside sensor has its own test
   simRun(100);
   CHECK(!g_mod[0].active && !g_ball.held);                               // a clear module (output HIGH) is not "detecting"
   bool ever = false;
@@ -1475,6 +1481,7 @@ static void t_goal_invalid_after_gyro_reset() {
 
 static void t_shoot_launch_clock_and_one_shot_per_ball() {
   shotSetup();
+  g_cfg.reMax = 0;                                          // (no reverse-and-reattack here: this test is about one shot per ball)
   g_cfg.shootCooldownMs = 500;
   ballFar();
   startAuto(); simRun(1200);
@@ -1583,9 +1590,338 @@ static void t_old_hardware_removed() {
   Serial.out.clear(); send("?"); simRun(50); send("h"); simRun(300); send("i"); simRun(50); send("d"); simRun(50);
   CHECK(!outHas("TSOP") && !outHas("emitter"));            // no emitter / digital-receiver hardware is described
   CHECK(outHas("ball receivers") || outHas("[Ring]"));
-  // pins: 8 direction + 4 PWM + 2 modules + 2 I2C + 2 serial, all distinct (the compile-time asserts in pins.h); the receivers on A0..A7
-  CHECK(__builtin_popcountll(ALL_DIGITAL_MASK) == 18 && __builtin_popcountll(RECV_MASK) == 8 && (MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0 && __builtin_popcountll(MEGA_PWM_MASK) == 15);
+  // pins: 8 direction + 4 PWM + 2 modules + 2 I2C + 2 serial + 2 Bluetooth + 1 underside sensor, all distinct (the compile-time asserts in pins.h); the receivers on A0..A7
+  CHECK(__builtin_popcountll(ALL_DIGITAL_MASK) == 21 && __builtin_popcountll(RECV_MASK) == 8 && (MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0 && __builtin_popcountll(MEGA_PWM_MASK) == 15);
   CHECK(outHas("ball receivers: ") && !outHas("GPIO") && !outHas("CD74") && !outHas("multiplex"));                    // no ESP32 pin names are left in the output
+}
+
+// ================================================================================================
+// Bluetooth remote (HC-05 on Serial1), emergency-stop latch, mode switching
+
+static void bt(const char* s) { Serial1.feed(s); }
+static bool btHas(const char* s) { return Serial1.out.find(s) != std::string::npos; }
+static void forwardNow() { CHECK(wheelDir(W_FL) > 0 && wheelDir(W_FR) > 0 && wheelDir(W_BL) > 0 && wheelDir(W_BR) > 0); }
+
+static void t_bt_protocol() {
+  bootCal();
+  simRun(300);
+  CHECK(Serial1.begun && g_cfg.btEnable == 1);
+  CHECK(!g_autoEnabled && g_navState == NAV_IDLE && allWheelsStopped());       // boots idle: nothing moves by itself
+  bt("W"); simRun(60);                                                          // movement before choosing manual mode is refused
+  CHECK(btHas("ERR:NOT_MANUAL") && allWheelsStopped());
+  Serial1.out.clear(); bt("M"); simRun(60);
+  CHECK(btHas("OK:M") && g_remoteManual && !g_autoEnabled && allWheelsStopped());
+  // the four-wheel directions of every drive command (X-layout mecanum)
+  Serial1.out.clear(); bt("W"); simRun(120);
+  CHECK(btHas("OK:W")); forwardNow();
+  bt("S"); simRun(400); CHECK(wheelDir(W_FL) < 0 && wheelDir(W_FR) < 0 && wheelDir(W_BL) < 0 && wheelDir(W_BR) < 0);
+  bt("A"); simRun(400); CHECK(wheelDir(W_FL) < 0 && wheelDir(W_BL) < 0 && wheelDir(W_FR) > 0 && wheelDir(W_BR) > 0);      // turn left = rotate counter-clockwise
+  bt("D"); simRun(400); CHECK(wheelDir(W_FL) > 0 && wheelDir(W_BL) > 0 && wheelDir(W_FR) < 0 && wheelDir(W_BR) < 0);      // turn right
+  bt("Z"); simRun(400); CHECK(wheelDir(W_FL) < 0 && wheelDir(W_FR) > 0 && wheelDir(W_BL) > 0 && wheelDir(W_BR) < 0);      // strafe left
+  bt("C"); simRun(400); CHECK(wheelsMatchStrafeRight());
+  bt("w"); simRun(400); forwardNow();                                           // lower case is accepted
+  // a movement command is a lease: it ends by itself
+  simRun(g_cfg.btLeaseMs + 400);
+  CHECK(allWheelsStopped() && g_remoteManual && g_navState == NAV_IDLE);
+  // a held key repeats the command: the robot keeps driving
+  for (int k = 0; k < 15; k++) { bt("W"); simRun(100); }
+  forwardNow();
+  bt("Q"); simRun(30);                                                          // normal stop: stops at once, stays in manual mode, does not touch the latch
+  CHECK(allWheelsStopped() && g_remoteManual && !g_estop);
+  // unknown bytes never move anything
+  Serial1.out.clear(); bt("k#$1\r\n  "); simRun(100);
+  CHECK(allWheelsStopped() && g_btUnknown >= 4 && outCountOf(Serial1.out, "ERR:UNKNOWN") <= 1);
+}
+
+static void t_bt_modes_and_estop() {
+  bootCal();
+  simRun(300);
+  // autonomous mode: 'U' runs the same checks as 'a'
+  bt("U"); simRun(80);
+  CHECK(g_autoEnabled && g_navState == NAV_SEEK);
+  ballFar(); simRun(400);
+  CHECK(g_navState == NAV_APPROACH && g_reqVy > 0.1f);
+  Serial1.out.clear(); bt("W"); simRun(100);                                    // manual drive is refused while autonomous: the autonomous controller keeps the motors
+  CHECK(btHas("ERR:NOT_MANUAL") && g_autoEnabled && g_navState == NAV_APPROACH && g_reqVy > 0.1f);
+  bt("M"); simRun(60);                                                          // explicit switch to manual: autonomy ends, nothing keeps driving
+  CHECK(!g_autoEnabled && g_remoteManual && allWheelsStopped());
+  bt("W"); simRun(100); forwardNow();
+  bt("U"); simRun(80);                                                          // back to autonomous: the manual move is cleared
+  CHECK(g_autoEnabled && g_navState != NAV_MANUAL);
+  // Q in autonomous mode ends autonomy and keeps manual mode
+  bt("Q"); simRun(50);
+  CHECK(!g_autoEnabled && allWheelsStopped() && g_remoteManual);
+  // emergency stop: immediate, latched, outranks everything
+  bt("M"); simRun(40);
+  for (int k = 0; k < 6; k++) { bt("W"); simRun(50); }
+  CHECK(!allWheelsStopped());
+  Serial1.out.clear(); bt("X");
+  loop();                                                                       // ONE pass of the main loop is enough
+  CHECK(allWheelsStopped() && g_estop && g_navState == NAV_IDLE && !g_remoteManual);
+  simRun(50);
+  CHECK(btHas("OK:X"));
+  Serial1.out.clear(); bt("W"); bt("M"); bt("U"); simRun(100);
+  CHECK(outCountOf(Serial1.out, "ERR:ESTOP") == 3 && allWheelsStopped() && !g_autoEnabled);
+  send("a"); simRun(50); send("f"); simRun(100);                                // the USB console cannot start anything either
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  bt("Q"); simRun(30);
+  CHECK(g_estop);                                                               // Q is a normal stop: it does not clear the latch
+  Serial1.out.clear(); bt("R"); simRun(60);
+  CHECK(btHas("OK:R") && !g_estop && !g_remoteManual && !g_autoEnabled && allWheelsStopped());   // cleared, and the robot stays idle
+  bt("W"); simRun(60);
+  CHECK(allWheelsStopped());                                                    // still needs an explicit M or U
+  bt("M"); bt("W"); simRun(120); forwardNow();
+  // emergency stop during autonomous attack/search states, and with a backlog of stale commands
+  bt("U"); simRun(80); ballFar(); simRun(300);
+  bt("WWWWWWWWWWWWWWWWWWWWX"); simRun(5);
+  CHECK(allWheelsStopped() && g_estop);                                         // the X anywhere in the waiting bytes wins, the rest is dropped
+  bt("R"); simRun(40);
+  // a fault that is not the latch: R refuses while the drivetrain fault is active
+  bt("X"); simRun(20); faultRaise(F_MOTOR_INIT, "test fault"); simRun(20);
+  Serial1.out.clear(); bt("R"); simRun(40);
+  CHECK(btHas("ERR:FAULT") && g_estop);
+  // CLI side of the latch
+  send(":recover\n"); simRun(50);
+  CHECK(!g_estop);
+  send("!"); simRun(20);
+  CHECK(g_estop);
+  send(":recover\n"); simRun(50);
+  CHECK(!g_estop);
+  // status / ping
+  Serial1.out.clear(); bt("P?"); simRun(60);
+  CHECK(btHas("PONG:") && btHas("ST:"));
+}
+
+// Controller disconnected, stale bytes, and the switch off.
+static void t_bt_link_loss() {
+  bootCal();
+  g_cfg.btLeaseMs = 3000; g_cfg.btLinkMs = 500;                                 // a long lease: only the link supervision can stop the robot in time
+  simRun(300);
+  bt("M"); simRun(40);
+  bt("W"); simRun(200);
+  forwardNow();
+  simRun(200);                                                                  // still within the link timeout
+  CHECK(!allWheelsStopped() && g_btLink);
+  simRun(800);                                                                  // the remote went silent
+  CHECK(allWheelsStopped() && !g_btLink && g_navState == NAV_IDLE);
+  CHECK(outHas("Bluetooth link LOST"));
+  bt("W"); simRun(100);                                                         // the link comes back and the remote can drive again
+  CHECK(g_btLink); forwardNow();
+  g_cfg.btLeaseMs = 400;
+  // many stale movement bytes then silence: the robot stops within the lease, it does not keep driving
+  bt("Q"); simRun(30);
+  bt("WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW");
+  simRun(200);
+  CHECK(!allWheelsStopped());
+  simRun(g_cfg.btLeaseMs + 500);
+  CHECK(allWheelsStopped());
+  // switched off in the configuration: bytes are ignored
+  g_cfg.btEnable = 0; bt("X"); simRun(50);
+  CHECK(!g_estop);
+}
+
+// ================================================================================================
+// underside ball-position sensor (D40)
+
+static void t_under_sensor() {
+  bootCal();
+  simRun(200);
+  CHECK(g_cfg.underEnable == 1 && g_pinMode[P_UNDER] == INPUT_PULLUP);          // active-LOW default: pull-up on, so a missing sensor reads "no ball"
+  CHECK(!g_under.active && g_ball.positioned == false);
+  // debounce
+  bool ever = false;
+  g_mockUnderDetect = true; for (int k = 0; k < 3; k++) { simRun(1); ever |= g_under.active; }
+  g_mockUnderDetect = false; for (int k = 0; k < 60; k++) { simRun(1); ever |= g_under.active; }
+  CHECK(!ever);
+  // it is a confirmation, not a replacement: module + receivers alone are not enough while the underside sensor says "no ball"
+  ballAt(0, 0.5f); g_mockModDetect[0] = true; simRun(500);
+  CHECK(g_ball.held && !g_ball.ready && underUsable(g_cfg));
+  g_mockUnderDetect = true; simRun(100);
+  CHECK(g_ball.ready && g_ball.positioned);                                     // all three agree
+  // the receivers alone with only the underside sensor: not ready
+  ballAt(0, 0.5f); g_mockModDetect[0] = false; simRun(200);
+  CHECK(!g_ball.ready);
+  // no answer: everything else says "ball in place" but the sensor never reports it (disconnected, wrong polarity): it is ignored after understuck
+  g_mockUnderDetect = false; g_mockModDetect[0] = true; simRun(200);
+  CHECK(!g_ball.ready && !g_under.suspectMiss);
+  simRun(g_cfg.underStuckMs + 600);
+  CHECK(g_under.suspectMiss && !underUsable(g_cfg) && g_ball.ready);
+  g_mockUnderDetect = true; simRun(100);                                        // it answers: trusted again
+  CHECK(!g_under.suspectMiss && underUsable(g_cfg));
+  // stuck active while the receivers see no ball at all: ignored (and does not fake a position)
+  ballGone(); g_mockUnderDetect = true; simRun(g_cfg.underStuckMs + 600);
+  CHECK(g_under.suspectStuck && !underUsable(g_cfg) && !g_ball.valid);
+  g_mockUnderDetect = false; simRun(100);
+  CHECK(!g_under.suspectStuck);
+  // wrong polarity guess is survivable: the sensor really is active-HIGH but the setting says LOW
+  g_mockUnderActiveHigh = true; g_mockUnderDetect = false; simRun(g_cfg.underStuckMs + 800);
+  CHECK(g_under.active && g_under.suspectStuck && !g_ball.valid);               // read as "ball" forever with no receiver ball: ignored
+  send(":set underlow 0\n"); simRun(200);
+  CHECK(!g_under.active && g_pinMode[P_UNDER] == INPUT);
+  g_mockUnderDetect = true; simRun(100);
+  CHECK(g_under.active);
+  // switched off: it does not vote
+  send(":set underenable 0\n"); simRun(100);
+  CHECK(!g_under.active && g_ball.positioned);
+  Serial.out.clear(); send(":raw\n"); simRun(800);
+  CHECK(outHas("raw underside sensor (D40)"));
+}
+
+// ================================================================================================
+// reverse and re-attack, search layers, no-goal attack, wheel scale
+
+static void t_reattack() {
+  shotSetup();
+  g_cfg.shootCooldownMs = 500; g_cfg.shootHoldMs = 100;
+  ballFar();
+  startAuto(); simRun(1200);
+  ballHeld();                                                                   // the ball sits in front of the robot all the time: the push never works
+  uint64_t end = g_mockUs + 60000000ULL;
+  bool reversed = false; uint8_t maxCount = 0; uint64_t waitSince = 0;
+  while (g_mockUs < end) {
+    emulateAimRotation(); loop(); mockAdvance(50);
+    if (g_navState == NAV_REVERSE && g_rePhase == 1 && g_reqVy < -0.3f) reversed = true;
+    if (g_reCount > maxCount) maxCount = g_reCount;
+    if (g_navState == NAV_WAIT) { waitSince = g_mockUs; break; }
+  }
+  CHECK(waitSince != 0 && reversed);                                            // it did reverse, and in the end it stopped trying instead of looping forever
+  CHECK(maxCount == g_cfg.reMax);                                               // exactly reMax reverse tries
+  CHECK((int)g_stats.shots == g_cfg.reMax + 1);                                 // the first attack plus one per try
+  CHECK(allWheelsStopped());
+  uint32_t shots = g_stats.shots;
+  simRun(g_cfg.reCooldownMs - 400);                                             // while the pause lasts: no further attack
+  CHECK(g_stats.shots == shots && g_navState == NAV_WAIT);
+  // after the pause it tries again (the count starts over): bounded, not blind
+  simRun(2500);
+  CHECK(g_navState != NAV_WAIT || g_stats.shots > shots);
+}
+
+static void t_reattack_phases() {
+  shotSetup();
+  g_cfg.reJudgeMs = 250; g_cfg.reBackMs = 350; g_cfg.reSettleMs = 200; g_cfg.reMax = 2;
+  ballHeld(); startAuto(); simRun(300);
+  // phase machinery on its own: force the state after a "shot"
+  auto enter = [&]() { g_rePhase = 0; g_reSince = millis(); navSetState(NAV_REVERSE, PSTR("test")); };
+  // 1. the ball left during the judging window: success, count reset
+  g_reCount = 1; enter(); ballGone(); simRun(150);
+  CHECK(g_navState != NAV_REVERSE && g_reCount == 0);
+  // 2. the push failed: judge, reverse (bounded), settle, back to tracking
+  ballHeld(); simRun(100); g_reCount = 0; enter();
+  simRun(g_cfg.reJudgeMs - 100);
+  CHECK(g_navState == NAV_REVERSE && g_rePhase == 0 && allWheelsStopped());
+  simRun(150);
+  CHECK(g_rePhase == 1 && g_reCount == 1);
+  simRun(100);
+  CHECK(g_reqVy < -0.3f && wheelDir(W_FL) < 0 && wheelDir(W_FR) < 0);          // reversing with all four wheels
+  simRun(g_cfg.reBackMs - 100 + 60);
+  CHECK(g_rePhase == 2);
+  simRun(40);
+  CHECK(g_reqVy == 0.0f);                                  // the reverse is bounded by reBackMs
+  simRun(g_cfg.reSettleMs + 100);
+  CHECK(g_navState != NAV_REVERSE);
+  // 3. the ball is lost while reversing: stop at once and search
+  ballHeld(); simRun(100); g_reCount = 0; enter(); simRun(g_cfg.reJudgeMs + 100);
+  CHECK(g_rePhase == 1);
+  ballGone();
+  for (int k = 0; k < 80 && g_navState != NAV_SEARCH && g_navState != NAV_SEARCH_PAUSE; k++) simRun(50);
+  CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE);
+  CHECK(g_reqVy >= -0.01f);                                                     // not still driving backwards
+  // 4. the ball moves sideways during the reverse: reposition at once
+  ballHeld(); simRun(100); startAuto(); g_reCount = 0; enter(); simRun(g_cfg.reJudgeMs + 100);
+  CHECK(g_rePhase == 1);
+  ballAt(80, 0.5f); g_mockModDetect[0] = false; g_mockUnderDetect = false; simRun(150);
+  CHECK(g_rePhase == 2 || g_navState != NAV_REVERSE);
+  // 5. an emergency stop in the middle of the reverse
+  ballHeld(); simRun(100); startAuto(); g_reCount = 0; enter(); simRun(g_cfg.reJudgeMs + 100);
+  CHECK(g_rePhase == 1 && !allWheelsStopped());
+  bt("X"); loop();
+  CHECK(allWheelsStopped() && g_estop && g_navState == NAV_IDLE);
+  // 6. the tries used up: pause, then a new count
+  bt("R"); simRun(30); send("a"); simRun(50);
+  ballHeld(); simRun(100); g_reCount = g_cfg.reMax; enter(); simRun(g_cfg.reJudgeMs + 100);
+  CHECK(g_navState == NAV_WAIT && g_reCount == 0 && allWheelsStopped());
+}
+
+static void t_search_layers() {
+  bootCal();
+  simRun(300);
+  startAuto();
+  // false detection: the ball is "seen" but never reached (the front module never reports it)
+  g_cfg.approachTimeoutMs = 2000;
+  ballFar(); simRun(1500);
+  CHECK(g_navState == NAV_APPROACH);
+  simRun(1200);
+  CHECK(g_stats.ballLossEvents >= 1 && g_appTimeouts >= 1);                    // timed out and searched again
+  // three timeouts in a row: stop and pause instead of chasing it forever
+  simRun(12000);
+  CHECK(g_navState == NAV_WAIT || g_appTimeouts > 0 || g_stats.ballLossEvents >= 3);
+  uint32_t losses = g_stats.ballLossEvents;
+  uint64_t end = g_mockUs + 20000000ULL; bool waited = false;
+  while (g_mockUs < end) { loop(); mockAdvance(50); if (g_navState == NAV_WAIT) { waited = true; simRun(400); CHECK(allWheelsStopped()); break; } }
+  CHECK(waited || losses >= 3);
+  // reaching the ball resets the false-detection count
+  ballGone(); simRun(500);
+  startAuto(); ballFar(); simRun(500);
+  ballHeld(); simRun(500);
+  CHECK(g_appTimeouts == 0);
+  // WAIT is not forever: a fresh search starts after researchms; and with no ball at all autonomy gives up by itself
+  send("s"); ballGone(); simRun(1000);
+  g_cfg.searchTimeoutMs = 2000; g_cfg.searchAttempts = 1; g_cfg.searchPauseMs = 500; g_cfg.researchMs = 1500; g_cfg.giveUpMs = 12000;
+  startAuto();
+  bool sawWait = false, sawResearch = false;
+  for (int k = 0; k < 200; k++) {                                               // 10 s: search, wait, then a fresh search by itself
+    simRun(50);
+    if (g_navState == NAV_WAIT) sawWait = true;
+    else if (sawWait && g_navState == NAV_SEARCH) sawResearch = true;
+  }
+  CHECK(sawWait && sawResearch);
+  simRun(20000);
+  CHECK(!g_autoEnabled && allWheelsStopped());                                  // and after giveupms without any ball it stops for good
+  // the ball appears during a search sweep: it is picked up at once
+  startAuto(); simRun(1500);
+  CHECK(g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE || g_navState == NAV_SEEK);
+  ballFar(); simRun(300);
+  CHECK(g_navState == NAV_APPROACH);
+}
+
+static void t_shoot_no_goal_and_wheel_scale() {
+  // no goal heading registered: the default is no shot (it needs the goal heading) ...
+  bootCal();
+  g_cfg.shootEnable = 1; g_cfg.shootHoldMs = 100; g_cfg.reMax = 0; g_cfg.shootBackMs = 150;
+  simRun(300); ballFar(); startAuto(); simRun(300);
+  send(":zero\n"); simRun(100);                                                // the gyro reference was reset: the registered goal heading is no longer valid
+  CHECK(!goalValid());
+  ballHeld(); simRun(2500);
+  CHECK(g_stats.shots == 0 && g_navState != NAV_SHOOT);
+  // ... and with shootneedgoal 0 a straight drive burst is allowed
+  send("s"); ballGone(); simRun(400);
+  g_cfg.shootNeedGoal = 0;
+  ballFar(); startAuto(); simRun(300);
+  send(":zero\n"); simRun(100);
+  CHECK(!goalValid());
+  ballHeld();
+  uint64_t end = g_mockUs + 8000000ULL;
+  while (g_mockUs < end && g_stats.shots == 0) { loop(); mockAdvance(50); }
+  CHECK(g_stats.shots == 1);
+  // per-wheel open-loop scale: 50 % on the front-left wheel halves its PWM, the others are unchanged, stop is still zero everywhere
+  bootCal();
+  simRun(200);
+  send(":set wscalefl 50\n"); simRun(20);
+  CHECK(g_cfg.wheelScale[W_FL] == 50);
+  send(":set wscalefr 49\n"); simRun(20);
+  CHECK(g_cfg.wheelScale[W_FR] == 100);                                         // out of range (50..150): rejected
+  send("m"); simRun(30); bt("M"); simRun(30);
+  for (int k = 0; k < 30; k++) { bt("W"); simRun(100); }
+  uint32_t fl = g_pwmDuty[WHEEL_PINS[W_FL].en], fr = g_pwmDuty[WHEEL_PINS[W_FR].en], bl = g_pwmDuty[WHEEL_PINS[W_BL].en];
+  CHECK(fr > 0 && fr == bl);
+  CHECK(fl * 2 >= fr - 2 && fl * 2 <= fr + 2);                                   // 50 % trim on the front-left wheel only
+  bt("Q"); simRun(400);
+  CHECK(allWheelsStopped());
+  send(":set wscalebr 150\n"); simRun(20);
+  for (int k = 0; k < 30; k++) { bt("W"); simRun(100); }
+  CHECK(g_pwmDuty[WHEEL_PINS[W_BR].en] > g_pwmDuty[WHEEL_PINS[W_BL].en]);
+  bt("Q"); simRun(400);
+  CHECK(allWheelsStopped());
 }
 
 struct TestCase { const char* name; void (*fn)(); };
@@ -1647,6 +1983,14 @@ static const TestCase TESTS[] = {
   T(t_shot_speed_old_vs_new),
   T(t_shot_parallel_aims_while_reversing),
   T(t_shoot_pwm_limit_and_no_reverse),
+  T(t_bt_protocol),
+  T(t_bt_modes_and_estop),
+  T(t_bt_link_loss),
+  T(t_under_sensor),
+  T(t_reattack),
+  T(t_reattack_phases),
+  T(t_search_layers),
+  T(t_shoot_no_goal_and_wheel_scale),
   T(t_old_hardware_removed),
 };
 

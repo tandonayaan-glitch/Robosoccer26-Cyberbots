@@ -9,6 +9,10 @@
 #include "logger.h"
 
 static bool g_autoEnabled = false;          // RAM only: every reset starts with autonomy OFF
+static bool g_estop = false;                // emergency-stop LATCH (RAM only): while set, no movement and no autonomy can be started from anywhere
+static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
+static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
+static uint8_t g_rePhase = 0, g_reCount = 0, g_appTimeouts = 0;
 static uint32_t g_navSince = 0;
 static uint32_t g_manualUntilMs = 0;
 static uint8_t g_searchAttempt = 0;
@@ -73,6 +77,7 @@ static void navSetState(NavState s, PGM_P why) {
   say("NAV", "%S -> %S (%S)", (PGM_P)NAV_NAME[g_navState], (PGM_P)NAV_NAME[s], why);
   char note[28];
   snprintf(note, sizeof(note), "%S>%S", (PGM_P)NAV_NAME[g_navState], (PGM_P)NAV_NAME[s]);
+  if (s == NAV_APPROACH && g_navState != NAV_APPROACH) g_approachSinceMs = now ? now : 1u;
   recAdd(REC_NAV, (uint16_t)(((uint16_t)g_navState << 8) | (uint8_t)s));
   g_navState = s;
   g_navSince = now;
@@ -96,6 +101,20 @@ static void navStop(PGM_P why) {
   else navSetState(NAV_IDLE, why);
 }
 
+// Emergency stop: everything stops NOW and a latch keeps the robot from moving until it is cleared deliberately (remote 'R' or ':recover').
+static void navEstop(PGM_P why) {
+  g_estop = true;
+  g_remoteManual = false;
+  navStop(why);
+  motorsStopNow();
+  recAdd(REC_ESTOP, 1);
+}
+static bool navEstopRefuses(PGM_P what) {
+  if (!g_estop) return false;
+  say("SAFETY", "%S REFUSED: emergency stop is LATCHED (remote 'R' or ':recover' clears it, then choose manual or autonomous explicitly)", what);
+  return true;
+}
+
 static void navMarkLoss(PGM_P where) {
   g_stats.ballLossEvents++;
   g_lostAtMs = millis();
@@ -106,6 +125,7 @@ static void navMarkLoss(PGM_P where) {
 }
 
 static bool navEnableAuto(const Config& c, uint32_t now) {
+  if (navEstopRefuses(PSTR("autonomous"))) return false;
   if (g_cond == COND_SAFE_STOP || sensingFault() || drivetrainFault()) {
     say("SAFETY", "autonomous REFUSED: robot is in SAFE_STOP (see 'h'); fix the fault and use :recover");
     return false;
@@ -115,6 +135,8 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
   if (!c.ringCalDone) { say("SAFETY", "autonomous REFUSED: ring noise floor not calibrated. Ball OFF, then ':ring cal noise' and ':save' (docs/RING_AND_MODULES.md)."); return false; }
   if (!modEnabled(c, 0)) { say("SAFETY", "autonomous REFUSED: IR module 0 (front, shooting position) is switched off (':mod on 0'): the robot could not tell when the ball is in place"); return false; }
   g_autoEnabled = true;
+  g_autoStartMs = now ? now : 1u;
+  g_reCount = 0; g_appTimeouts = 0; g_reLockUntil = 0; g_waitHoldUntil = 0;
   g_searchAttempt = 0;
   g_lostPending = false;
   if (imuHeadingUsable(c, now)) { g_refYaw = g_imu.yaw; }
@@ -178,7 +200,9 @@ static void navApproach(const Config& c, uint32_t now) {
 static bool navShootCheck(const Config& c, uint32_t now) {
   bool fresh = g_ringLastScanMs && elapsedMs(now, g_ringLastScanMs) <= 100;   // a stalled sensor loop cannot start a shot
   if (fresh && !g_ball.held) g_needRelease = false;                 // the ball has left the front module: the next ball may be shot
-  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || !goalValid() || !imuHeadingUsable(c, now) || !fresh || !g_ball.ready) return false;
+  bool goalOk = goalValid() && imuHeadingUsable(c, now);
+  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || (c.shootNeedGoal && !goalOk) || !fresh || !g_ball.ready) return false;
+  if (!deadlineReached(now, g_reLockUntil)) return false;           // reverse-and-reattack tries used up: stay put for reCooldownMs
   if (g_needRelease) return false;                                  // still the same ball: wait until it has left the sensor
   if (g_ball.readySinceMs == 0 || elapsedMs(now, g_ball.readySinceMs) < c.shootHoldMs) return false;
   if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
@@ -237,6 +261,14 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_APPROACH:
       if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch(PSTR("ball lost"), true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
+      else if (g_ball.held) { g_appTimeouts = 0; g_approachSinceMs = now ? now : 1u; navApproach(c, now); }   // reached it: the timer restarts
+      else if (elapsedMs(now, g_approachSinceMs) > c.approachTimeoutMs) {
+        // Approaching for this long without the front module ever reporting the ball: a false detection (or a ball that keeps rolling away). Search again;
+        // after three such timeouts in a row stop and pause instead of chasing it forever.
+        g_stats.ballLossEvents++;
+        if (++g_appTimeouts >= 3) { g_appTimeouts = 0; g_waitHoldUntil = now + c.reCooldownMs; motorsDrive(c, 0, 0, 0, c.maxAuto); navSetState(NAV_WAIT, PSTR("approach never reached the ball 3 times: pausing")); }
+        else { g_searchAttempt = 1; navEnterSearch(PSTR("approach timeout: not reached, treating as a false detection"), true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
+      }
       else navApproach(c, now);
       break;
 
@@ -244,7 +276,8 @@ static void navTick(const Config& c, uint32_t now) {
       if (!g_autoEnabled) break;
       float w = 0, vx = 0, vy = 0;
       uint8_t limit = c.maxAuto;
-      if (!goalValid() || !imuHeadingUsable(c, now)) {              // the heading reference is gone: stop rather than drive along a wrong heading
+      bool goalOk = goalValid() && imuHeadingUsable(c, now);
+      if (c.shootNeedGoal && !goalOk) {                             // the heading reference is gone: stop rather than drive along a wrong heading
         motorsDrive(c, 0, 0, 0, c.maxAuto);
         g_lastShotMs = now; g_shotDone = true; g_needRelease = true;
         navSetState(NAV_SEEK, PSTR("shot cancelled: heading reference lost"));
@@ -252,7 +285,7 @@ static void navTick(const Config& c, uint32_t now) {
       }
       float sc = navSensorScale(c);
       uint32_t el = elapsedMs(now, g_shootStartMs);
-      float err = angDiffDeg(g_goalYaw, g_imu.yaw);
+      float err = goalOk ? angDiffDeg(g_goalYaw, g_imu.yaw) : 0.0f;    // no goal heading (shootneedgoal 0): a straight drive burst along the current heading
       float hold = absf(err) < c.hdgDeadbandDeg ? 0.0f : clampf(c.hdgKp * err, -c.hdgMaxRot, c.hdgMaxRot);   // keep the heading
       if (g_shootPhase == 0) {                                     // aim (and, in parallel mode, reverse at the same time)
         if (!g_ball.held) { if (!g_heldLostSinceMs) g_heldLostSinceMs = now ? now : 1u; } else g_heldLostSinceMs = 0;
@@ -289,7 +322,36 @@ static void navTick(const Config& c, uint32_t now) {
       if (g_shootPhase == 2 && g_shootLaunched && el >= c.shootDriveMs) {
         g_lastShotMs = now; g_shotDone = true; g_needRelease = true; g_stats.shots++; recAdd(REC_SHOT, (uint16_t)g_stats.shots);
         say("NAV", "shot %lu: held-to-launch %lu ms, drive %lu ms, heading error at launch within +-%.1f deg", UL(g_stats.shots), UL(elapsedMs(g_shotLaunchMs, g_shotT0)), UL(el), (double)(0.5f * shootAimTolDeg(c)));
-        navSetState(NAV_SEEK, PSTR("shot finished"));
+        g_rePhase = 0; g_reSince = now ? now : 1u;
+        navSetState(NAV_REVERSE, PSTR("shot finished: judging the result"));
+      }
+      break;
+    }
+
+    // Did the push work? Judge after reJudgeMs: the ball gone = success. The ball still in front = the push failed: reverse a short bounded distance, settle,
+    // then look again (normal tracking picks the ball up and attacks again), at most reMax times in a row, then stay put for reCooldownMs. Every phase is
+    // non-blocking and is interrupted by: ball gone / moved, E-stop, a fault (the generic checks above), or any remote/CLI command (they call navStop).
+    case NAV_REVERSE: {
+      float sc = navSensorScale(c);
+      uint32_t el = elapsedMs(now, g_reSince);
+      if (g_rePhase == 0) {                                        // judge (standing still)
+        motorsDrive(c, 0, 0, 0, c.maxAuto);
+        bool still = g_ball.held || (underUsable(c) && g_under.active);
+        if (!g_ball.valid || (!still && el >= 60)) { g_reCount = 0; g_shotDone = false; navSetState(NAV_SEEK, PSTR("attack worked: the ball is gone from the front")); break; }
+        if (el >= c.reJudgeMs) {
+          if (g_reCount >= c.reMax) {
+            g_reCount = 0; g_reLockUntil = now + c.reCooldownMs; g_waitHoldUntil = g_reLockUntil;
+            navSetState(NAV_WAIT, PSTR("attack retries used up: pausing before the next attempt"));
+          } else { g_reCount++; recAdd(REC_REATTACK, g_reCount); g_rePhase = 1; g_reSince = now; say("NAV", "push failed (ball still in front): reversing, try %u of %u", (unsigned)g_reCount, (unsigned)c.reMax); }
+        }
+      } else if (g_rePhase == 1) {                                 // reverse a short, bounded distance
+        if (!g_ball.valid) { g_stats.ballLossEvents++; g_searchAttempt = 1; navEnterSearch(PSTR("ball lost while reversing"), true); break; }
+        motorsDrive(c, 0, -c.reBackSpeed * sc, 0, c.maxAuto);
+        bool moved = g_ball.bearingKnown && absf(g_ball.bearing) > 1.5f * c.turnDeg;       // the ball moved away from the front: reposition at once
+        if (el >= c.reBackMs || moved) { g_rePhase = 2; g_reSince = now; }
+      } else {                                                     // settle, then re-evaluate with normal tracking
+        motorsDrive(c, 0, 0, 0, c.maxAuto);
+        if (el >= c.reSettleMs) { g_shotDone = false; g_needRelease = false; navSetState(NAV_SEEK, PSTR("re-evaluating the ball after the reverse")); }
       }
       break;
     }
@@ -325,9 +387,12 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_WAIT:                                   // stopped, still watching; never spins forever
       motorsDrive(c, 0, 0, 0, c.maxAuto);
-      if (g_ball.valid) { if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, PSTR("ball appeared")); navApproach(c, now); }
-      else if (elapsedMs(now, g_navSince) > 60000) { g_autoEnabled = false; navSetState(NAV_IDLE, PSTR("no ball for 60 s: autonomous disabled")); }
+      if (g_ball.valid) { if (deadlineReached(now, g_waitHoldUntil)) { if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw; navSetState(NAV_APPROACH, PSTR("ball appeared")); navApproach(c, now); } }   // (after a failed attack or approach the pause is kept)
+      else if (elapsedMs(now, g_ball.lastSeenMs ? g_ball.lastSeenMs : g_autoStartMs) > c.giveUpMs) { g_autoEnabled = false; navSetState(NAV_IDLE, PSTR("no ball for giveupms: autonomous disabled")); }
+      else if (elapsedMs(now, g_navSince) > c.researchMs) { g_searchAttempt = 1; navEnterSearch(PSTR("fresh search after the pause")); }   // never stay blind for good
       break;
+
+    case NAV_COUNT: break;
 
     case NAV_TEST: {
       MotorTest& t = g_mtest;
@@ -368,7 +433,8 @@ static void navTick(const Config& c, uint32_t now) {
 }
 
 // Manual keys. Manual control always cancels autonomy until 'a' is sent again.
-static void navManual(const Config& c, char key, uint32_t now) {
+static void navManual(const Config& c, char key, uint32_t now, uint16_t holdMs = 0) {
+  if (navEstopRefuses(PSTR("manual motion"))) return;
   if (drivetrainFault()) { say("SAFETY", "manual motion REFUSED: drivetrain fault active (use :recover after fixing)"); return; }
   g_autoEnabled = false;
   g_mtest.state = 0;
@@ -385,7 +451,7 @@ static void navManual(const Config& c, char key, uint32_t now) {
   }
   if (g_cond == COND_SAFE_STOP) sayRL(1, 5000, "SAFETY", "manual motion in SAFE_STOP (sensing fault): operator responsibility, autonomy stays off");
   motorsDrive(c, vx, vy, w, c.maxManual);
-  g_manualUntilMs = now + c.manualHoldMs;
+  g_manualUntilMs = now + (holdMs ? holdMs : c.manualHoldMs);
   navSetState(NAV_MANUAL, PSTR("manual command"));
 }
 
@@ -395,6 +461,7 @@ static int wheelByName(const char* s) {
 }
 
 static bool navMotorTestArm(const Config& c, int wheel, uint32_t now, bool drive = false) {
+  if (wheel >= 0 && navEstopRefuses(PSTR("motor test"))) return false;
   if (wheel < 0) return false;
   if (drivetrainFault()) { say("SAFETY", "motor test REFUSED: drivetrain fault active"); return false; }
   g_autoEnabled = false;

@@ -65,3 +65,19 @@ Dropouts: unplug SDA → `IMU_TIMEOUT`, heading hold off, ball seeking continues
 | 18 | Receiver fault | tie one receiver junction to 5 V | `RING_CHANNEL` degraded / `RING_NONE` safe stop (all receivers); recovery after the verification period | NOT TESTED |
 | 19 | Repeated autonomous runs | 10 runs, check `h` stats and logs | consistent, no unexplained safety stops | NOT TESTED |
 | 20 | Log export and analysis | `g`, `:xsel 0`, `x`, verify the CRC in Python | CRC matches | NOT TESTED |
+
+## Staged hardware test plan for the 2026 additions (all steps are NOT yet done on the robot)
+
+Wheels off the ground (robot on a stand) until step 9.
+
+1. Power up with motors disconnected; `:status` -> check boot report, no faults.
+2. HC-05: wire with the divider; pair from the ESP32; send `P` -> `PONG:IDLE`.
+3. `M`, then `W/S/A/D/Z/C` with wheels lifted: check each wheel direction against the table in WIRING_MEGA.md.
+4. Release a held key: wheels stop within about 400 ms. Switch the remote off: stop within `btlink`.
+5. `X`: stops at once; `W`, `M`, `U` are refused (`ERR:ESTOP`); `R` clears; robot stays idle.
+6. Per-wheel trim: `:set wscalefl/fr/bl/br` (50-150 %); compare wheel speeds by eye/tachometer; open-loop only.
+7. Receivers A0/A1: `:ring cal noise` in the dark, then check swing with the ball at several bearings; note the blind regions.
+8. Underside sensor D40: with `:raw` watch its reading with and without the ball; set `underlow` to the real active level; check the stuck/never-answers warnings.
+9. Floor, low speed: `U` with the ball ahead; check approach, hold, shot burst.
+10. Failed push: place the ball so the push fails; confirm at most `remax` reverse tries, then a pause (`recooldown`), and a manual `X` during a reverse.
+11. Search: hide the ball; confirm search sweeps, WAIT, fresh search (`researchms`), give-up (`giveupms`).

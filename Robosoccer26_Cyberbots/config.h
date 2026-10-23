@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 17
+#define CFG_VERSION 18
 
 struct Config {
   uint32_t magic;
@@ -46,6 +46,29 @@ struct Config {
   uint8_t modActiveLow;          // bit n set = module n output goes LOW when something is detected (typical for these boards; NOT assumed: check with ':mod' and set with ':mod level <n> low|high')
   uint8_t modDebounce;           // consecutive 5 ms samples needed to change a module's state
   uint8_t modNeedRing;           // 1 = the shooting position also needs the ring to see the ball near the front (a wall or a robot also trips the module)
+  // ---- underside ball-position sensor on D40 (its active level is NOT documented: check with ':raw') ----
+  uint8_t underEnable;           // 1 = used (default); 0 = ignored
+  uint8_t underActiveLow;        // 1 = the pin is LOW when the ball is there (default), 0 = HIGH
+  uint8_t underDebounce;         // consecutive 5 ms samples needed to change its state
+  uint16_t underStuckMs;         // active this long while the receivers see no ball, or inactive this long while everything else says "ball in place": the sensor is ignored (suspect)
+  uint8_t underNeed;             // 1 = the shooting position also needs the underside sensor (only while it is usable)
+  // ---- attack: failed-push recovery (reverse and re-attack), search ----
+  uint8_t shootNeedGoal;         // 1 = a shot needs the registered goal heading and a working gyro (default); 0 = straight drive burst along the current heading
+  uint16_t reJudgeMs;            // after a drive burst: wait this long and look whether the ball is still in front (push failed)
+  uint16_t reBackMs;             // reverse length when the push failed
+  float reBackSpeed;             // reverse speed, 0..1
+  uint16_t reSettleMs;           // pause after the reverse before the ball is re-evaluated
+  uint8_t reMax;                 // maximum reverse-and-reattack tries in a row
+  uint16_t reCooldownMs;         // after the tries are used up: stay stopped this long before attacking again
+  uint16_t approachTimeoutMs;    // approaching without ever reaching the ball this long = false detection: search again
+  uint16_t researchMs;           // WAIT (search tries used up): start a fresh search after this long
+  uint16_t giveUpMs;             // no ball at all for this long: autonomy switches itself off
+  // ---- drivetrain calibration (open loop: there are no wheel encoders) ----
+  uint8_t wheelScale[WHEEL_COUNT]; // per-wheel PWM scale in percent (FL, FR, BL, BR), 100 = unchanged; compensates motors that are stronger or weaker
+  // ---- Bluetooth remote (HC-05 on Serial1) ----
+  uint8_t btEnable;              // 1 = listen for remote commands on Serial1
+  uint16_t btLeaseMs;            // a remote movement command keeps the robot driving this long (a held key repeats it)
+  uint16_t btLinkMs;             // no byte from the remote for this long = link reported lost
   // ---- navigation ----
   uint16_t lostHoldMs;           // ball stays "valid" this long after the ring stopped seeing it
   float centerDeg;               // ball bearing within +- this many degrees of straight ahead counts as centred
@@ -129,6 +152,28 @@ static const ParamDef PARAMS[] PROGMEM = {
   PD("modactivelow", PT_U8, modActiveLow, 0, 3),
   PD("moddebounce", PT_U8, modDebounce, 1, 20),
   PD("modneedring", PT_U8, modNeedRing, 0, 1),
+  PD("underenable", PT_U8, underEnable, 0, 1),
+  PD("underlow", PT_U8, underActiveLow, 0, 1),
+  PD("underdebounce", PT_U8, underDebounce, 1, 20),
+  PD("understuck", PT_U16, underStuckMs, 500, 30000),
+  PD("underneed", PT_U8, underNeed, 0, 1),
+  PD("shootneedgoal", PT_U8, shootNeedGoal, 0, 1),
+  PD("rejudge", PT_U16, reJudgeMs, 50, 2000),
+  PD("reback", PT_U16, reBackMs, 50, 1500),
+  PD("rebackspeed", PT_F32, reBackSpeed, 0.1, 1.0),
+  PD("resettle", PT_U16, reSettleMs, 0, 2000),
+  PD("remax", PT_U8, reMax, 0, 10),
+  PD("recooldown", PT_U16, reCooldownMs, 500, 20000),
+  PD("apptimeout", PT_U16, approachTimeoutMs, 1000, 60000),
+  PD("researchms", PT_U16, researchMs, 1000, 60000),
+  PD("giveupms", PT_U16, giveUpMs, 5000, 60000),
+  PD("wscalefl", PT_U8, wheelScale[0], 50, 150),
+  PD("wscalefr", PT_U8, wheelScale[1], 50, 150),
+  PD("wscalebl", PT_U8, wheelScale[2], 50, 150),
+  PD("wscalebr", PT_U8, wheelScale[3], 50, 150),
+  PD("btenable", PT_U8, btEnable, 0, 1),
+  PD("btlease", PT_U16, btLeaseMs, 100, 3000),
+  PD("btlink", PT_U16, btLinkMs, 500, 30000),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
   PD("centerdeg", PT_F32, centerDeg, 3, 60),
   PD("turndeg", PT_F32, turnDeg, 8, 90),
@@ -227,6 +272,12 @@ static void cfgDefaults(Config& c) {
   c.ringWinUs = 900; c.ringSeen = 20; c.ringNoiseX10 = 30; c.ringNear = 375; c.ringDebounce = 2;
   c.ringFovHalf = 45; c.ringBlend = 100; c.ringMaxGap = 360; c.ringRailMs = 2000; c.ringRailHi = 1000;
   c.modEnable = 1; c.modActiveLow = 3; c.modDebounce = 3; c.modNeedRing = 1;
+  c.underEnable = 1; c.underActiveLow = 1; c.underDebounce = 3; c.underStuckMs = 4000; c.underNeed = 1;
+  c.shootNeedGoal = 1;
+  c.reJudgeMs = 250; c.reBackMs = 350; c.reBackSpeed = 0.7f; c.reSettleMs = 200; c.reMax = 3; c.reCooldownMs = 3000;
+  c.approachTimeoutMs = 8000; c.researchMs = 5000; c.giveUpMs = 60000;
+  for (int i = 0; i < WHEEL_COUNT; i++) c.wheelScale[i] = 100;
+  c.btEnable = 1; c.btLeaseMs = 400; c.btLinkMs = 3000;
   c.lostHoldMs = 300;
   c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;
   c.approachSpeed = 0.5f;

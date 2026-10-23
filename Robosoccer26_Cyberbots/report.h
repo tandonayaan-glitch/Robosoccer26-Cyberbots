@@ -1,6 +1,7 @@
 // report.h - human-readable diagnostics: health report, ring / module snapshot and stream, nav and IMU status.
 #pragma once
 #include "nav.h"
+#include "bt.h"
 
 #if defined(__AVR__)
 extern int __heap_start, *__brkval;
@@ -137,6 +138,8 @@ static void printRaw(const Config& c) {
   for (uint8_t i = 0; i < MOD_COUNT; i++)
     say("INFO", "raw module %u (D%u): pin %S | enabled %S | active when %S | decoded %S", (unsigned)i, (unsigned)PIN_MOD[i], digitalRead(PIN_MOD[i]) ? PSTR("HIGH") : PSTR("LOW"),
         modEnabled(c, i) ? PSTR("yes") : PSTR("no"), ((c.modActiveLow >> i) & 1u) ? PSTR("LOW") : PSTR("HIGH"), g_mod[i].active ? PSTR("DETECTING") : PSTR("clear"));
+  say("INFO", "raw underside sensor (D40): pin %S | enabled %S | active when %S | decoded %S%S", digitalRead(P_UNDER) ? PSTR("HIGH") : PSTR("LOW"), c.underEnable ? PSTR("yes") : PSTR("no"),
+      c.underActiveLow ? PSTR("LOW") : PSTR("HIGH"), g_under.active ? PSTR("BALL") : PSTR("clear"), g_under.suspectStuck ? PSTR(" (suspect: stuck)") : (g_under.suspectMiss ? PSTR(" (suspect: never answers)") : PSTR("")));
   say("INFO", "IMU: %S%S | free RAM %d B | EEPROM records %u", g_imu.present ? PSTR("present at 0x") : PSTR("NOT FOUND (no answer on D20/D21 at 0x68/0x69)"), g_imu.present ? (g_imu.addr == 0x69 ? PSTR("69") : PSTR("68")) : PSTR(""), freeRam(), (unsigned)g_recCount);
 }
 
@@ -144,7 +147,8 @@ static void printRaw(const Config& c) {
 static void printPins() {
   say("INFO", "motors  FR: IN1 D%u IN2 D%u ENA D%u | BR: IN3 D%u IN4 D%u ENB D%u (right L298N)", (unsigned)P_FR_IN1, (unsigned)P_FR_IN2, (unsigned)P_FR_EN, (unsigned)P_BR_IN1, (unsigned)P_BR_IN2, (unsigned)P_BR_EN);
   say("INFO", "motors  FL: IN1 D%u IN2 D%u ENA D%u | BL: IN3 D%u IN4 D%u ENB D%u (left L298N)", (unsigned)P_FL_IN1, (unsigned)P_FL_IN2, (unsigned)P_FL_EN, (unsigned)P_BL_IN1, (unsigned)P_BL_IN2, (unsigned)P_BL_EN);
-  say("INFO", "receivers A0..A7 (A0, A1 fitted) | modules: front D%u, second D%u | MPU6050 SDA D%u SCL D%u | serial D0/D1", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_SDA, (unsigned)P_SCL);
+  say("INFO", "receivers A0..A7 (A0, A1 fitted) | modules: front D%u, second D%u (not fitted yet) | underside sensor D%u | MPU6050 SDA D%u SCL D%u", (unsigned)P_MOD0, (unsigned)P_MOD1, (unsigned)P_UNDER, (unsigned)P_SDA, (unsigned)P_SCL);
+  say("INFO", "HC-05 on Serial1: TX1 D%u -> divider -> HC-05 RXD, HC-05 TXD -> RX1 D%u | USB serial D0/D1", (unsigned)P_BT_TX, (unsigned)P_BT_RX);
 }
 
 // ':status' - one screen: is everything there, and what is the robot doing.
@@ -154,6 +158,8 @@ static void printStatus(const Config& c, uint32_t now) {
       c.ringCalDone ? PSTR("calibrated") : PSTR("NOT calibrated"), g_ball.valid ? PSTR("seen") : PSTR("not seen"),
       !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECTING") : PSTR("clear")), !modEnabled(c, 1) ? PSTR("off") : (g_mod[1].active ? PSTR("DETECTING") : PSTR("clear")),
       g_imu.present ? PSTR("present") : PSTR("MISSING"), g_imu.present ? (imuHeadingUsable(c, now) ? PSTR(", heading usable") : PSTR(", heading NOT usable")) : PSTR(""));
+  say("INFO", "mode %S | e-stop latch %S | underside sensor %S | Bluetooth %S | attack tries %u", btModeName(), g_estop ? PSTR("LATCHED") : PSTR("clear"),
+      !c.underEnable ? PSTR("off") : (!underUsable(c) ? PSTR("IGNORED (suspect)") : (g_under.active ? PSTR("ball here") : PSTR("clear"))), g_btLink ? PSTR("link up") : PSTR("no link"), (unsigned)g_reCount);
   say("INFO", "active faults: %u (mask 0x%X) | shots %lu | ball losses %lu | records %u | output lines dropped %lu", (unsigned)popcount16(faultMask()), (unsigned)faultMask(), UL(g_stats.shots), UL(g_stats.ballLossEvents), (unsigned)g_recCount, UL(g_outDropped));
 }
 

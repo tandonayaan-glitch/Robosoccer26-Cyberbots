@@ -5,6 +5,7 @@
 // after 4 s so a stray ':' can never swallow a later 's'. Diagnostic commands never move motors.
 #pragma once
 #include "report.h"
+#include "bt.h"
 
 static uint32_t g_lastLoopUs = 0;      // loop() timestamp; cli.h may reset it after an intentional long operation
 
@@ -27,7 +28,8 @@ static void printHelp() {
   say("INFO", "--- status / diagnosis (use these when something may be missing) ---");
   say("INFO", ":status = one-screen summary | :raw = raw A0..A7, module pins, IMU | :pins = pin map | :ver | :diag on|off = CSV rows over Serial");
   say("INFO", "--- control ---");
-  say("INFO", ":auto on|off (= a / s) | :stop | :estop | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover");
+  say("INFO", ":auto on|off (= a / s) | :stop | :estop (latched) | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover (also clears the e-stop latch)");
+  say("INFO", ":bt = Bluetooth remote status (commands M U W S A D Z C Q X R P ?; docs/BLUETOOTH.md)");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel>");
   say("INFO", "--- settings (EEPROM) ---");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
@@ -97,6 +99,7 @@ static void cmdParamGet(const char* name) {
 static void cmdRecover(const Config& c, uint32_t now) {
   (void)now;
   int cleared = 0;
+  if (g_estop) { g_estop = false; g_remoteManual = false; recAdd(REC_ESTOP, 0); cleared++; }          // the emergency-stop latch; the robot stays idle
   if (g_fault[F_LOOP_STALL].active) { g_fault[F_LOOP_STALL].active = false; cleared++; }
   if (g_fault[F_MOTOR_INIT].active) {
     g_fault[F_MOTOR_INIT].active = false;
@@ -186,7 +189,8 @@ static void cliExecLine(char* line, uint32_t now) {
     else say("WARN", "usage: :auto on|off");
   }
   else if (STREQ(cmd, "stop")) { navStop(PSTR("operator stop")); say("SAFETY", "stopped; autonomy disabled"); }
-  else if (STREQ(cmd, "estop")) { navStop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP"); }
+  else if (STREQ(cmd, "estop")) { navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); }
+  else if (STREQ(cmd, "bt")) printBt(c, now);
   else if (STREQ(cmd, "manual")) {
     char k1 = t[1] ? t[1][0] : 0;
     if (t[1] && !t[1][1] && (k1 == 'f' || k1 == 'b' || k1 == 'l' || k1 == 'r' || k1 == 'q' || k1 == 'e')) navManual(c, k1, now);
@@ -202,7 +206,7 @@ static void cliSingle(char ch, uint32_t now) {
   switch (ch) {
     case 'f': case 'b': case 'l': case 'r': case 'q': case 'e': navManual(c, ch, now); break;
     case 's': navStop(PSTR("operator stop 's'")); say("SAFETY", "stopped; autonomy disabled"); break;
-    case '!': navStop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP"); break;
+    case '!': navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); break;
     case 'i': reportRequest(REP_RING); break;
     case 'm': reportRequest(REP_IMU); break;
     case 't': cmdTestMode(); break;

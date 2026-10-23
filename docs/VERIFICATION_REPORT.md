@@ -41,3 +41,9 @@ Removed because the Mega has 8 KB of RAM, 256 KB of flash and no filesystem: CSV
 * The Mega's 512-byte output queue dropped most of a long report (`h`): reports are now paced (printed in passes as the queue drains).
 * The "last known bearing" after a loss drifted while the signal faded receiver by receiver; it now uses a sample from 100–150 ms earlier.
 * With one receiver excluded, the bearing averaging window excluded its neighbour on the other side; the default blend was widened.
+
+## Bluetooth / underside sensor / re-attack update
+
+Verified (simulation and compile only): AVR build 92,008 B flash (36 %), 3,735 B RAM (45 %), 0 warnings; host suite 65/65 cases, 2,463 checks (ASan/UBSan), covering the BT protocol, E-stop latch and priority, link/lease loss, underside sensor fault handling, bounded reverse-and-reattack, layered search, no-goal shot, per-wheel trim. Static analysis run.
+
+NOT verified: everything on real hardware (HC-05 pairing and level shifting, the D40 sensor type/polarity, reverse distances, ESP32 sketch: not even compiled).

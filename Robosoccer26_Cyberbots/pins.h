@@ -61,6 +61,22 @@ static const uint8_t RING_CH_FIXED = 2;            // A0 and A1 are fitted; A2..
 static const uint8_t PIN_MOD[2] = {P_MOD0, P_MOD1};
 static const uint8_t MOD_COUNT = 2;
 
+// ---- HC-05 Bluetooth Classic module (robot side), on the Mega's hardware UART1 ---------------------------------------------------
+// Serial1 = TX1 on D18, RX1 on D19. These two pins are FREE in this pin map (the front-left motor is on D26/D27; the "D18/D19" of the old ESP32 numbering was a
+// different board), and D10 stays the back-left motor PWM pin. USB debugging (Serial on D0/D1) is unaffected.
+//   Mega TX1 (D18, 5 V) ---[1 kOhm]---+--- HC-05 RXD   (the 2 kOhm below makes a 5 V -> 3.3 V divider: 5 x 2/3 = 3.33 V)
+//                                     +---[2 kOhm]--- GND
+//   HC-05 TXD (3.3 V) ------------------- Mega RX1 (D19)   (a 3.3 V HIGH is above the Mega's ~3.0 V input threshold)
+//   HC-05 VCC / GND: see docs/BLUETOOTH.md (the supply depends on the breakout board); GND must be common with the Mega.
+#define P_BT_TX 18
+#define P_BT_RX 19
+static const uint32_t BT_BAUD = 9600;               // HC-05 factory data-mode speed (AT mode is usually 38400)
+
+// ---- Underside ball-position IR sensor (middle of the robot, right side) -------------------------------------------------------------
+// Wired to D40 (digital input), as stated by the team. Its exact TYPE (obstacle module or other) and its ACTIVE LEVEL are not documented: the level is the setting
+// `underlow` (default: LOW when the ball is there, internal pull-up on), to be checked with ':raw'. If it is wrong the firmware notices (see ring.h) and ignores the sensor.
+#define P_UNDER 40
+
 // ---- MPU6050 (hardware I2C, Wire library) -----------------------------------------
 #define P_SDA 20
 #define P_SCL 21
@@ -79,17 +95,20 @@ static const uint32_t SERIAL_BAUD = 115200;
 #define RECV_MASK (PIN_BIT(P_RECV0) | PIN_BIT(P_RECV1) | PIN_BIT(P_RECV2) | PIN_BIT(P_RECV3) | PIN_BIT(P_RECV4) | PIN_BIT(P_RECV5) | PIN_BIT(P_RECV6) | PIN_BIT(P_RECV7))
 #define MOD_MASK (PIN_BIT(P_MOD0) | PIN_BIT(P_MOD1))
 #define I2C_MASK (PIN_BIT(P_SDA) | PIN_BIT(P_SCL))
+#define BT_MASK (PIN_BIT(P_BT_TX) | PIN_BIT(P_BT_RX))
 #define SERIAL_MASK (PIN_BIT(0) | PIN_BIT(1))
 // Arduino Mega 2560 PWM pins: D2..D13, D44, D45, D46
 #define MEGA_PWM_MASK (((1ULL << 14) - (1ULL << 2)) | PIN_BIT(44) | PIN_BIT(45) | PIN_BIT(46))
-// All digital pins used, counted once each: 8 direction + 4 PWM + 2 modules + 2 I2C + D0/D1 serial = 18 distinct pins; the receivers use the analog inputs A0..A7
-#define ALL_DIGITAL_MASK (MOTOR_DIR_MASK | MOTOR_PWM_MASK | MOD_MASK | I2C_MASK | SERIAL_MASK)
+// All digital pins used, counted once each: 8 direction + 4 PWM + 2 modules + 2 I2C + D0/D1 serial + 2 Bluetooth (D18/D19) + 1 underside sensor (D40) = 21; the receivers use the analog inputs A0..A7
+#define ALL_DIGITAL_MASK (MOTOR_DIR_MASK | MOTOR_PWM_MASK | MOD_MASK | I2C_MASK | SERIAL_MASK | BT_MASK | PIN_BIT(P_UNDER))
 static_assert(__builtin_popcountll(MOTOR_DIR_MASK) == 8, "the 8 motor direction pins must be distinct");
 static_assert(__builtin_popcountll(MOTOR_PWM_MASK) == 4, "the 4 motor PWM pins must be distinct");
 static_assert(__builtin_popcountll(RECV_MASK) == 8, "the 8 receiver analog inputs must be distinct");
 static_assert((RECV_MASK & ALL_DIGITAL_MASK) == 0, "a receiver analog input collides with a digital function");
 static_assert(__builtin_popcountll(MOD_MASK) == 2, "the 2 module pins must be distinct");
-static_assert(__builtin_popcountll(ALL_DIGITAL_MASK) == 8 + 4 + 2 + 2 + 2, "a pin is assigned to two functions");
+static_assert(__builtin_popcountll(ALL_DIGITAL_MASK) == 8 + 4 + 2 + 2 + 2 + 2 + 1, "a pin is assigned to two functions");
 static_assert((MOTOR_PWM_MASK & ~MEGA_PWM_MASK) == 0, "every motor enable pin must be a PWM-capable Mega pin (D2..D13, D44..D46)");
 static_assert((I2C_MASK == (PIN_BIT(20) | PIN_BIT(21))), "the Mega hardware I2C pins are D20 (SDA) and D21 (SCL)");
+static_assert(P_BT_TX == 18 && P_BT_RX == 19, "HC-05 on the Mega UART1 pins TX1 = D18, RX1 = D19");
+static_assert(P_UNDER == 40, "the underside ball-position sensor is on D40");
 static_assert(P_RECV0 == 54 && P_RECV7 == 61, "the receivers must be on A0..A7");

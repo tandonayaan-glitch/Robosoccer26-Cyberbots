@@ -110,3 +110,14 @@ Each LED needs its own current-limiting resistor: `R = (5 V − V_f) / I_f`. Wit
 ## 9. Hardware not measurable / not tested
 
 No wheel feedback (PWM shown is the commanded value), no battery voltage or current measurement, motor and driver capability against the BO motors' stall current is unchecked, the receivers' response to your ball, the module distance setting, the strength of motor noise on the analog inputs, and everything in §4–§8 marked **[PHYS]**.
+
+## Added in the Bluetooth / underside-sensor update
+
+| Function | Mega pin | Note |
+|---|---|---|
+| HC-05 TX -> Mega | D19 (RX1) | direct |
+| Mega -> HC-05 RX | D18 (TX1) | 1 kΩ / 2 kΩ divider, see docs/BLUETOOTH.md |
+| Underside ball-position sensor | D40 | digital; type and active level not documented: default active-LOW with pull-up, change with `:set underlow` |
+| Second module | D35 | not fitted, disabled |
+
+D36 is not used. Per-wheel trim: `wscalefl/fr/bl/br`.

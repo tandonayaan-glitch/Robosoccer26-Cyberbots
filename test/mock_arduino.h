@@ -20,7 +20,7 @@
 #define INPUT_PULLUP 2
 
 // Mega 2560: A0 = pin 54; 16 analog inputs
-static const uint8_t A0 = 54, A1 = 55, A2 = 56, A3 = 57, A4 = 58, A5 = 59, A6 = 60, A7 = 61;
+static const uint8_t A8 = 62, A0 = 54, A1 = 55, A2 = 56, A3 = 57, A4 = 58, A5 = 59, A6 = 60, A7 = 61;
 #define NOT_ON_TIMER 0
 #define digitalPinToTimer(p) ((((p) >= 2 && (p) <= 13) || (p) == 44 || (p) == 45 || (p) == 46) ? 1 : 0)
 
@@ -39,6 +39,7 @@ static uint16_t g_mockRingAmp[16], g_mockRingBase[16];
 static uint16_t g_mockRingNoise = 0;                 // +- counts of deterministic jitter added to every reading
 static bool g_mockModDetect[2];
 static bool g_mockModActiveHigh[2];
+static bool g_mockUnderDetect = false, g_mockUnderActiveHigh = false;   // underside sensor on D40
 static uint32_t g_mockAdcReads = 0;
 static uint32_t g_mockRng = 12345;
 
@@ -69,6 +70,7 @@ static inline void digitalWrite(uint8_t p, uint8_t v) { mockTouch(p); g_pinLevel
 static inline void analogWrite(uint8_t p, int duty) { mockTouch(p); g_pwmDuty[p] = (uint32_t)(duty < 0 ? 0 : (duty > 255 ? 255 : duty)); }
 static inline int digitalRead(uint8_t p) {
   if (p == 34 || p == 35) { bool d = g_mockModDetect[p - 34]; return (g_mockModActiveHigh[p - 34] ? d : !d) ? 1 : 0; }
+  if (p == 40) return (g_mockUnderActiveHigh ? g_mockUnderDetect : !g_mockUnderDetect) ? 1 : 0;
   if (p == 20 || p == 21) return 1;
   return g_pinLevel[p];
 }
@@ -85,14 +87,15 @@ static inline int analogRead(uint8_t p) {
 
 // ---- Serial -----------------------------------------------------------------------------------
 struct MockSerial {
+  bool usb = true;                                  // the USB serial shares the 64-byte transmit model; Serial1 (the HC-05) has its own unlimited room
   std::string out;
   std::deque<uint8_t> in;
   bool begun = false;
   void begin(unsigned long) { begun = true; }
-  int availableForWrite() { return g_serialUnlimited ? 4096 : (int)g_serialRoom; }
+  int availableForWrite() { return (!usb || g_serialUnlimited) ? 4096 : (int)g_serialRoom; }
   size_t write(uint8_t b) {
     out.push_back((char)b);
-    if (!g_serialUnlimited) g_serialRoom = std::max(0.0, g_serialRoom - 1.0);
+    if (usb && !g_serialUnlimited) g_serialRoom = std::max(0.0, g_serialRoom - 1.0);
     return 1;
   }
   int available() { return (int)in.size(); }
@@ -100,6 +103,7 @@ struct MockSerial {
   void feed(const std::string& s) { for (unsigned char c : s) in.push_back(c); }
 };
 static MockSerial Serial;
+static MockSerial Serial1 = [] { MockSerial s; s.usb = false; return s; }();
 
 // ---- MPU6050 model on I2C ------------------------------------------------------------------------
 struct MockMpu {

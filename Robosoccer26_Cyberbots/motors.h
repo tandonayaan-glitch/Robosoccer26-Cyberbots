@@ -130,7 +130,8 @@ static void motorsDrive(const Config& c, float vx, float vy, float w, uint8_t li
   float u[WHEEL_COUNT];
   mecanumMix(vx, vy, w, c.rollerO != 0, u);
   g_reqVx = clampf(vx, -1, 1); g_reqVy = clampf(vy, -1, 1); g_reqW = clampf(w, -1, 1);
-  for (int i = 0; i < WHEEL_COUNT; i++) motorsSetWheelTarget((uint8_t)i, wheelPwmFromUnit(u[i], c.minPwm, limitPwm));
+  // Per-wheel open-loop scale (percent): compensates motors that are stronger or weaker. There are no encoders, so this is a trim by observation, not speed regulation.
+  for (int i = 0; i < WHEEL_COUNT; i++) motorsSetWheelTarget((uint8_t)i, wheelPwmFromUnit(u[i], c.minPwm, limitPwm) * (float)c.wheelScale[i] / 100.0f);
 }
 
 static bool motorsAllZero() {
