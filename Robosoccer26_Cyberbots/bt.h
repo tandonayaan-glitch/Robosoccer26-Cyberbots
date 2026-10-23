@@ -53,6 +53,8 @@ static void btReply(char tag1, const char* a, char c) {          // "OK:W" / "ER
 }
 static void btReplyErr(const char* why) { char b[40]; snprintf(b, sizeof(b), "ERR:%s", why); btReplyRam(b); }
 
+#include "btauth.h"          // challenge-response authentication of the remote (every control command below is gated by btAuthOk())
+
 static uint32_t btBaudNow(const Config& c) { return (uint32_t)c.btBaud100 * 100u; }
 static void btBegin(const Config& c) {
   Serial1.begin(btBaudNow(c));
@@ -60,8 +62,12 @@ static void btBegin(const Config& c) {
 
 static void btHandle(const Config& c, char ch, uint32_t now) {
   if (ch >= 'a' && ch <= 'z') ch = (char)(ch - 'a' + 'A');
+  if (ch == 0 || ch == '\r' || ch == '\n' || ch == ' ' || ch == '\t') return;   // line endings and padding are not commands
+  if (ch != 'X' && ch != 'P') {                                            // everything except the emergency stop and the ping needs an authenticated session
+    if (!btAuthOk()) { btAuthRefuse(now); g_btRefused++; return; }
+    authTouch(now);
+  }
   switch (ch) {
-    case 0: case '\r': case '\n': case ' ': case '\t': return;               // line endings and padding are not commands
     case 'X':
       navEstop(PSTR("EMERGENCY STOP (remote)"));
       say("SAFETY", "REMOTE EMERGENCY STOP: latched. 'R' (remote) or ':recover' clears it.");
@@ -103,7 +109,7 @@ static void btHandle(const Config& c, char ch, uint32_t now) {
       btReply(0, "OK", ch);
       break;
     }
-    case 'P': { char b[24]; snprintf(b, sizeof(b), "PONG:%S", btModeName()); btReplyRam(b); break; }
+    case 'P': { char b[24]; if (btAuthOk()) { authTouch(now); snprintf(b, sizeof(b), "PONG:%S", btModeName()); } else snprintf(b, sizeof(b), "PONG:AUTH"); btReplyRam(b); break; }
     case '?': {
       char b[48];
       snprintf(b, sizeof(b), "ST:%S,ESTOP=%u,BALL=%u,COND=%u", btModeName(), g_estop ? 1u : 0u, g_ball.valid ? 1u : 0u, (unsigned)g_cond);
@@ -120,7 +126,7 @@ static void btHandle(const Config& c, char ch, uint32_t now) {
 }
 
 // ---- line assembly ----
-static char g_btLine[26];
+static char g_btLine[84];           // a normal command line is <= 24 characters; the AUTH RESP line (75) is the only long one
 static uint8_t g_btLineLen = 0;
 static bool g_btLineOvf = false;
 static uint32_t g_btLineLastMs = 0, g_btLines = 0, g_btTooLong = 0;
@@ -141,6 +147,17 @@ static void btFinishLine(const Config& c, uint32_t now) {
   if (s0 >= n) return;
   g_btLines++;
   if (n - s0 == 1) { btHandle(c, g_btLine[s0], now); return; }
+  bool isAuth = n - s0 >= 4 && (g_btLine[s0] | 0x20) == 'a' && (g_btLine[s0 + 1] | 0x20) == 'u' && (g_btLine[s0 + 2] | 0x20) == 't' && (g_btLine[s0 + 3] | 0x20) == 'h' && (n - s0 == 4 || g_btLine[s0 + 4] == ' ');
+  if (isAuth) {                                                            // never reaches the command table, never executed as keys
+    char a[84]; uint8_t ka = 0;
+    memset(a, 0, sizeof(a));
+    for (uint8_t i = (uint8_t)(s0 + 4); i < n && ka < sizeof(a) - 1; i++) a[ka++] = (g_btLine[i] >= 'A' && g_btLine[i] <= 'Z') ? (char)(g_btLine[i] - 'A' + 'a') : g_btLine[i];
+    a[ka] = 0;
+    authLine(a, now);
+    memset(a, 0, sizeof(a));
+    return;
+  }
+  if (n - s0 > 24) { g_btTooLong++; g_btRefused++; btReplyErr("TOO_LONG"); return; }
   char w[26]; uint8_t k = 0;
   for (uint8_t i = s0; i < n && k < sizeof(w) - 1; i++) w[k++] = (g_btLine[i] >= 'A' && g_btLine[i] <= 'Z') ? (char)(g_btLine[i] - 'A' + 'a') : g_btLine[i];
   w[k] = 0;
@@ -152,6 +169,8 @@ static void btFinishLine(const Config& c, uint32_t now) {
     if (elapsedMs(now, g_btUnkReplyMs) >= 1000) { g_btUnkReplyMs = now; btReplyErr("UNKNOWN"); }
     return;
   }
+  if (!btAuthOk()) { btAuthRefuse(now); g_btRefused++; return; }          // words (modes, calibration, settings, ...) need an authenticated session
+  authTouch(now);
   if (g_estop && !(STREQ(first, "status") || STREQ(first, "sensors") || STREQ(first, "gyro") || STREQ(first, "stop") || STREQ(first, "help") || STREQ(first, "motors") || STREQ(first, "tele"))) {
     btReplyErr("ESTOP"); g_btRefused++; return;                       // the latch blocks every movement-capable word
   }
@@ -195,14 +214,16 @@ static void btPoll(const Config& c, uint32_t now) {
     if (!g_btLink) { g_btLink = true; say("INFO", "Bluetooth link: bytes arriving from the remote"); }
     if (ch == '\r' || ch == '\n') { if (g_btLineLen || g_btLineOvf) btFinishLine(c, now); continue; }
     if (ch < 0x20 || ch > 0x7E) { g_btUnknown++; continue; }          // control bytes are ignored and counted
-    if (g_btLineLen < 24) g_btLine[g_btLineLen++] = ch; else g_btLineOvf = true;
+    if (g_btLineLen < 82) g_btLine[g_btLineLen++] = ch; else g_btLineOvf = true;
   }
   if (g_btLineLen && elapsedMs(now, g_btLineLastMs) >= 25) btFinishLine(c, now);     // no terminator: a short silence completes the line
+  authTick(now);
   // Link supervision: the movement lease already stops the motors; this reports it and makes sure a manual move is over.
   if (g_btLink && elapsedMs(now, g_btLastByteMs) > c.btLinkMs) {
     g_btLink = false;
     say("WARN", "Bluetooth link LOST (nothing received for %u ms)%S", (unsigned)c.btLinkMs, g_navState == NAV_MANUAL ? PSTR(": stopping the manual move") : PSTR(""));
     if (g_navState == NAV_MANUAL) navStop(PSTR("remote link lost"));
+    authDeauth(PSTR("Bluetooth link lost"));
   }
 }
 
@@ -212,6 +233,10 @@ static void printBt(const Config& c, uint32_t now) {
       btModeName(), g_estop ? PSTR("LATCHED") : PSTR("clear"));
   say("INFO", "  bytes %lu, commands %lu (last '%c'), refused %lu, unknown bytes %lu, replies dropped %lu, last byte %lu ms ago | movement lease %u ms, link timeout %u ms",
       UL(g_btBytes), UL(g_btCmds), g_btLast ? g_btLast : '-', UL(g_btRefused), UL(g_btUnknown), UL(g_btReplyDrops), UL(g_btLastByteMs ? elapsedMs(now, g_btLastByteMs) : 0), (unsigned)c.btLeaseMs, (unsigned)c.btLinkMs);
+  { char fp[9] = "--------"; if (g_auth.keySet) authFingerprint(fp);
+    say("INFO", "  authentication: %S | key %S (fingerprint %s) | session %S | ok %lu, failed %lu (%u in a row), expired %lu, refused commands %lu%S",
+        g_auth.enabled ? PSTR("ENFORCED") : PSTR("OFF (bench, until reset)"), g_auth.keySet ? PSTR("set") : PSTR("NOT SET"), fp, btAuthOk() ? PSTR("AUTHENTICATED") : PSTR("locked"),
+        UL(g_auth.okCount), UL(g_auth.failCount), (unsigned)g_auth.fails, UL(g_auth.expiredCount), UL(g_auth.refusedCount), g_auth.lockUntilMs && !deadlineReached(now, g_auth.lockUntilMs) ? PSTR(" | THROTTLED") : PSTR("")); }
   say("INFO", "  commands: M manual, U autonomous, W S A D Z C drive (manual only), Q stop, X EMERGENCY STOP (latched), R clear the latch, P ping, ? status");
 }
 

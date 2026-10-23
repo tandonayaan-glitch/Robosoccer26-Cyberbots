@@ -45,6 +45,8 @@ supply. Do not assume 5 V is safe on a module without a regulator.
 
 ## Framing and commands
 
+> **Everything below except `X` (emergency stop) and `P` (ping) is refused with `ERR:AUTH` until the ESP32 has authenticated - see "Authentication" further down.**
+
 Line oriented. The ESP32 sends `<text>\n`. In the USB Serial Monitor set the line ending to **Newline** or **Both NL & CR** (115200 baud for USB; 9600 default for the HC-05 side).
 
 * **One character = single-key command** (case-insensitive): `M` manual, `U` autonomous attack, `Q` stop, `W S A D Z C` drive (manual only), `X` emergency stop, `R` clear the latch, `P` ping, `?` status line.
@@ -99,10 +101,51 @@ your revision), then `:set btbaud100 384`, `:save`, reset. Allowed values: 96, 1
 1. Put the HC-05 in AT mode (hold EN/KEY high while powering it; 38400 baud, usually `\r\n` line ends), set a unique name and PIN, role slave, e.g. `AT+NAME=VVS-CYBERBOTS`, `AT+PSWD="1234"`/`AT+PSWD=1234` (syntax varies between revisions: **unverified for yours**), `AT+ROLE=0`. Do not copy a MAC from anywhere: none is hard-coded.
 2. Power the robot normally. The HC-05 LED blinks fast while unpaired, slowly (about every 2 s) when paired.
 3. Flash the ESP32 sketch; open its USB console at 115200 baud. It prints its own Bluetooth MAC and then tries `bt.connect("VVS-CYBERBOTS")` every 3 s.
-4. When it prints `connected`, type `status` (Newline) in the ESP32 console: `OK:STATUS` and a telemetry frame arrive; the dashboard prints once a second.
-5. Typing `defend`, `attack`, `manual`, `stop`, … in the ESP32 console sends them to the robot. `X` or `!` sends the emergency stop immediately.
+4. Type `esp32connect <passcode>` in the ESP32 console (after `docs/ESP32_QUICKSTART.md` provisioning). It prints `bluetooth connected` and `robot session AUTHENTICATED`; the dashboard then prints once a second (`ir`, `imu`, `motors`, `ball`, `safety`, `back` choose what is shown).
+5. Typing `defend`, `attack`, `manual`, `stop`, … sends them to the robot. `X` or `!` sends the emergency stop immediately, even before `esp32connect`.
 
-## Security (honest limits)
+## Authentication (application level) - what is new
 
-Bluetooth Classic with a legacy PIN is weak. Change the default PIN, use a unique name, and power the HC-05 only when needed. Anyone who pairs can send commands, including `defend` and `attack`.
-The lease, the link timeout, the latched `X` and the fact that nothing but the fixed command words is reachable are the safety layer – not secrecy.
+**Pairing is not authentication.** The HC-05's name and PIN only decide who may open a Bluetooth link. Since this update the Mega refuses *every* control command on that link until the ESP32 has proven it knows a
+shared 32-byte key. Quick start with the Arduino IDE steps: **`docs/ESP32_QUICKSTART.md`**.
+
+### Protocol (Mega: `btauth.h`; ESP32: `remote_esp32/auth_client.h`; both use `sha256_hmac.h`, tested against the NIST / RFC 4231 vectors)
+```
+ESP32 -> Mega   AUTH                                  request; ends any current session
+Mega  -> ESP32  AUTH CH <sn: 32 hex>                  challenge: 16 bytes, unique, single use, valid 10 s
+ESP32 -> Mega   AUTH RESP <cn: 32 hex> <tag: 32 hex>  cn = the ESP32's own 16-byte random challenge; tag = HMAC-SHA256(key, "E2M"|sn|cn)[0..16]
+Mega  -> ESP32  AUTH OK <tag2: 32 hex>                tag2 = HMAC-SHA256(key, "M2E"|cn|sn)[0..16]: the Mega proves it knows the key too
+ESP32 -> Mega   AUTH OUT                              end the session
+```
+Replies on failure: `ERR:AUTH_FAIL`, `ERR:AUTH_EXPIRED`, `ERR:AUTH_NOCHAL` (a proof with no outstanding challenge: replay / out of order), `ERR:AUTH_LOCKOUT`, `ERR:AUTH_BUSY`, `ERR:AUTH_SYNTAX`, `ERR:NO_KEY`, and `AUTH OPEN` when enforcement is switched off.
+
+* **Nothing secret crosses the air.** Only random challenges and truncated (128-bit) HMAC tags do. The key is never printed, logged, recorded, echoed or sent in telemetry; the host tests assert that neither the key nor the passcode appears on either serial line.
+* **Replay protection.** A challenge is used once (consumed even by a wrong answer), expires after 10 s, and the proofs are bound to both nonces and to a direction label (no reflection). The Mega has no hardware RNG: its challenge is `HMAC(key, "NON" | boot counter | challenge counter | micros | millis)`. It is unpredictable without the key and **never repeats** because the boot counter is stored in the EEPROM and increases at every power-up (tested across a reboot). The ESP32 uses its hardware RNG (`esp_fill_random`) for its challenge.
+* **Throttling.** Three failures in a row lock the handshake for 4 s, then 8, 16, 32, 60 s; at most one challenge per 300 ms. Wrong *format* counts as a failure.
+* **Session end.** 2.5 s without a valid command (the ESP32 pings every 500 ms), the link timeout (`btlink`, 3 s), a new `AUTH`, `AUTH OUT`, or any reset of the Mega. The ESP32 forgets its side on a Bluetooth disconnect and re-handshakes by itself.
+* **What an unauthenticated peer can still do:** `X` (emergency stop - always safe) and `P` (ping, answered `PONG:AUTH`). Everything else gets `ERR:AUTH` (rate limited), including `R` (so nobody can clear the emergency-stop latch), mode changes, calibration, settings, and the telemetry stream.
+* **Emergency-stop latch.** Authentication never touches it: authenticating, failing or losing the session leaves `estop` as it was, and only an authenticated `R` clears it.
+* **No key on the Mega** (fresh board, or `:authkey clear`): fail closed. The remote can only send `X` and `P` until a key is stored. Autonomous start-up (`autostart`) does not depend on Bluetooth and is unchanged.
+* **Attack / defend do not need the link.** Losing the session or the link stops a manual move (as before) but does not stop or start autonomous play.
+
+### Cryptography - limits stated plainly
+* The Arduino AVR core ships no cryptography library, so `sha256_hmac.h` is a small standard SHA-256 / HMAC-SHA-256 implementation, verified against published test vectors and an independent Python implementation. It has not been reviewed by a cryptographer, and a software implementation on an 8-bit AVR can leak timing; the tag comparison is constant time. On the ESP32 the same file is used (so both sides are tested against each other) although `mbedtls` is available in its core.
+* **Only the handshake is authenticated.** After it, commands carry no per-message MAC and are not encrypted by this layer. Someone who can *inject* bytes into the already-established Bluetooth link (needs the Bluetooth link key, i.e. the HC-05 pairing) or who hijacks it within the 2.5 s window after the real remote disappears could still send commands. Bluetooth's own link encryption is the only protection for the data after the handshake. If you want per-command MACs, that is a protocol change (a counter plus a tag on every line) and would break plain key presses.
+* **Anyone who knows the key can authenticate**, from any device. The key sits unencrypted in the Mega's EEPROM and in the ESP32's flash (`secrets.h`); someone with physical access to a board can read it. The Mega's USB console is trusted: whoever can plug into the Mega can set `:authkey` or `:auth off`.
+* The emergency stop and ping are open to everyone in Bluetooth range by design.
+
+### Credentials
+| item | where it lives | used for |
+|---|---|---|
+| **SHARED_KEY_HEX** (64 hex = 32 random bytes) | ESP32 `remote_esp32/secrets.h` (git-ignored) and the Mega's EEPROM (`:authkey`) | ESP32 <-> Mega handshake. Never typed by the operator. |
+| **CONSOLE_PASSCODE** (>= 8 characters) | ESP32 `secrets.h` only | `esp32connect <passcode>` in the ESP32's USB Serial Monitor |
+
+`python3 tools/provision.py --mega-port <port>` makes both, writes `secrets.h`, and stores the key in the Mega. Changing the key or passcode = rerun with `--force` / `--new-passcode`, then **reflash the ESP32**; the Mega only needs `:authkey` (no reflash). **The Mega must be flashed once with this firmware** (it contains the authentication).
+`secrets.h.example` contains placeholders only; the ESP32 sketch and the client refuse the placeholders ("NOT PROVISIONED"). Recovery and moving to another laptop: see `docs/ESP32_QUICKSTART.md`.
+
+### ESP32 USB console lock
+Locked at every power-up. `esp32connect <passcode>` (or `esp32connect` and then the passcode on the next line) unlocks it, connects Bluetooth and authenticates to the robot; it stays until `esp32disconnect` (or `LOCK`), or the ESP32 restarts, or the optional idle lock (`CONSOLE_IDLE_LOCK_MS`) fires. Locked, nothing is forwarded, the buttons do nothing, and only `X` / `!` (emergency stop), `help` and `esp32status` work. Wrong passcodes are throttled (1 s, 1 s, 5 s, 15 s, 30 s, 60 s) and a wrong attempt also re-locks. An `esp32connect ...` line (and the passcode line after a prompt) is consumed by the lock and is never interpreted as a movement command.
+**The passcode does not identify a laptop.** It proves that whoever typed it knows it. Any laptop plugged into the ESP32's USB port can use the remote after `esp32connect <passcode>`; anyone who learns the passcode can do the same. Typing it in a Serial Monitor shows it on screen and may keep it in the terminal's history.
+
+### HC-05 pairing PIN
+Optional extra hurdle, **not** a replacement for the above. Only change it if your breakout accepts AT commands (hold EN/KEY high while powering it on; many 6-pin HC-05 boards enter AT mode at 38400 baud with `\r\n` endings, some revisions differ - check yours). Typical commands: `AT+NAME=<name>`, `AT+PSWD=<pin>` (some revisions want `AT+PSWD="<pin>"`), `AT+ROLE=0`, `AT+UART=<baud>,0,0`. These are **unverified for your module**; nothing in this repository changes the HC-05 for you and the firmware works with any PIN. Never connect the Mega's 5 V TX1 (D18) straight to the HC-05 RXD: use the 1 kΩ / 2 kΩ divider.

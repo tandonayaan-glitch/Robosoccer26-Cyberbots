@@ -2,3 +2,8 @@
 /tmp/
 __pycache__/
 *.pyc
+
+# credentials: never commit
+remote_esp32/secrets.h
+secrets.h
+*.secret

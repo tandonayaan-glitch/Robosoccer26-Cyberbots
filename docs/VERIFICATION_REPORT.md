@@ -57,3 +57,9 @@ Verified by simulation and compilation only:
 * Test-suite changes needed by the new design: single-key commands on USB/Bluetooth are now line framed (a lone key still works after 8 ms / 25 ms); the default receiver set is A0–A5.
 
 NOT verified: everything on the physical robot (see README "Unverified hardware assumptions"); the ESP32 sketch has never been built for an ESP32 (only parser tests and a stub type-check); real Bluetooth range, pairing, throughput; blocking or intercepting a real ball.
+
+
+## Authentication update (host simulation only)
+* Host suite 91/91 cases, 2,974 checks (ASan/UBSan); cppcheck / clang-tidy / valgrind clean. Mega build 135,862 B flash (53 %), 5,439 B RAM (66 %), 2,753 B left for the stack (the deepest call path was estimated by hand, not measured on the board). `tools/esp32_syntax_check.sh` type-checks the sketch against host stubs only.
+* Tests: SHA-256 / HMAC-SHA-256 against NIST and RFC 4231 vectors and against Python's hashlib for the protocol tags; valid handshake; wrong key; malformed / bit-flipped proofs; lockout and recovery; replay of a recorded proof (same challenge, new challenge, after AUTH OUT); expired challenge; challenge uniqueness across a reboot; unauthenticated rejection of movement, modes, calibration, settings, `R` and telemetry; session end by silence / link loss / new AUTH; reconnect; emergency stop (unauthenticated, from every mode, latch untouched by authentication); no-key fail-closed; `:authkey` handling and no secret on either serial line; ESP32 console lock (locked at start, throttling, LOCK, X while locked/throttled/prompting, idle lock, buttons, placeholders); local views and help.
+* NOT verified: anything on real hardware (HC-05 pairing, the real radio, an ESP32 build, EEPROM endurance, AVR timing of the handshake - estimated ~30 ms, not measured); no independent cryptographic review.

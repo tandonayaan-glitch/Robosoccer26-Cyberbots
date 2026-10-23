@@ -55,11 +55,12 @@ struct TeleSnapshot {
   bool bt, estop, ball, ambiguous, centered, underActive, underOk, shotPos, bearingValid;
   float bearing, conf; float obst[2]; float motorPwm[4];
   // receivers ('r')
-  float rawLevel[6], swing[6], filtered[6], noise[6], thresh[6]; float strength; char bearingMap[16]; bool cal;
+  float rawLevel[6], swing[6], filtered[6], noise[6], thresh[6]; float strength, best; char bearingMap[16]; bool cal;
   // imu/diag ('i')
   bool imuOk; int imuCal, drift; float acc[3], gyro[3], roll, pitch, yaw, yawUnc, gyroBias, driftRate, driftBias; bool rollValid, yawValid, driftValid;
   float wheelDir[4]; float movingMs, turningMs, wdTrips, staleCmds, loopAvgUs, loopMaxUs; int faults;
   // link bookkeeping (host clock in ms)
+  char lastRaw[4][TELE_MAX_LINE + 2];   // the last good line of each kind (c, r, i, d) for the RAW view
   float txDrops; uint32_t lastCoreMs, lastRecvMs, lastImuMs, lastDiagMs, lastAnyMs; uint16_t lastSeq; bool haveSeq;
   uint32_t frames, bad, lost;
 };
@@ -78,6 +79,7 @@ static inline char teleParseLine(TeleSnapshot* s, const char* line, uint32_t now
   if (s->haveSeq) { uint16_t gap = (uint16_t)(n - (uint16_t)(s->lastSeq + 1)); if (gap && gap < 1000) s->lost += gap; }
   s->lastSeq = n; s->haveSeq = true; s->frames++; s->lastAnyMs = nowMs ? nowMs : 1u;
   float f;
+  { int ki = k[0] == 'c' ? 0 : (k[0] == 'r' ? 1 : (k[0] == 'i' ? 2 : 3)); strncpy(s->lastRaw[ki], line, TELE_MAX_LINE); s->lastRaw[ki][TELE_MAX_LINE] = 0; }
   if (k[0] == 'c') {
     jStr(line, "mode", s->mode, sizeof(s->mode)); jStr(line, "sub", s->sub, sizeof(s->sub)); jStr(line, "safety", s->safety, sizeof(s->safety)); jStr(line, "fault", s->fault, sizeof(s->fault));
     char cm[4]; s->lastCmd = jStr(line, "cmd", cm, sizeof(cm)) ? cm[0] : '-';
@@ -93,7 +95,7 @@ static inline char teleParseLine(TeleSnapshot* s, const char* line, uint32_t now
   }
   if (k[0] == 'r') {
     jArr(line, "raw_level", s->rawLevel, 6); jArr(line, "swing", s->swing, 6); jArr(line, "filtered", s->filtered, 6); jArr(line, "noise_floor", s->noise, 6); jArr(line, "threshold", s->thresh, 6);
-    s->strength = jNum(line, "strength", &f) ? f : 0; jStr(line, "map", s->bearingMap, sizeof(s->bearingMap)); s->cal = jNum(line, "cal", &f) && f != 0;
+    s->strength = jNum(line, "strength", &f) ? f : 0; s->best = jNum(line, "best", &f) ? f : 0; jStr(line, "map", s->bearingMap, sizeof(s->bearingMap)); s->cal = jNum(line, "cal", &f) && f != 0;
     s->lastRecvMs = nowMs ? nowMs : 1u;
     return 'r';
   }
@@ -177,5 +179,64 @@ static inline size_t teleRender(const TeleSnapshot* s, uint32_t nowMs, bool btCo
   o += snprintf(out + o, outN - o, "%s dps | yaw uncertainty est %s deg | drift test %d", a, b, s->drift);
   if (s->driftValid) o += snprintf(out + o, outN - o, " = %.2f deg/min", (double)s->driftRate);
   o += snprintf(out + o, outN - o, "%s\n", age(s->lastImuMs));
+  return o;
+}
+
+// ---- selectable views (the ESP32 console words `ir`, `imu`, `motors`, `ball`, `safety`, `raw`, and `all` / `back` for the normal full view) ----
+enum TeleView : uint8_t { V_ALL, V_IR, V_IMU, V_MOTORS, V_BALL, V_SAFETY, V_RAW, V_COUNT };
+static inline const char* teleViewName(uint8_t v) {
+  static const char* n[V_COUNT] = {"ALL", "IR sensors", "IMU / gyro", "MOTORS", "BALL", "SAFETY", "RAW frames"};
+  return v < V_COUNT ? n[v] : "?";
+}
+// Which frame kinds the robot should be asked for (`tele now <kind>`) so the selected view is fresh: always the core frame plus one more.
+static inline char teleViewExtraKind(uint8_t v) { return v == V_IR ? 'r' : (v == V_IMU ? 'i' : (v == V_MOTORS ? 'd' : (v == V_ALL ? 'r' : 0))); }
+
+static inline const char* teleAge(const TeleSnapshot* s, uint32_t t, uint32_t now) { (void)s; return (!t || now - t > 2500) ? "  [STALE or never received]" : ""; }
+
+static inline size_t teleRenderView(const TeleSnapshot* s, uint8_t view, uint32_t nowMs, bool sessionOk, char* out, size_t outN) {
+  if (view == V_ALL || view >= V_COUNT) return teleRender(s, nowMs, sessionOk, out, outN);
+  TeleLink l = teleLinkState(s, nowMs, sessionOk);
+  size_t o = 0;
+  char a[16], b[16], c[16];
+  o += snprintf(out + o, outN - o, "== view: %s | robot link: %s | type 'back' for the normal view, 'help' for commands ==\n", teleViewName(view), teleLinkText(l));
+  if (l == TL_LOST || l == TL_NO_DATA) { o += snprintf(out + o, outN - o, "(no current data from the robot: values are the last ones received, if any)\n"); }
+  if (view == V_IR) {
+    o += snprintf(out + o, outN - o, "receiver      A0   A1   A2   A3   A4   A5%s\n", teleAge(s, s->lastRecvMs, nowMs));
+    o += snprintf(out + o, outN - o, "level        %4.0f %4.0f %4.0f %4.0f %4.0f %4.0f   (ADC 0..1023, middle of the window)\n", s->rawLevel[0], s->rawLevel[1], s->rawLevel[2], s->rawLevel[3], s->rawLevel[4], s->rawLevel[5]);
+    o += snprintf(out + o, outN - o, "swing        %4.0f %4.0f %4.0f %4.0f %4.0f %4.0f   (peak-to-peak: the ball's signal)\n", s->swing[0], s->swing[1], s->swing[2], s->swing[3], s->swing[4], s->swing[5]);
+    o += snprintf(out + o, outN - o, "filtered     %4.0f %4.0f %4.0f %4.0f %4.0f %4.0f\n", s->filtered[0], s->filtered[1], s->filtered[2], s->filtered[3], s->filtered[4], s->filtered[5]);
+    o += snprintf(out + o, outN - o, "noise floor  %4.0f %4.0f %4.0f %4.0f %4.0f %4.0f   (-1 = channel off)\n", s->noise[0], s->noise[1], s->noise[2], s->noise[3], s->noise[4], s->noise[5]);
+    o += snprintf(out + o, outN - o, "threshold    %4.0f %4.0f %4.0f %4.0f %4.0f %4.0f   (swing above this = sees the ball)\n", s->thresh[0], s->thresh[1], s->thresh[2], s->thresh[3], s->thresh[4], s->thresh[5]);
+    o += snprintf(out + o, outN - o, "obstacle modules: D34 %s, D35 %s | underside D40: %s (%s) | shooting position: %s%s\n", s->obst[0] != 0 ? "DETECTING" : "clear", s->obst[1] != 0 ? "DETECTING" : "clear",
+                  s->underActive ? "BALL" : "clear", s->underOk ? "trusted" : "IGNORED", s->shotPos ? "YES" : "no", teleAge(s, s->lastCoreMs, nowMs));
+    o += snprintf(out + o, outN - o, "bearing map: %s | noise floor calibrated: %s\n", s->bearingMap, s->cal ? "yes" : "NO");
+  } else if (view == V_IMU) {
+    teleFmt(a, sizeof(a), s->acc[0], 3); teleFmt(b, sizeof(b), s->acc[1], 3); teleFmt(c, sizeof(c), s->acc[2], 3);
+    o += snprintf(out + o, outN - o, "imu %s | calibration %d (0 none, 1 running, 2 done, 3 rejected)%s\n", s->imuOk ? "ok" : "NOT delivering data", s->imuCal, teleAge(s, s->lastImuMs, nowMs));
+    o += snprintf(out + o, outN - o, "accel g   x %s  y %s  z %s\n", a, b, c);
+    teleFmt(a, sizeof(a), s->gyro[0], 2); teleFmt(b, sizeof(b), s->gyro[1], 2); teleFmt(c, sizeof(c), s->gyro[2], 2);
+    o += snprintf(out + o, outN - o, "gyro dps  x %s  y %s  z %s\n", a, b, c);
+    teleFmt(a, sizeof(a), s->roll, 1); teleFmt(b, sizeof(b), s->pitch, 1); teleFmt(c, sizeof(c), s->yaw, 1);
+    o += snprintf(out + o, outN - o, "roll %s  pitch %s  yaw %s deg  (relative ESTIMATES; yaw from the gyro only and drifts)\n", a, b, c);
+    teleFmt(a, sizeof(a), s->gyroBias, 3); teleFmt(b, sizeof(b), s->yawUnc, 2);
+    o += snprintf(out + o, outN - o, "gyro bias %s dps | yaw uncertainty estimate %s deg | drift test state %d", a, b, s->drift);
+    if (s->driftValid) o += snprintf(out + o, outN - o, " -> %.2f deg/min", (double)s->driftRate);
+    o += snprintf(out + o, outN - o, "\n");
+  } else if (view == V_MOTORS) {
+    o += snprintf(out + o, outN - o, "motor COMMAND PWM   FL %4.0f  FR %4.0f  BL %4.0f  BR %4.0f   (commands only: no encoder or current sensor exists)%s\n", s->motorPwm[0], s->motorPwm[1], s->motorPwm[2], s->motorPwm[3], teleAge(s, s->lastCoreMs, nowMs));
+    o += snprintf(out + o, outN - o, "commanded direction FL %+.0f  FR %+.0f  BL %+.0f  BR %+.0f   (-1 backward, 0 stopped, +1 forward)%s\n", s->wheelDir[0], s->wheelDir[1], s->wheelDir[2], s->wheelDir[3], teleAge(s, s->lastDiagMs, nowMs));
+    o += snprintf(out + o, outN - o, "moving for %.0f ms | rotating without translation for %.0f ms | watchdog trips %.0f | stale commands cleared %.0f\n", s->movingMs, s->turningMs, s->wdTrips, s->staleCmds);
+  } else if (view == V_BALL) {
+    teleFmt(a, sizeof(a), s->bearing, 1);
+    o += snprintf(out + o, outN - o, "ball %s | bearing %s deg (0 = ahead, + = right) | confidence %.0f%s%s%s\n", s->ball ? "SEEN" : "not seen", a, s->conf, s->ambiguous ? " | AMBIGUOUS (receivers disagree)" : "", s->centered ? " | centered" : "", teleAge(s, s->lastCoreMs, nowMs));
+    o += snprintf(out + o, outN - o, "strength %.2f (1.0 = very close; not a distance) | strongest receiver A%.0f\n", s->strength, s->best);
+  } else if (view == V_SAFETY) {
+    o += snprintf(out + o, outN - o, "mode %s / %s | safety %s | fault '%s' | e-stop %s | robot hears remote: %s | last command %c%s\n", s->mode, s->sub, s->safety, s->fault, s->estop ? "LATCHED" : "clear", s->bt ? "yes" : "no", s->lastCmd ? s->lastCmd : '-', teleAge(s, s->lastCoreMs, nowMs));
+    o += snprintf(out + o, outN - o, "fault mask %d | loop avg %.0f us, max %.0f us | telemetry frames %lu, bad %lu, lost %lu | robot tx drops %.0f%s\n", s->faults, s->loopAvgUs, s->loopMaxUs,
+                  (unsigned long)s->frames, (unsigned long)s->bad, (unsigned long)s->lost, s->txDrops, teleAge(s, s->lastDiagMs, nowMs));
+  } else {   // V_RAW
+    const char* names = "crid";
+    for (int i = 0; i < 4; i++) o += snprintf(out + o, outN - o, "[%c] %s\n", names[i], s->lastRaw[i][0] ? s->lastRaw[i] : "(none received)");
+  }
   return o;
 }

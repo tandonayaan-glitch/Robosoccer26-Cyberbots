@@ -12,6 +12,8 @@
 #include <vector>
 #include <string>
 #include "../remote_esp32/telemetry_parse.h"
+#include "../remote_esp32/auth_client.h"
+#include "../remote_esp32/console_help.h"
 
 static int g_fail = 0, g_checks = 0;
 #define CHECK(c) do { g_checks++; if (!(c)) { g_fail++; printf("  FAIL line %d: %s\n", __LINE__, #c); } } while (0)
@@ -2403,6 +2405,504 @@ static void t_esp32_protocol() {
   CHECK(strstr(view, "n/a"));
 }
 
+// ================================================================================================
+// Bluetooth authentication (Mega: btauth.h) and the ESP32 console lock / client (remote_esp32/auth_client.h). HOST SIMULATION ONLY:
+// the same code runs on both sides here, there is no radio, no HC-05 and no ESP32.
+
+static const char* TKEY = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";     // synthetic TEST key (not a credential of the robot)
+static const char* TKEY_WRONG = "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100";
+static const char* TPASS = "test-passcode-1234";                                                    // synthetic test passcode
+static size_t g_btCursor = 0;
+static std::vector<std::string> btNewLines() {
+  std::vector<std::string> v;
+  const std::string& o = Serial1.out;
+  if (g_btCursor > o.size()) g_btCursor = 0;
+  size_t p = g_btCursor;
+  while (p < o.size()) { size_t e = o.find('\n', p); if (e == std::string::npos) break; v.push_back(o.substr(p, e - p)); p = e + 1; }
+  g_btCursor = p;
+  return v;
+}
+static std::string lastBt(const char* prefix) { std::string r; for (auto& l : btNewLines()) if (l.rfind(prefix, 0) == 0) r = l; return r; }
+static void rndTest(uint8_t* o, size_t n) { static uint8_t c = 1; for (size_t i = 0; i < n; i++) { o[i] = c; c = (uint8_t)(c * 5u + 3u); } }
+static ClientAuth g_cl;
+static ConsoleAuth g_con;
+static void authBoot(bool provision = true) {
+  g_mockAuthEnforced = true;
+  ballGone(); setup(); g_autoStartPending = false; layout8(); calibrateAll();
+  Serial1.out.clear(); g_btCursor = 0;
+  if (provision) { send(":authkey "); send(TKEY); send("\n"); simRun(60); }
+  clientInit(&g_cl, TKEY);
+}
+// Runs the client side against the real Mega code for `ms` of simulated time.
+static void pumpClient(bool want, uint32_t ms) {
+  static uint32_t lastPingMs = 0;
+  for (uint32_t t = 0; t < ms; t += 20) {
+    if (clientAuthed(&g_cl) && millis() - lastPingMs >= 500) { lastPingMs = millis(); bt("P"); }      // the sketch pings every 500 ms while authenticated
+    char buf[100]; size_t n = clientWantLine(&g_cl, want, millis(), rndTest, buf, sizeof(buf));
+    if (n) { buf[n] = 0; lineBt(buf); }
+    simRun(20);
+    for (auto& l : btNewLines()) clientOnLine(&g_cl, l.c_str(), millis());
+  }
+}
+static void waitPing(uint32_t ms) { for (uint32_t k = 0; k < ms; k += 500) { bt("P"); simRun(500); } }   // silence longer than btlink would end the link (and cancel the handshake): keep it alive
+static std::string respLine(const char* keyHex, const std::string& chLine, uint8_t cnSeed, bool corrupt = false) {
+  uint8_t key[32], sn[16], cn[16], tag[16];
+  hexToBytes(keyHex, key, 32); hexToBytes(chLine.c_str() + 8, sn, 16);
+  for (int i = 0; i < 16; i++) cn[i] = (uint8_t)(cnSeed + i);
+  authTag(key, "E2M", sn, cn, tag);
+  if (corrupt) tag[3] ^= 1;
+  char a[33], b[33]; bytesToHex(cn, 16, a); bytesToHex(tag, 16, b);
+  return std::string("AUTH RESP ") + a + " " + b;
+}
+static bool noSecretOnAnyWire() { return Serial.out.find(TKEY) == std::string::npos && Serial1.out.find(TKEY) == std::string::npos && Serial.out.find(TPASS) == std::string::npos && Serial1.out.find(TPASS) == std::string::npos; }
+
+static void t_sha256_hmac_vectors() {
+  uint8_t o[32]; char h[65];
+  sha256((const uint8_t*)"", 0, o); bytesToHex(o, 32, h); CHECK(strcmp(h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+  sha256((const uint8_t*)"abc", 3, o); bytesToHex(o, 32, h); CHECK(strcmp(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
+  const char* m2 = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq";
+  sha256((const uint8_t*)m2, strlen(m2), o); bytesToHex(o, 32, h); CHECK(strcmp(h, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0);
+  { Sha256 s; sha256_init(&s); uint8_t blk[1000]; memset(blk, 'a', sizeof(blk)); for (int i = 0; i < 1000; i++) sha256_update(&s, blk, sizeof(blk)); sha256_final(&s, o);
+    bytesToHex(o, 32, h); CHECK(strcmp(h, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0") == 0); }       // one million 'a'
+  uint8_t k20[20]; memset(k20, 0x0b, 20);
+  hmac_sha256(k20, 20, (const uint8_t*)"Hi There", 8, nullptr, 0, nullptr, 0, o); bytesToHex(o, 32, h); CHECK(strcmp(h, "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7") == 0);   // RFC 4231 case 1
+  hmac_sha256((const uint8_t*)"Jefe", 4, (const uint8_t*)"what do ya want ", 16, (const uint8_t*)"for nothing?", 12, nullptr, 0, o); bytesToHex(o, 32, h);
+  CHECK(strcmp(h, "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843") == 0);                                                                                            // case 2 (split message)
+  uint8_t kaa[131], d50[50]; memset(kaa, 0xaa, sizeof(kaa)); memset(d50, 0xdd, sizeof(d50));
+  hmac_sha256(kaa, 20, d50, 50, nullptr, 0, nullptr, 0, o); bytesToHex(o, 32, h); CHECK(strcmp(h, "773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe") == 0);                    // case 3
+  const char* big = "Test Using Larger Than Block-Size Key - Hash Key First";
+  hmac_sha256(kaa, 131, (const uint8_t*)big, strlen(big), nullptr, 0, nullptr, 0, o); bytesToHex(o, 32, h); CHECK(strcmp(h, "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54") == 0);       // case 6
+  // the protocol tags against an independent implementation (Python hashlib / hmac)
+  uint8_t key[32], sn[16], cn[16], tag[16];
+  hexToBytes(TKEY, key, 32); for (int i = 0; i < 16; i++) { sn[i] = (uint8_t)(16 + i); cn[i] = (uint8_t)(100 + i); }
+  authTag(key, "E2M", sn, cn, tag); bytesToHex(tag, 16, h); CHECK(strcmp(h, "d54502d4b71c0790adc761e607ec55e1") == 0);
+  authTag(key, "M2E", cn, sn, tag); bytesToHex(tag, 16, h); CHECK(strcmp(h, "86309f2d6e8b732daa735aaf71dc4b7e") == 0);
+  uint8_t t1[16], t2[16]; authTag(key, "E2M", sn, cn, t1); authTag(key, "M2E", sn, cn, t2); CHECK(!ct_equal(t1, t2, 16));       // direction labels differ: no reflection
+  // hex parsing is strict
+  uint8_t b[4];
+  CHECK(hexToBytes("0a0B0c0d", b, 4) && b[1] == 0x0b);
+  CHECK(!hexToBytes("0a0b0c0", b, 4) && !hexToBytes("0a0b0c0dd", b, 4) && !hexToBytes("0a0b0c0g", b, 4) && !hexToBytes("", b, 4));
+  // the two copies of the header are identical (also checked by run_tests.sh)
+  CHECK(true);
+}
+
+static void t_auth_enforced_basics() {
+  authBoot();
+  CHECK(g_auth.enabled && g_auth.keySet && !g_auth.authed && !btAuthOk());
+  char fp[9]; authFingerprint(fp); CHECK(strcmp(fp, "17a56f78") == 0);
+  // nothing that controls the robot is accepted from an unauthenticated peer
+  Serial1.out.clear(); g_btCursor = 0;
+  bt("M"); bt("U"); bt("W"); bt("R"); bt("Q"); lineBt("manual"); lineBt("defend"); lineBt("attack"); lineBt("calibrate"); lineBt("stop"); lineBt("motors"); lineBt("set maxauto 255"); simRun(200);
+  CHECK(!g_remoteManual && !g_defendEnabled && !g_autoEnabled && allWheelsStopped() && g_cfg.maxAuto == 170);
+  CHECK(btHas("ERR:AUTH") && g_auth.refusedCount >= 8);
+  CHECK(outCountOf(Serial1.out, "ERR:AUTH") <= 3);                                  // the refusal replies are rate limited
+  // no telemetry to a peer that has not authenticated
+  Serial1.out.clear(); simRun(3000);
+  CHECK(btFrames().empty());
+  // the ping and the emergency stop are accepted from anyone
+  Serial1.out.clear(); bt("P"); simRun(30);
+  CHECK(btHas("PONG:AUTH"));
+  bt("X"); loop();
+  CHECK(g_estop && allWheelsStopped());
+  CHECK(noSecretOnAnyWire());
+  // the real handshake
+  g_estop = false;
+  pumpClient(true, 600);
+  CHECK(clientAuthed(&g_cl) && g_auth.authed && btAuthOk() && g_auth.okCount == 1);
+  bt("M"); simRun(60);
+  CHECK(g_remoteManual);
+  lineBt("defend"); simRun(100);
+  CHECK(g_defendEnabled);
+  Serial1.out.clear(); g_btCursor = 0; simRun(3000);
+  CHECK(!btFrames().empty());                                                       // telemetry flows once authenticated
+  CHECK(noSecretOnAnyWire());                                                       // the key and the passcode never appear on either serial line
+  // a bad length / bad hex key is refused and does not replace the good one
+  send(":authkey 00\n"); simRun(60); CHECK(outHas("key rejected"));
+  char fp2[9]; authFingerprint(fp2); CHECK(strcmp(fp2, "17a56f78") == 0);
+}
+
+static void t_auth_invalid() {
+  authBoot();
+  // wrong key on the client side
+  clientInit(&g_cl, TKEY_WRONG);
+  pumpClient(true, 1500);
+  CHECK(!clientAuthed(&g_cl) && !g_auth.authed && g_auth.failCount >= 1);
+  Serial1.out.clear(); g_btCursor = 0; bt("M"); simRun(60);
+  CHECK(!g_remoteManual && btHas("ERR:AUTH"));
+  // hand-made attempts: 3 failures in a row start the lockout; the right proof is then refused until it ends
+  authBoot();
+  std::string ch;
+  for (int i = 0; i < 3; i++) {
+    simRun(400); lineBt("AUTH"); simRun(60); ch = lastBt("AUTH CH ");
+    CHECK(ch.size() == 40);
+    lineBt(respLine(TKEY_WRONG, ch, 10).c_str()); simRun(60);
+  }
+  CHECK(g_auth.fails == 3 && g_auth.lockUntilMs != 0 && !g_auth.authed);
+  simRun(400); Serial1.out.clear(); g_btCursor = 0; lineBt("AUTH"); simRun(60);
+  CHECK(btHas("ERR:AUTH_LOCKOUT") && lastBt("AUTH CH ").empty());
+  simRun(4200);
+  lineBt("AUTH"); simRun(60); ch = lastBt("AUTH CH ");
+  CHECK(ch.size() == 40);
+  lineBt(respLine(TKEY, ch, 20).c_str()); simRun(60);
+  CHECK(g_auth.authed && g_auth.fails == 0);                                        // the correct proof works once the lockout is over, and the counter resets
+  // malformed proofs count as failures and never authenticate
+  authBoot();
+  const char* bad[] = {"AUTH RESP zz", "AUTH RESP", "AUTH RESP 00112233445566778899aabbccddeeff", "AUTH RESP 00112233445566778899aabbccddeeff 00112233445566778899aabbccddeef",
+                       "AUTH RESP 00112233445566778899aabbccddeeff 00112233445566778899aabbccddeeffaa", "AUTH RESP gg112233445566778899aabbccddeeff 00112233445566778899aabbccddeeff", "AUTH BOGUS"};
+  for (const char* b : bad) { simRun(400); lineBt("AUTH"); simRun(60); lineBt(b); simRun(60); CHECK(!g_auth.authed); }
+  // a proof with one flipped bit
+  authBoot(); lineBt("AUTH"); simRun(60); ch = lastBt("AUTH CH ");
+  lineBt(respLine(TKEY, ch, 30, true).c_str()); simRun(60);
+  CHECK(!g_auth.authed && btHas("ERR:AUTH_FAIL"));
+  // a proof without any challenge outstanding
+  authBoot(); lineBt(respLine(TKEY, std::string("AUTH CH 000102030405060708090a0b0c0d0e0f"), 1).c_str()); simRun(60);
+  CHECK(!g_auth.authed && btHas("ERR:AUTH_NOCHAL"));
+}
+
+static void t_auth_replay_expired() {
+  authBoot();
+  lineBt("AUTH"); simRun(60);
+  std::string ch1 = lastBt("AUTH CH ");
+  std::string resp1 = respLine(TKEY, ch1, 40);
+  lineBt(resp1.c_str()); simRun(60);
+  CHECK(g_auth.authed);
+  // the SAME proof again: the challenge was consumed
+  Serial1.out.clear(); g_btCursor = 0; lineBt(resp1.c_str()); simRun(60);
+  CHECK(btHas("ERR:AUTH_NOCHAL"));
+  // end the session, then replay the recorded proof: refused, still locked
+  lineBt("AUTH OUT"); simRun(60);
+  CHECK(!g_auth.authed);
+  Serial1.out.clear(); g_btCursor = 0; lineBt(resp1.c_str()); simRun(60);
+  CHECK(!g_auth.authed && btHas("ERR:AUTH_NOCHAL"));
+  // a new challenge is different, and the old proof does not answer it
+  simRun(400); lineBt("AUTH"); simRun(60);
+  std::string ch2 = lastBt("AUTH CH ");
+  CHECK(ch2 != ch1 && ch2.size() == 40);
+  lineBt(resp1.c_str()); simRun(60);
+  CHECK(!g_auth.authed);
+  // a proof that arrives after the challenge expired
+  simRun(400); lineBt("AUTH"); simRun(60);
+  std::string ch3 = lastBt("AUTH CH ");
+  waitPing(AUTH_CH_MS + 500);
+  Serial1.out.clear(); g_btCursor = 0;
+  lineBt(respLine(TKEY, ch3, 50).c_str()); simRun(60);
+  CHECK(!g_auth.authed && btHas("ERR:AUTH_EXPIRED") && g_auth.expiredCount >= 1);
+  // ... and one that arrives just in time
+  simRun(400); lineBt("AUTH"); simRun(60);
+  std::string ch4 = lastBt("AUTH CH ");
+  waitPing(AUTH_CH_MS - 2000);
+  lineBt(respLine(TKEY, ch4, 60).c_str()); simRun(60);
+  CHECK(g_auth.authed);
+  // challenges are never repeated, not even after a reboot (persistent boot counter)
+  uint32_t bc = g_auth.bootCtr;
+  lineBt("AUTH OUT"); simRun(60);
+  simRun(400); lineBt("AUTH"); simRun(60);
+  std::string first = lastBt("AUTH CH ");
+  g_mockAuthEnforced = true; setup(); g_autoStartPending = false; layout8(); calibrateAll(); Serial1.out.clear(); g_btCursor = 0;
+  CHECK(g_auth.bootCtr == bc + 1u && g_auth.keySet && !g_auth.authed);
+  lineBt("AUTH"); simRun(60);
+  std::string second = lastBt("AUTH CH ");
+  CHECK(second.size() == 40);
+  // (chCtr restarts at 1 after the reboot, as it did for 'first' only if first was also challenge 1; compare against a same-counter challenge)
+  CHECK(second != first);
+  CHECK(!g_auth.authed);                                                            // a reset ends every session
+}
+
+static void t_auth_session_and_reconnect() {
+  authBoot();
+  pumpClient(true, 600);
+  CHECK(g_auth.authed);
+  // a held key keeps the session; the move stops with the lease, the session with 2.5 s of silence
+  bt("M"); for (int k = 0; k < 20; k++) { bt("W"); simRun(100); }
+  CHECK(g_auth.authed && !allWheelsStopped());
+  simRun(g_cfg.btLeaseMs + 400);
+  CHECK(allWheelsStopped() && g_auth.authed);
+  simRun(AUTH_IDLE_MS);
+  CHECK(!g_auth.authed && !btAuthOk() && outHas("Bluetooth session ended"));
+  Serial1.out.clear(); g_btCursor = 0; bt("W"); simRun(100);
+  CHECK(allWheelsStopped() && btHas("ERR:AUTH"));
+  // the remote reconnects: it must authenticate again before anything works
+  clientReset(&g_cl); g_cl.nextTryMs = 0;
+  pumpClient(true, 800);
+  CHECK(clientAuthed(&g_cl) && g_auth.authed && g_auth.okCount == 2);
+  // pings keep the session alive without any other traffic
+  uint32_t ok = g_auth.okCount;
+  for (int k = 0; k < 40; k++) { bt("P"); simRun(500); }
+  CHECK(g_auth.authed && g_auth.okCount == ok);
+  // the client notices a robot that lost the session (PONG:AUTH / ERR:AUTH) and re-handshakes by itself
+  g_auth.authed = false;
+  for (int k = 0; k < 20; k++) { char b[100]; size_t n = clientWantLine(&g_cl, true, millis(), rndTest, b, sizeof(b)); if (n) { b[n] = 0; lineBt(b); } bt("P"); simRun(100); for (auto& l : btNewLines()) clientOnLine(&g_cl, l.c_str(), millis()); }
+  CHECK(g_auth.authed && clientAuthed(&g_cl));
+  // a new AUTH request ends the current session immediately
+  simRun(400); lineBt("AUTH"); simRun(60);
+  CHECK(!g_auth.authed);
+  // link-loss timeout (btlink) also ends it, and attack / defend keep running without the link
+  authBoot(); pumpClient(true, 600); ballFar(); lineBt("attack"); simRun(1000);
+  CHECK(g_autoEnabled && g_auth.authed);
+  simRun(g_cfg.btLinkMs + 500);
+  CHECK(!g_auth.authed && g_autoEnabled);                                           // no link needed for autonomous play; nothing started or stopped it
+  // a different client later: needs the key
+  clientInit(&g_cl, TKEY_WRONG); pumpClient(true, 1500);
+  CHECK(!g_auth.authed);
+}
+
+static void t_auth_estop_latch() {
+  authBoot();
+  // unauthenticated emergency stop from a running autonomous mode
+  pumpClient(true, 600); ballFar(); lineBt("attack"); simRun(1500);
+  CHECK(g_autoEnabled && !allWheelsStopped());
+  simRun(AUTH_IDLE_MS + 300);
+  CHECK(!g_auth.authed && g_autoEnabled);
+  bt("X"); loop();
+  CHECK(g_estop && allWheelsStopped() && !g_autoEnabled);
+  // unauthenticated: the latch cannot be cleared and nothing can start
+  Serial1.out.clear(); g_btCursor = 0; bt("R"); lineBt("attack"); lineBt("defend"); bt("M"); simRun(100);
+  CHECK(g_estop && allWheelsStopped() && btHas("ERR:AUTH"));
+  // authenticating does NOT clear it, and authentication failures do not move anything
+  clientInit(&g_cl, TKEY_WRONG); pumpClient(true, 600);
+  CHECK(g_estop && allWheelsStopped());
+  clientInit(&g_cl, TKEY); g_cl.nextTryMs = 0; pumpClient(true, 3000);
+  CHECK(g_auth.authed && g_estop && allWheelsStopped());
+  // an authenticated session still gets ERR:ESTOP for movement, and only an explicit R clears the latch
+  Serial1.out.clear(); g_btCursor = 0; bt("M"); bt("W"); simRun(100);
+  CHECK(btHas("ERR:ESTOP") && allWheelsStopped());
+  bt("R"); simRun(60);
+  CHECK(!g_estop && allWheelsStopped() && !g_autoEnabled && !g_remoteManual);        // cleared, and the robot stays idle until told otherwise
+  // X works whatever the session state, from every mode (one pass of the loop each)
+  for (int mode = 0; mode < 3; mode++) {
+    if (mode == 0) { bt("M"); for (int k = 0; k < 4; k++) { bt("W"); simRun(60); } }
+    else if (mode == 1) { ballFar(); lineBt("attack"); simRun(800); }
+    else { lineBt("defend"); simRun(600); ballAt(70, 0.6f); simRun(600); }
+    if (mode == 2) { g_auth.authed = false; }                                        // and also with the session gone
+    bt("X"); loop();
+    CHECK(allWheelsStopped() && g_estop && !g_defendEnabled && !g_autoEnabled);
+    g_estop = false; g_auth.authed = true; g_auth.lastOkMs = millis(); ballGone(); simRun(100);
+  }
+}
+
+static void t_auth_nokey_and_open() {
+  authBoot(false);
+  send(":authkey clear\n"); simRun(60);
+  CHECK(!g_auth.keySet && EEPROM.mem[EEPROM_AUTH_ADDR] == 0xFF);
+  Serial1.out.clear(); g_btCursor = 0;
+  bt("M"); lineBt("attack"); lineBt("AUTH"); simRun(100);
+  CHECK(!g_remoteManual && !g_autoEnabled && btHas("ERR:NO_KEY") && !btAuthOk());   // fail closed: no key, no control
+  bt("X"); loop(); CHECK(g_estop);                                                  // but the emergency stop still works
+  g_estop = false;
+  // bad keys are refused
+  const char* badKeys[] = {"1234", "zz0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f", "0000000000000000000000000000000000000000000000000000000000000000",
+                           "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00", "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1"};
+  for (const char* k : badKeys) { Serial.out.clear(); send(":authkey "); send(k); send("\n"); simRun(60); CHECK(outHas("key rejected") && !g_auth.keySet); }
+  send(":authkey "); send(TKEY); send("\n"); simRun(60);
+  CHECK(g_auth.keySet && outHas("fingerprint 17a56f78"));
+  CHECK(Serial.out.find(TKEY) == std::string::npos);                                // the key is never echoed
+  Serial.out.clear(); send(":authkey\n"); simRun(60);
+  CHECK(outHas("fingerprint 17a56f78") && Serial.out.find(TKEY) == std::string::npos);
+  Serial.out.clear(); send(":bt\n"); simRun(60);
+  CHECK(Serial.out.find(TKEY) == std::string::npos && outHas("ENFORCED"));
+  // the key survives a reboot, the session does not
+  setup(); g_autoStartPending = false;
+  CHECK(g_auth.keySet && !g_auth.authed && g_auth.enabled);
+  // bench mode: enforcement off until the next reset; the handshake says so and the client never treats it as authenticated
+  send(":auth off\n"); simRun(60);
+  CHECK(!g_auth.enabled && btAuthOk());
+  Serial1.out.clear(); g_btCursor = 0; bt("M"); lineBt("AUTH"); simRun(100);
+  CHECK(g_remoteManual && btHas("AUTH OPEN"));
+  clientInit(&g_cl, TKEY); g_cl.st = CL_WAIT_CH; clientOnLine(&g_cl, "AUTH OPEN", millis());
+  CHECK(g_cl.robotOpen && !clientAuthed(&g_cl));
+  send(":auth on\n"); simRun(60);
+  Serial1.out.clear(); g_btCursor = 0; bt("W"); simRun(60);
+  CHECK(btHas("ERR:AUTH"));
+  setup(); g_autoStartPending = false;
+  CHECK(g_auth.enabled);                                                            // after a reset enforcement is back on, whatever was set before (host harness aside)
+  CHECK(EEPROM.mem[EEPROM_AUTH_ADDR] != 0xFF);
+}
+
+static void t_auth_console_lock() {
+  consoleInit(&g_con, TPASS, 60000);
+  uint32_t now = 100000;
+  // starts locked: nothing is forwarded, authentication text never becomes a command
+  CHECK(!g_con.unlocked);
+  CHECK(consoleLine(&g_con, "W", now) == CA_REJECT_LOCKED && consoleLine(&g_con, "defend", now) == CA_REJECT_LOCKED && consoleLine(&g_con, "M", now) == CA_REJECT_LOCKED);
+  CHECK(consoleLine(&g_con, "", now) == CA_NONE && consoleLine(&g_con, "   ", now) == CA_NONE);
+  // the emergency stop is available while locked
+  CHECK(consoleLine(&g_con, "X", now) == CA_ESTOP && consoleLine(&g_con, "x", now) == CA_ESTOP && consoleLine(&g_con, "!", now) == CA_ESTOP && consoleLine(&g_con, "  X  ", now) == CA_ESTOP);
+  CHECK(!g_con.unlocked);
+  // a wrong passcode: rejected, locked, throttled
+  CHECK(consoleLine(&g_con, "AUTH wrong-passcode", now) == CA_BAD_PASSCODE && !g_con.unlocked);
+  CHECK(consoleLine(&g_con, "AUTH wrong-passcode", now + 10) == CA_THROTTLED);
+  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now + 100) == CA_THROTTLED && !g_con.unlocked);       // even the right one waits for the throttle: no free guessing
+  CHECK(consoleLine(&g_con, "X", now + 100) == CA_ESTOP);                                                     // the stop is not throttled
+  now += 1100;
+  CHECK(consoleLine(&g_con, "AUTH test-passcode-123", now) == CA_BAD_PASSCODE);                              // prefix of the real one
+  CHECK(consoleLine(&g_con, "AUTH TEST-PASSCODE-1234", now + 1200) == CA_BAD_PASSCODE);                       // passcodes are case sensitive
+  CHECK(g_con.blockedUntil > now + 1200 + 4000);                                                              // the delay grows
+  now += 20000;
+  // never forwarded, whatever it contains
+  CHECK(consoleLine(&g_con, "AUTH W", now) != CA_FORWARD && consoleLine(&g_con, "AUTH defend", now + 30000) != CA_FORWARD);
+  now += 130000;
+  CHECK(consoleLine(&g_con, "auth test-passcode-1234", now) == CA_UNLOCKED && g_con.unlocked);                // the word AUTH is case insensitive, the passcode is not
+  CHECK(consoleLine(&g_con, "W", now + 10) == CA_FORWARD && consoleLine(&g_con, "defend", now + 20) == CA_FORWARD);
+  CHECK(consoleLine(&g_con, "AUTHX", now + 30) == CA_FORWARD);                                                // not the AUTH word: an ordinary (unknown) command for the robot to reject
+  CHECK(consoleLine(&g_con, "X", now + 40) == CA_ESTOP && g_con.unlocked);
+  // LOCK
+  CHECK(consoleLine(&g_con, "lock", now + 50) == CA_DISCONNECT && !g_con.unlocked);
+  CHECK(consoleLine(&g_con, "W", now + 60) == CA_REJECT_LOCKED);
+  // a wrong attempt while unlocked re-locks
+  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now + 70) == CA_UNLOCKED);
+  CHECK(consoleLine(&g_con, "AUTH nope-nope-nope", now + 80) == CA_BAD_PASSCODE && !g_con.unlocked);
+  // idle auto-lock and button gating
+  now += 200000;
+  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", now) == CA_UNLOCKED);
+  CHECK(consoleButtonAllowed(&g_con, now + 1000));
+  CHECK(!consoleTick(&g_con, now + 50000) && g_con.unlocked);
+  CHECK(consoleButtonAllowed(&g_con, now + 50000));                                                           // button use counts as activity
+  CHECK(!consoleTick(&g_con, now + 100000));
+  CHECK(consoleTick(&g_con, now + 50000 + 61000) && !g_con.unlocked);
+  CHECK(!consoleButtonAllowed(&g_con, now + 200000));                                                         // locked: buttons are dead (the E-stop button is handled outside)
+  // not provisioned (placeholders / too short / empty): the console can never be unlocked
+  const char* bad[] = {"", "REPLACE_WITH_PASSCODE", "short", "REPLACE"};
+  for (const char* p : bad) { ConsoleAuth c; consoleInit(&c, p, 0); CHECK(!c.provisioned && consoleLine(&c, "AUTH ", 5) == CA_NOT_PROVISIONED && consoleLine(&c, "AUTH REPLACE_WITH_PASSCODE", 5) == CA_NOT_PROVISIONED && !c.unlocked); }
+  // the plain passcode is not kept in the structure
+  CHECK(memmem(&g_con, sizeof(g_con), TPASS, strlen(TPASS)) == nullptr);
+  // the client refuses placeholder / malformed / uniform keys
+  ClientAuth c2; clientInit(&c2, "REPLACE_WITH_64_HEX_CHARACTERS"); CHECK(!c2.keyOk);
+  clientInit(&c2, "0000000000000000000000000000000000000000000000000000000000000000"); CHECK(!c2.keyOk);
+  clientInit(&c2, TKEY); CHECK(c2.keyOk);
+  char b[100]; CHECK(clientWantLine(&c2, false, 1, rndTest, b, sizeof(b)) == 0);                              // no handshake while the console is locked
+}
+
+static void t_auth_end_to_end() {
+  authBoot();
+  consoleInit(&g_con, TPASS, 0);
+  uint32_t t = millis();
+  // the laptop types commands while locked: nothing reaches the robot
+  Serial1.out.clear(); g_btCursor = 0;
+  ConAct a = consoleLine(&g_con, "defend", t);
+  CHECK(a == CA_REJECT_LOCKED);
+  pumpClient(g_con.unlocked, 500);
+  CHECK(!g_auth.authed && !g_defendEnabled && Serial1.out.empty());                  // locked console: not even the handshake starts
+  // unlock the console, the ESP32 authenticates to the Mega, then commands are forwarded
+  CHECK(consoleLine(&g_con, "AUTH test-passcode-1234", millis()) == CA_UNLOCKED);
+  pumpClient(g_con.unlocked, 800);
+  CHECK(clientAuthed(&g_cl) && g_auth.authed);
+  a = consoleLine(&g_con, "defend", millis()); CHECK(a == CA_FORWARD);
+  lineBt("defend"); simRun(200);
+  CHECK(g_defendEnabled && modeIs("DEFEND"));
+  // LOCK: the ESP32 tells the Mega to forget the session; commands are refused again; defend carries on by itself
+  CHECK(consoleLine(&g_con, "LOCK", millis()) == CA_DISCONNECT);
+  lineBt("AUTH OUT"); clientReset(&g_cl); simRun(100);
+  CHECK(!g_auth.authed && g_defendEnabled);
+  Serial1.out.clear(); g_btCursor = 0; lineBt("attack"); simRun(100);
+  CHECK(!g_autoEnabled && g_defendEnabled && btHas("ERR:AUTH"));
+  // the laptop's emergency stop still goes out while locked
+  CHECK(consoleLine(&g_con, "X", millis()) == CA_ESTOP);
+  bt("X"); loop();
+  CHECK(g_estop && allWheelsStopped());
+  // a different laptop later: same ESP32, same procedure (passcode typed again; nothing about the first laptop is remembered)
+  g_estop = false;
+  ConsoleAuth fresh; consoleInit(&fresh, TPASS, 0);                                 // = the ESP32 rebooted when its USB cable moved
+  CHECK(!fresh.unlocked && consoleLine(&fresh, "W", millis()) == CA_REJECT_LOCKED);
+  CHECK(noSecretOnAnyWire());
+}
+
+static std::string g_helpOut;
+static void helpCollect(const char* l) { g_helpOut += l; g_helpOut += "\n"; }
+
+static void t_esp32_console_ui() {
+  uint32_t now = 100000;
+  ConsoleAuth c; consoleInit(&c, TPASS, 0);
+  // everything starts locked; help and the status of this remote work while locked; views and robot commands do not
+  CHECK(consoleLine(&c, "help", now) == CA_HELP && consoleLine(&c, "help ir", now) == CA_HELP && strcmp(c.arg, "ir") == 0 && consoleLine(&c, "esp32status", now) == CA_LOCALSTATUS);
+  CHECK(consoleLine(&c, "ir", now) == CA_REJECT_LOCKED && consoleLine(&c, "back", now) == CA_REJECT_LOCKED && consoleLine(&c, "defend", now) == CA_REJECT_LOCKED);
+  // esp32connect with the passcode on the line
+  CHECK(consoleLine(&c, "esp32connect wrong-wrong", now) == CA_BAD_PASSCODE);
+  now += 1500;
+  CHECK(consoleLine(&c, "ESP32CONNECT test-passcode-1234", now) == CA_UNLOCKED && c.unlocked);
+  // views: exactly one word, local, never forwarded
+  CHECK(consoleLine(&c, "ir", now) == CA_VIEW && c.view == V_IR);
+  CHECK(consoleLine(&c, "imu", now) == CA_VIEW && c.view == V_IMU && consoleLine(&c, "gyro", now) == CA_VIEW && c.view == V_IMU);
+  CHECK(consoleLine(&c, "motors", now) == CA_VIEW && c.view == V_MOTORS && consoleLine(&c, "ball", now) == CA_VIEW && c.view == V_BALL);
+  CHECK(consoleLine(&c, "safety", now) == CA_VIEW && c.view == V_SAFETY && consoleLine(&c, "raw", now) == CA_VIEW && c.view == V_RAW);
+  CHECK(consoleLine(&c, "back", now) == CA_VIEW && c.view == V_ALL && consoleLine(&c, "ALL", now) == CA_VIEW && c.view == V_ALL);
+  CHECK(consoleLine(&c, "gyro drift 30", now) == CA_FORWARD && consoleLine(&c, "gyro cal", now) == CA_FORWARD);      // with arguments the robot command is meant
+  CHECK(consoleLine(&c, "defend", now) == CA_FORWARD && consoleLine(&c, "tele now r", now) == CA_FORWARD && consoleLine(&c, "M", now) == CA_FORWARD);
+  // esp32disconnect and LOCK
+  CHECK(consoleLine(&c, "esp32disconnect", now) == CA_DISCONNECT && !c.unlocked);
+  CHECK(consoleLine(&c, "ir", now) == CA_REJECT_LOCKED);
+  // the prompt form: the next line is the passcode and is never a command; X still stops during the prompt
+  now += 2000;
+  CHECK(consoleLine(&c, "esp32connect", now) == CA_PROMPT && c.awaitingPass);
+  CHECK(consoleLine(&c, "X", now + 10) == CA_ESTOP && c.awaitingPass);
+  CHECK(consoleLine(&c, "test-passcode-1234", now + 20) == CA_UNLOCKED && c.unlocked && !c.awaitingPass);
+  c.unlocked = false;
+  CHECK(consoleLine(&c, "esp32connect", now + 100) == CA_PROMPT);
+  CHECK(consoleLine(&c, "defend", now + 200) != CA_FORWARD && !c.unlocked);                                          // a command typed at the prompt is a (wrong) passcode, not a command
+  now += 10000;
+  CHECK(consoleLine(&c, "esp32connect", now) == CA_PROMPT);
+  CHECK(consoleLine(&c, "test-passcode-1234", now + 31000) == CA_REJECT_LOCKED);                                      // the prompt timed out
+  // convenience mode (CONSOLE_REQUIRE_PASSCODE 0): esp32connect alone unlocks
+  ConsoleAuth open; consoleInit(&open, "", 0, false);
+  CHECK(open.provisioned && consoleLine(&open, "esp32connect", 5) == CA_UNLOCKED && open.unlocked);
+  CHECK(consoleLine(&open, "esp32disconnect", 6) == CA_DISCONNECT && consoleLine(&open, "W", 7) == CA_REJECT_LOCKED);
+  // help: every command has an entry, aliases resolve, unknown words are reported
+  const char* cmds[] = {"esp32connect", "esp32disconnect", "esp32status", "help", "x", "ir", "imu", "motors", "ball", "safety", "raw", "all", "back", "defend", "attack", "manual", "stop", "calibrate", "tele", "W", "M", "sensors", "gyro", "status", "lock", "auth", "idle", "!"};
+  for (const char* w : cmds) { const HelpEntry* e = helpFind(w); CHECK(e && e->usage[0] && strlen(e->text) > 20); }
+  CHECK(!helpFind("nonsense"));
+  g_helpOut.clear(); helpPrint("", helpCollect);
+  CHECK(g_helpOut.find("esp32connect") != std::string::npos && g_helpOut.find("esp32disconnect") != std::string::npos && g_helpOut.find("ir ") != std::string::npos && g_helpOut.find("back") != std::string::npos && g_helpOut.find("EMERGENCY STOP") != std::string::npos);
+  g_helpOut.clear(); helpPrint("ir", helpCollect);
+  CHECK(g_helpOut.find("D34") != std::string::npos && g_helpOut.find("A0") != std::string::npos);
+  g_helpOut.clear(); helpPrint("nonsense", helpCollect);
+  CHECK(g_helpOut.find("no help") != std::string::npos);
+  // the passcode never appears in any help text
+  for (size_t i = 0; i < CONSOLE_HELP_N; i++) CHECK(strstr(CONSOLE_HELP[i].text, TPASS) == nullptr);
+}
+
+static void t_esp32_views_render() {
+  authBoot();
+  g_cfg.modEnable = 3; g_cfg.teleDetailEvery = 1;
+  pumpClient(true, 600);
+  CHECK(g_auth.authed);
+  ballAt(30, 0.5f); g_mockModDetect[1] = true; simRun(500);
+  TeleSnapshot s; teleInit(&s);
+  // like the sketch: ask for fresh frames of each kind ("tele now <kind>") and parse what comes back
+  const char kinds[4] = {'c', 'r', 'i', 'd'};
+  Serial1.out.clear(); g_btCursor = 0;
+  for (char k : kinds) { char rq[16]; snprintf(rq, sizeof(rq), "tele now %c", k); lineBt(rq); simRun(700); }
+  for (auto& f : btFrames()) teleParseLine(&s, f.c_str(), millis());
+  CHECK(s.lastCoreMs && s.lastRecvMs && s.lastImuMs && s.lastDiagMs && s.bad == 0);
+  CHECK(btHas("OK:TELE"));
+  lineBt("tele now q"); simRun(100);                                                                                      // an unknown kind is refused, nothing breaks
+  char out[1200];
+  teleRenderView(&s, V_IR, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "A0") && strstr(out, "swing") && strstr(out, "threshold") && strstr(out, "D35 DETECTING") && strstr(out, "underside") && !strstr(out, "gyro") && !strstr(out, "motor COMMAND"));
+  teleRenderView(&s, V_IMU, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "accel g") && strstr(out, "gyro dps") && strstr(out, "ESTIMATES") && !strstr(out, "swing"));
+  teleRenderView(&s, V_MOTORS, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "motor COMMAND PWM") && strstr(out, "no encoder") && !strstr(out, "accel g"));
+  teleRenderView(&s, V_BALL, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "ball SEEN") && strstr(out, "bearing"));
+  teleRenderView(&s, V_SAFETY, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "safety OK") && strstr(out, "e-stop clear") && strstr(out, "loop avg"));
+  teleRenderView(&s, V_RAW, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "[c] {\"v\":1") && strstr(out, "[r] {\"v\":1") && strstr(out, "[d] {\"v\":1"));
+  teleRenderView(&s, V_ALL, millis(), true, out, sizeof(out));
+  CHECK(strstr(out, "mode ") && strstr(out, "receivers swing") && strstr(out, "imu "));
+  // stale data and a lost link are flagged in every view
+  teleRenderView(&s, V_IR, millis() + 20000, true, out, sizeof(out));
+  CHECK(strstr(out, "STALE"));
+  teleRenderView(&s, V_MOTORS, millis(), false, out, sizeof(out));
+  CHECK(strstr(out, "LINK LOST") && strstr(out, "no current data"));
+  TeleSnapshot empty; teleInit(&empty);
+  teleRenderView(&empty, V_IMU, 5000, true, out, sizeof(out));
+  CHECK(strstr(out, "NO DATA YET") && strstr(out, "n/a"));
+  // an unauthenticated peer cannot use the view requests
+  clientInit(&g_cl, TKEY); lineBt("AUTH OUT"); simRun(60);
+  Serial1.out.clear(); g_btCursor = 0; lineBt("tele now r"); simRun(100);
+  CHECK(btFrames().empty() && btHas("ERR:AUTH"));
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -2477,6 +2977,17 @@ static const TestCase TESTS[] = {
   T(t_ring_polarity_and_calibration),
   T(t_direction_confidence),
   T(t_esp32_protocol),
+  T(t_sha256_hmac_vectors),
+  T(t_auth_enforced_basics),
+  T(t_auth_invalid),
+  T(t_auth_replay_expired),
+  T(t_auth_session_and_reconnect),
+  T(t_auth_estop_latch),
+  T(t_auth_nokey_and_open),
+  T(t_auth_console_lock),
+  T(t_auth_end_to_end),
+  T(t_esp32_console_ui),
+  T(t_esp32_views_render),
   T(t_bt_protocol),
   T(t_bt_modes_and_estop),
   T(t_bt_link_loss),

@@ -188,3 +188,4 @@ struct MockEEPROM {
   void update(int a, uint8_t v) { ensure(); mem[a] = v; flush(); }
 };
 static MockEEPROM EEPROM;
+static bool g_mockAuthEnforced = false;          // read by authBegin() in the host build only

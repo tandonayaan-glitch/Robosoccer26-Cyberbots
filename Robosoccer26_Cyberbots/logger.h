@@ -68,7 +68,8 @@ static void logService(const Config& c, uint32_t nowMs) {
 // second at most), each EEPROM cell is rewritten once per full turn of the ring (about 300 events), so wear is not a concern.
 #define REC_BASE 512
 #define REC_BYTES 12
-#define REC_SLOTS ((4096 - REC_BASE) / REC_BYTES)
+#define REC_END 4032                                  // the last 64 bytes of the EEPROM hold the Bluetooth authentication key block (btauth.h)
+#define REC_SLOTS ((REC_END - REC_BASE) / REC_BYTES)
 struct Rec { uint8_t magic, type; uint16_t arg; uint32_t t; uint16_t seq, chk; };
 static uint16_t g_recNext = 0, g_recSeq = 1, g_recCount = 0;
 static uint32_t g_recDropped = 0, g_recWindowMs = 0;

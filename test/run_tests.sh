@@ -10,6 +10,7 @@ rm -f /tmp/mockeeprom_*                       # clean, reproducible start: no st
 # Hardware that is gone for good must not come back into the firmware sources: the ESP32 APIs and pin names, the TSOP digital receivers,
 # the old scan engine, the emitter-LED pulsing, the flash filesystem.
 if grep -rniE "ledc|esp_|CD74|4067|multiplex|PIN_MUX|P_MUX|MUX_|LittleFS|freertos|TSOP|TSSP|irscan|PIN_IR_EMIT|irEmit|\birLearn\b|GPIO[0-9]" ../Robosoccer26_Cyberbots/; then echo "OBSOLETE (ESP32 / old hardware) REFERENCE FOUND IN THE FIRMWARE SOURCES"; exit 1; fi
+cmp -s ../Robosoccer26_Cyberbots/sha256_hmac.h ../remote_esp32/sha256_hmac.h || { echo "sha256_hmac.h copies differ (Robosoccer26_Cyberbots/ vs remote_esp32/): they must be identical"; exit 1; }
 BIN=/tmp/rs26_test_mega
 echo "=== building (mock AVR core, -Wall -Wextra -Wshadow, ASan+UBSan) ==="
 g++ -std=c++20 -O1 -g -Wall -Wextra -Wshadow -Wformat=2 -fsanitize=address,undefined -fno-sanitize-recover=undefined \

@@ -77,6 +77,7 @@ static void defAnalyse(const Config& c, uint32_t now) {
   for (uint8_t k = 0; k < g_defObsCount; k++) {
     const DefObs& o = g_defObs[(uint8_t)((g_defObsHead + DEF_OBS_N - 1 - k) % DEF_OBS_N)];     // newest first
     if (elapsedMs(now, o.ms) > 800) break;
+    if (g_ball.seenSinceMs && (int32_t)(o.ms - g_ball.seenSinceMs) < 250) break;                 // the first 250 ms after the ball appears are the smoothing filter settling, not an approach
     t[n] = -(float)elapsedMs(now, o.ms) / 1000.0f; br[n] = o.bearing; st[n] = o.strength; n++;
   }
   if (n < 4 || t[0] - t[n - 1] < 0.3f) return;

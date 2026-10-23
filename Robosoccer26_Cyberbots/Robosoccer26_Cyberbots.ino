@@ -54,6 +54,8 @@ void setup() {
   recInit();
   recAdd(REC_BOOT, 0);
   btBegin(g_cfg);
+  authBegin();
+  say("BOOT", "Bluetooth authentication: %S, key %S. Control commands from the remote are refused until it authenticates.", g_auth.enabled ? PSTR("ENFORCED") : PSTR("OFF"), g_auth.keySet ? PSTR("set") : PSTR("NOT SET (use :authkey over USB; the remote can only send X and P until then)"));
   say("BOOT", "Bluetooth (HC-05) on Serial1 D18/D19 at %lu baud: %S", UL(btBaudNow(g_cfg)), g_cfg.btEnable ? PSTR("listening") : PSTR("disabled"));
 
   // Drivetrain PWM check (duty 0, outputs still disabled).

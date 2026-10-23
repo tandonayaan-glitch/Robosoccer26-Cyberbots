@@ -103,7 +103,7 @@ static bool teleSend(const Config& c, uint32_t now, char kind, bool force) {
   g_tele.seq++;
   if (g_teleN >= TELE_BUF - 1) { g_tele.dropped++; return false; }               // would not fit: discarded, never sent cut off
   if (g_tele.usb && outUsed() < OUTQ_SIZE / 4) say("TELE", "%s", g_teleBuf);
-  if (!c.btEnable) return true;
+  if (!c.btEnable || !btAuthOk()) return true;
   if (!btTxPut(g_teleBuf, g_teleN, true)) { g_tele.dropped++; (void)force; return false; }
   g_tele.sent++; g_tele.lastLen = (uint32_t)g_teleN + 1u; g_tele.lastKind = (uint8_t)kind; g_tele.lastMs = now;
   return true;
@@ -112,6 +112,7 @@ static void teleSendNow(const Config& c, uint32_t now, char kind) { teleSend(c, 
 
 static void teleService(const Config& c, uint32_t now) {
   if (!c.teleEnable) return;
+  if (!btAuthOk()) return;                                                        // no telemetry to a peer that has not authenticated
   if (btTxUsed() != 0) return;                                                    // never queue frames behind frames
   uint32_t period = 1000u / (c.teleHz ? c.teleHz : 1u);
   uint32_t cap = btBaudNow(c) / 10u;                                              // bytes per second the UART can carry (8N1)

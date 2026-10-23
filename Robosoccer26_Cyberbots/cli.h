@@ -13,7 +13,7 @@ static bool g_streamIr = false;
 static uint32_t g_streamLastMs = 0;
 static bool g_testMode = false;
 static bool g_lineMode = false, g_lineBad = false, g_lineOvf = false;
-static char g_line[64];
+static char g_line[96];          // long enough for ':authkey ' + 64 hex digits
 static uint8_t g_lineLen = 0;
 static uint32_t g_lineStartMs = 0;
 static char g_word[40];
@@ -39,6 +39,7 @@ static void printHelp() {
   say("INFO", "--- settings (EEPROM) ---");
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
+  say("INFO", ":authkey <64 hex> | :authkey clear | :authkey = Bluetooth key (USB only) | :auth on|off = enforcement (off lasts until reset)");
   say("INFO", ":tele [on|off|usb on|usb off|now] = telemetry to the ESP32 | :gyro drift [s] = stationary drift test | :motors = commanded motor state | :defend / :attack / :manual = modes (docs/DEFENDING.md)");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach.");
 }
@@ -165,9 +166,9 @@ static void cliExecLine(char* line, uint32_t now) {
     if (!t[1]) printTele(c, now);
     else if (STREQ(t[1], "on")) { c.teleEnable = 1; say("INFO", "telemetry ON"); }
     else if (STREQ(t[1], "off")) { c.teleEnable = 0; say("INFO", "telemetry OFF"); }
-    else if (STREQ(t[1], "now")) { teleSendNow(c, now, 'c'); teleSendNow(c, now, 'r'); }
+    else if (STREQ(t[1], "now")) { char k = t[2] ? t[2][0] : 'c'; if (!t[2] || (t[2][1] == 0 && (k == 'c' || k == 'r' || k == 'i' || k == 'd'))) teleSendNow(c, now, k); else say("WARN", "usage: :tele now [c|r|i|d]"); }
     else if (STREQ(t[1], "usb")) { g_tele.usb = t[2] && STREQ(t[2], "on"); say("INFO", "telemetry echo on USB %S", g_tele.usb ? PSTR("ON (frames also print here)") : PSTR("OFF")); }
-    else say("WARN", "usage: :tele [on|off|now|usb on|usb off]");
+    else say("WARN", "usage: :tele [on|off|now [c|r|i|d]|usb on|usb off]");
   }
   else if (STREQ(cmd, "set")) cmdParamSet(t[1] ? t[1] : "", t[2]);
   else if (STREQ(cmd, "get")) cmdParamGet(t[1]);
@@ -237,6 +238,17 @@ static void cliExecLine(char* line, uint32_t now) {
   else if (STREQ(cmd, "stop")) { navStop(PSTR("operator stop")); say("SAFETY", "stopped; autonomy disabled"); }
   else if (STREQ(cmd, "estop")) { navEstop(PSTR("EMERGENCY STOP")); say("SAFETY", "EMERGENCY STOP: latched (':recover' or remote 'R' clears it)"); }
   else if (STREQ(cmd, "bt")) printBt(c, now);
+  else if (STREQ(cmd, "authkey")) {                    // USB only. The key is never echoed, logged or recorded.
+    if (!t[1]) { char fp[9] = "--------"; if (g_auth.keySet) authFingerprint(fp); say("INFO", "Bluetooth key %S, fingerprint %s (compare with the ESP32 console 'FINGERPRINT')", g_auth.keySet ? PSTR("SET") : PSTR("NOT SET: the remote cannot control the robot"), fp); }
+    else if (STREQ(t[1], "clear")) { authClearKey(); say("SAFETY", "Bluetooth key ERASED: the remote can no longer control the robot (X and P still work)"); }
+    else if (authSetKey(t[1])) { char fp[9]; authFingerprint(fp); say("SAFETY", "Bluetooth key stored in the EEPROM, fingerprint %s. Any current session is ended.", fp); }
+    else say("WARN", "key rejected: it must be exactly 64 hexadecimal digits and not all the same byte (tools/provision.py makes one)");
+  }
+  else if (STREQ(cmd, "auth")) {
+    if (t[1] && STREQ(t[1], "off")) { g_auth.enabled = false; say("SAFETY", "Bluetooth authentication switched OFF until the next reset: ANY paired device can control the robot. Bench use only."); }
+    else if (t[1] && STREQ(t[1], "on")) { g_auth.enabled = true; g_auth.authed = false; say("INFO", "Bluetooth authentication ENFORCED"); }
+    else printBt(c, now);
+  }
   else if (STREQ(cmd, "manual") && !t[1]) {
     if (!navEstopRefuses(PSTR("manual"))) { navStop(PSTR("operator: manual mode")); g_remoteManual = true; recAdd(REC_MODE, 1); say("NAV", "MANUAL mode: keys f b l r q e on USB, W S A D Z C on Bluetooth. 'stop' leaves it; 'attack' / 'defend' switch."); }
   }
@@ -291,7 +303,7 @@ static void cliFinishWord(uint32_t now) {
 }
 
 static void cliPoll(uint32_t now) {
-  if (g_lineMode && elapsedMs(now, g_lineStartMs) > 4000) { g_lineMode = false; say("WARN", "unterminated ':' line abandoned"); }
+  if (g_lineMode && elapsedMs(now, g_lineStartMs) > 4000) { g_lineMode = false; memset(g_line, 0, sizeof(g_line)); say("WARN", "unterminated ':' line abandoned"); }
   if (g_wordLen && elapsedMs(now, g_wordLastMs) >= 8) cliFinishWord(now);       // no line ending: 8 ms of silence completes the input
   int budget = 64;
   while (Serial.available() > 0 && budget-- > 0) {
@@ -307,6 +319,7 @@ static void cliPoll(uint32_t now) {
         else cliExecLine(g_line, now);
         g_lineMode = false;
       } else if (g_wordLen || g_wordOvf) cliFinishWord(now);
+      memset(g_line, 0, sizeof(g_line));                                 // a key typed after ':authkey' must not stay in RAM
       continue;
     }
     if (g_lineMode) {

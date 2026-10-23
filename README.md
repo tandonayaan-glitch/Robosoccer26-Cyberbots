@@ -17,6 +17,7 @@ Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **D
 ## Commands (Serial Monitor 115200 baud, line ending **Newline** or **Both NL & CR**; the same words work over Bluetooth)
 
 `defend` · `attack` · `manual` · `stop` (or `idle`) · `status` · `sensors` · `gyro` (`gyro drift [s]`, `gyro cal`, `gyro stop`) · `calibrate` · `motors` · `tele` · `help`; emergency stop `!` (USB) / `X` (Bluetooth).
+**Bluetooth control needs authentication** (`docs/BLUETOOTH.md`, quick start `docs/ESP32_QUICKSTART.md`): on the ESP32's Serial Monitor type `esp32connect <passcode>`; views `ir`, `imu`, `motors`, `ball`, `safety`, `back`; `esp32disconnect`; `help`. One-time setup: `python3 tools/provision.py --mega-port <port>`.
 Classic single keys (`f b l r q e s a h i m d g t ?`) work **when sent alone**; `:set`, `:get`, `:save`, `:ring`, `:mod`, `:log`, … are unchanged. A multi-letter burst that is not a known word executes nothing. Full list: `help`; protocol: `docs/BLUETOOTH.md`; telemetry: `docs/TELEMETRY.md`; defending: `docs/DEFENDING.md`.
 
 **Startup:** after a clean boot the robot starts ATTACK by itself after 1.5 s (`autostart`, team decision; `:set autostart 0` + `:save` for always-idle). DEFEND is never started automatically. Bluetooth is not required.
