@@ -10,6 +10,8 @@
 
 static bool g_autoEnabled = false;          // RAM only: every reset starts with autonomy OFF
 static bool g_estop = false;                // emergency-stop LATCH (RAM only): while set, no movement and no autonomy can be started from anywhere
+static bool g_autoStartPending = false;       // boot decided to start autonomy by itself once the start delay has passed
+static uint32_t g_autoStartAtMs = 0;
 static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
 static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
 static uint8_t g_rePhase = 0, g_reCount = 0, g_appTimeouts = 0;

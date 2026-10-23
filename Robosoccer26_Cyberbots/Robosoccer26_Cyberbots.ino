@@ -2,7 +2,7 @@
 // (The ESP32-S version is kept in git: commit 1963a3f.)
 //
 // 4x mecanum (2x L298N) | 2 phototransistor receivers on A0 / A1 (more can be added on A2..A7) | 2 IR obstacle modules (D34, D35) | HC-05 on Serial1 (D18/D19) | underside sensor D40 | MPU6050 on I2C (D20/D21)
-// Safe by construction: motors off at boot, autonomy only after an explicit 'a', every fault
+// Safe by construction: motors off at boot, autonomy starts by itself after a clean boot (autostart, default on), never with a fault, every fault
 // degrades or stops instead of guessing. See docs/ for wiring, power, calibration and the test plan.
 //
 // Board: Arduino Mega or Mega 2560 (ATmega2560), Arduino AVR core 1.8.3 or newer. No external libraries (Wire and EEPROM ship with the core).
@@ -43,7 +43,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(100);
   cfgDefaults(g_cfg);
-  say("BOOT", "Robosoccer26_Cyberbots %s starting. Motors are OFF; autonomy is OFF until 'a'.", FW_VERSION);
+  say("BOOT", "Robosoccer26_Cyberbots %s starting. Motors are OFF during initialisation.", FW_VERSION);
 
   // Configuration from EEPROM (never writes at boot).
   char rep[40];
@@ -91,7 +91,11 @@ void setup() {
   navSetState(g_cond == COND_SAFE_STOP ? NAV_SAFE_STOP : NAV_IDLE, PSTR("boot complete"));
 
   printHealth(g_cfg, now, PSTR("BOOT"));
-  say("BOOT", "autonomous mode: DISABLED. Bench-test first ('t'), then send 'a'. '?' lists commands.");
+  if (g_cfg.autoStart && g_cond != COND_SAFE_STOP) {
+    g_autoStartPending = true; g_autoStartAtMs = now + g_cfg.autoStartDelayMs;
+    say("BOOT", "autostart: autonomous mode begins in %u ms if all checks still pass. Cancel: X (Bluetooth), '!', 's' or M; disable: ':set autostart 0' + ':save'.", (unsigned)g_cfg.autoStartDelayMs);
+  } else if (g_cfg.autoStart) say("BOOT", "autostart SKIPPED: robot is in SAFE_STOP (see 'h'). Motors stay off.");
+  else say("BOOT", "autonomous mode: DISABLED (autostart 0). Send 'a' or U to start. '?' lists commands.");
   g_bootPhase = false;
   outFlushBlocking(1500);
   g_loopMaxEverUs = 0;                                  // statistics start after the boot-time blocking work
@@ -118,6 +122,13 @@ void loop() {
     faultRaise(F_LOOP_STALL, "loop blocked for %lu ms", UL(gap / 1000));
   }
 
+  if (g_autoStartPending) {                        // one-shot automatic start; any operator action or fault cancels it
+    if (g_estop || g_remoteManual || g_autoEnabled || g_navState != NAV_IDLE || g_cond == COND_SAFE_STOP) { g_autoStartPending = false; if (!g_autoEnabled) say("BOOT", "autostart cancelled: %S. Motors stay off.", g_cond == COND_SAFE_STOP ? PSTR("fault / SAFE_STOP (see 'h')") : PSTR("operator action")); }
+    else if (deadlineReached(now, g_autoStartAtMs)) {
+      g_autoStartPending = false;
+      if (!navEnableAuto(g_cfg, now)) say("BOOT", "autostart REFUSED by the safety checks above: motors stay off");
+    }
+  }
   btPoll(g_cfg, now);                              // remote commands first: the emergency stop has the highest priority
   cliPoll(now);
   ringService(g_cfg, now);

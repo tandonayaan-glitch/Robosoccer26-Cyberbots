@@ -6,7 +6,7 @@
 #include "util.h"
 
 #define CFG_MAGIC 0x52534342u   // "RSCB"
-#define CFG_VERSION 18
+#define CFG_VERSION 19
 
 struct Config {
   uint32_t magic;
@@ -68,6 +68,8 @@ struct Config {
   // ---- Bluetooth remote (HC-05 on Serial1) ----
   uint8_t btEnable;              // 1 = listen for remote commands on Serial1
   uint16_t btLeaseMs;            // a remote movement command keeps the robot driving this long (a held key repeats it)
+  uint8_t autoStart;             // 1 = start autonomous mode by itself after a clean boot (no serial command needed)
+  uint16_t autoStartDelayMs;     // pause between the end of boot and the first movement (operator can still press X / send M)
   uint16_t btLinkMs;             // no byte from the remote for this long = link reported lost
   // ---- navigation ----
   uint16_t lostHoldMs;           // ball stays "valid" this long after the ring stopped seeing it
@@ -174,6 +176,8 @@ static const ParamDef PARAMS[] PROGMEM = {
   PD("btenable", PT_U8, btEnable, 0, 1),
   PD("btlease", PT_U16, btLeaseMs, 100, 3000),
   PD("btlink", PT_U16, btLinkMs, 500, 30000),
+  PD("autostart", PT_U8, autoStart, 0, 1),
+  PD("startdelay", PT_U16, autoStartDelayMs, 0, 30000),
   PD("losthold", PT_U16, lostHoldMs, 40, 3000),
   PD("centerdeg", PT_F32, centerDeg, 3, 60),
   PD("turndeg", PT_F32, turnDeg, 8, 90),
@@ -278,6 +282,7 @@ static void cfgDefaults(Config& c) {
   c.approachTimeoutMs = 8000; c.researchMs = 5000; c.giveUpMs = 60000;
   for (int i = 0; i < WHEEL_COUNT; i++) c.wheelScale[i] = 100;
   c.btEnable = 1; c.btLeaseMs = 400; c.btLinkMs = 3000;
+  c.autoStart = 1; c.autoStartDelayMs = 1500;
   c.lostHoldMs = 300;
   c.centerDeg = 15.0f; c.turnDeg = 25.0f; c.turnKp = 0.012f; c.turnMax = 0.35f;
   c.approachSpeed = 0.5f;

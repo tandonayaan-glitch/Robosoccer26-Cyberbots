@@ -61,7 +61,7 @@ static void layout8() {
   g_cfg.ringEnable = 0x00FF;
   for (int i = 0; i < 8; i++) g_cfg.ringBearing[i] = (int16_t)(i <= 4 ? i * 45 : i * 45 - 360);
 }
-static void bootCal() { ballGone(); setup(); layout8(); calibrateAll(); }
+static void bootCal() { ballGone(); setup(); g_autoStartPending = false; layout8(); calibrateAll(); }       // (tests start idle; t_autostart covers the real boot)
 static bool wheelsMatchStrafeRight() { return wheelDir(W_FL) > 0 && wheelDir(W_FR) < 0 && wheelDir(W_BL) < 0 && wheelDir(W_BR) > 0; }
 static void trackWheelMotion() { if (!allWheelsStopped()) anyWheelEverMoved = true; }
 static void simRunTracking(uint32_t ms) {
@@ -390,7 +390,7 @@ static void t_boot_safe() {
   simRunTracking(5000);
   CHECK(!anyWheelEverMoved);
   CHECK(!g_autoEnabled);
-  CHECK(outHas("autonomous mode: DISABLED"));
+  CHECK(outHas("autostart"));
 }
 
 static void t_ramp() {
@@ -1924,6 +1924,39 @@ static void t_shoot_no_goal_and_wheel_scale() {
   CHECK(allWheelsStopped());
 }
 
+static void t_autostart() {
+  // real boot sequence with the default settings: no command needed
+  ballGone(); setup(); layout8(); calibrateAll();
+  CHECK(g_cfg.autoStart == 1 && g_autoStartPending && !g_autoEnabled && allWheelsStopped());   // motors stay stopped through initialisation
+  simRun(g_cfg.autoStartDelayMs / 2);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  simRun(g_cfg.autoStartDelayMs);
+  CHECK(g_autoEnabled && g_navState == NAV_SEEK);
+  // Bluetooth is not needed: no link was ever made
+  CHECK(!g_btLink);
+  // X still stops everything at once, then the latch holds
+  bt("X"); loop();
+  CHECK(allWheelsStopped() && g_estop && !g_autoEnabled);
+  // manual mode still works after an automatic start
+  bt("R"); simRun(30); bt("M"); bt("W"); simRun(100);
+  CHECK(g_remoteManual && !allWheelsStopped());
+  // an operator action during the delay cancels the automatic start
+  ballGone(); setup(); layout8(); calibrateAll();
+  simRun(300); bt("M"); simRun(g_cfg.autoStartDelayMs + 500);
+  CHECK(!g_autoEnabled && g_remoteManual && !g_autoStartPending);
+  ballGone(); setup(); layout8(); calibrateAll();
+  simRun(300); bt("X"); simRun(g_cfg.autoStartDelayMs + 500);
+  CHECK(!g_autoEnabled && g_estop && allWheelsStopped());
+  // a failed safety check keeps the motors off and says why
+  ballGone(); setup(); layout8();                                                // ring NOT calibrated
+  Serial.out.clear(); simRun(g_cfg.autoStartDelayMs + 500);
+  CHECK(!g_autoEnabled && allWheelsStopped() && outHas("autostart"));
+  // disabled by setting
+  ballGone(); setup(); layout8(); calibrateAll(); g_cfg.autoStart = 0; g_autoStartPending = false;
+  simRun(g_cfg.autoStartDelayMs + 500);
+  CHECK(!g_autoEnabled);
+}
+
 struct TestCase { const char* name; void (*fn)(); };
 #define T(n) {#n, n}
 static const TestCase TESTS[] = {
@@ -1983,6 +2016,7 @@ static const TestCase TESTS[] = {
   T(t_shot_speed_old_vs_new),
   T(t_shot_parallel_aims_while_reversing),
   T(t_shoot_pwm_limit_and_no_reverse),
+  T(t_autostart),
   T(t_bt_protocol),
   T(t_bt_modes_and_estop),
   T(t_bt_link_loss),
