@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <math.h>
 
-static const size_t TELE_MAX_LINE = 320;          // longer lines are discarded (the robot never sends more than 300 bytes)
+static const size_t TELE_MAX_LINE = 400;          // longer lines are discarded (the robot sends at most 383 bytes)
 
 // ---- tiny JSON accessors (flat objects only) ----
 static inline const char* jFind(const char* js, const char* key) {

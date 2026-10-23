@@ -1,6 +1,6 @@
 # Telemetry (Mega → Windows laptop over the HC-05)
 
-Newline-delimited JSON, protocol version `"v":1`. One object per line, ≤ 299 bytes, ASCII. Every frame has `v`, `k` (kind), `n` (sequence, wraps at 65535) and `ms` (Mega uptime in ms).
+Newline-delimited JSON, protocol version `"v":1`. One object per line, ≤ 383 bytes, ASCII. Every frame has `v`, `k` (kind), `n` (sequence, wraps at 65535) and `ms` (Mega uptime in ms).
 A frame is built only when the HC-05 transmit queue is empty and the whole frame fits; a frame is never sent truncated, never queued behind another, and a stuck or absent link never blocks the control loop.
 **Values the hardware cannot provide are `null` or absent. There is no distance, no motor current, no wheel speed and no absolute heading anywhere in the protocol.** Motor figures are the PWM
 the firmware *commanded* (`motor_command_pwm`), not measured rotation.

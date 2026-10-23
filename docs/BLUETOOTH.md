@@ -76,7 +76,7 @@ always power up idle: `:set autostart 0`, `:save`. The start is cancelled by `X`
 ## Telemetry throughput (important at 9600 baud)
 
 The HC-05 data rate is set by its own UART setting (factory 9600 baud; `AT+UART=` in AT mode) and must equal `btbaud100` on the Mega (`96` = 9600). The radio link itself is independent of this.
-Frames are 200–300 bytes. Telemetry is limited to ~60 % of the UART capacity and a frame is only started when the transmit queue is empty:
+Frames are about 200–380 bytes. Telemetry is limited to ~60 % of the UART capacity and a frame is only started when the transmit queue is empty:
 
 | HC-05 baud | `btbaud100` | frames per second (typical) |
 |---|---|---|

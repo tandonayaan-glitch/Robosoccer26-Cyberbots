@@ -29,7 +29,7 @@ static PGM_P btModeName() {
 
 // Transmit queue for the HC-05. Serial1's own buffer is only 64 bytes, so replies and telemetry frames wait here and are fed to the UART as it drains.
 // Nothing ever waits for the UART: a put that does not fit completely is refused (and counted), a half frame is never sent.
-#define BT_TXQ_SIZE 320
+#define BT_TXQ_SIZE 400
 static char g_btTx[BT_TXQ_SIZE];
 static uint16_t g_btTxHead = 0, g_btTxTail = 0;
 static inline uint16_t btTxUsed() { return (uint16_t)((g_btTxHead + BT_TXQ_SIZE - g_btTxTail) % BT_TXQ_SIZE); }
