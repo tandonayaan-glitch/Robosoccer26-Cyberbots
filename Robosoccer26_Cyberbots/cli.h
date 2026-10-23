@@ -33,7 +33,7 @@ static void printHelp() {
   say("INFO", "--- status / diagnosis (use these when something may be missing) ---");
   say("INFO", ":status = one-screen summary | :raw = raw A0..A7, module pins, IMU | :pins = pin map | :ver | :diag on|off = CSV rows over Serial");
   say("INFO", "--- control ---");
-  say("INFO", ":auto on|off (= a / s) | :stop | :estop (latched) | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover (also clears the e-stop latch)");
+  say("INFO", ":auto on|off (= a / s) | :stop | :estop (latched) | :manual f|b|l|r|q|e | :goal [set|clear] | :zero | :gcal | :recover (also clears the e-stop latch) | calibrate (stop, recalibrate gyro + receivers, then send a)");
   say("INFO", ":bt = Bluetooth remote status (commands M U W S A D Z C Q X R P ?; docs/BLUETOOTH.md)");
   say("INFO", ":mtest <wheel> | :dtest (whole drivetrain) then :confirm (wheels LIFTED!) | :mok <wheel> | :mrev <wheel>");
   say("INFO", ":startup = start-up stage | :yawcheck = turn the robot clockwise BY HAND to check the yaw sign | :hdgtest then :confirm = heading test ON THE FLOOR (about 7 s)");
@@ -61,6 +61,8 @@ static void cmdCalibrate(uint32_t now) {
   (void)now;
   const Config& c = g_cfg;
   if (g_estop) { say("SAFETY", "calibrate refused: emergency stop is latched"); return; }
+  if (!startupFinished()) { say("SAFETY", "calibrate refused: start-up is still running (wait for READY)"); return; }
+  g_autoStartPending = false;                      // calibrating cancels a pending automatic start; send 'a' afterwards
   if (g_autoEnabled || g_defendEnabled || g_navState == NAV_MANUAL || g_navState == NAV_TEST || !motorsAllZero()) { say("SAFETY", "calibrate refused: stop first ('stop') and wait for the wheels to rest"); return; }
   if (g_ball.valid) { say("WARN", "calibrate refused: a ball signal is present (confidence %u). Remove or switch off the ball and any other infrared source, then repeat.", (unsigned)g_ball.confidence); return; }
   if (ringCountEnabled(c) == 0) { say("WARN", "calibrate refused: no receiver channel is enabled"); return; }

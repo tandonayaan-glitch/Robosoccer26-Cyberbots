@@ -24,7 +24,7 @@ static const char START_NAME[ST_COUNT][17] PROGMEM = {"MOTOR INIT", "IMU CHECK",
 struct StartupInfo {
   StartState st;
   uint32_t since, begunMs, readyMs;
-  bool entered, imuOk, irQuiet, autoCal, armed, waitingIr;
+  bool entered, imuOk, irQuiet, autoCal, armed, waitingIr, waitImu;
   uint16_t maxSwing[RING_CH_MAX];
   char why[48];
 };
@@ -68,8 +68,9 @@ static void startMaskText(uint16_t m, char* out, size_t n) {
 
 static void startupArmAutostart(const Config& c, uint32_t now) {
   if (!c.autoStart) { say("START", "autostart is OFF (':set autostart 1' to enable). Send 'a' / 'attack' to start the attack, 'defend' to defend."); return; }
-  if (g_start.st != ST_READY || !g_start.imuOk || !g_start.irQuiet) {
-    say("START", "autostart NOT armed (%S%S%S). Manual keys and diagnostics work; 'a' starts the attack on request.", g_start.st != ST_READY ? PSTR("degraded") : PSTR(""), !g_start.imuOk ? PSTR(" IMU not usable") : PSTR(""), !g_start.irQuiet ? PSTR(" IR signal present") : PSTR(""));
+  if (!g_start.imuOk) { g_start.waitImu = true; say("START", "autostart waits for the MPU6050 to start (not ready yet). 'a' starts the attack on request."); return; }
+  if (!startupMotionAllowed() || g_cond == COND_SAFE_STOP || !c.ringCalDone) {
+    say("START", "autostart NOT armed (%S%S). Manual keys and diagnostics work; 'a' starts the attack on request.", g_cond == COND_SAFE_STOP ? PSTR(" safety stop, see 'h'") : PSTR(""), !c.ringCalDone ? PSTR(" receivers not calibrated") : PSTR(""));
     return;
   }
   g_autoStartPending = true; g_autoStartAtMs = now + c.autoStartDelayMs;
@@ -117,8 +118,10 @@ static void startupService(Config& c, uint32_t now) {
       char t[24];
       if (ringCountEnabled(c) == 0) { s.irQuiet = true; say("START", "IR CHECK: no receiver is enabled (':ring on <n>')."); }
       else if (act) {
-        s.irQuiet = false; startMaskText(act, t, sizeof(t));
-        say("START", "IR CHECK: receivers %s see an infrared signal while the robot is still (ball, sunlight, lights, another robot). Noise floor NOT measured; autostart waits up to %u ms for it to clear.", t, (unsigned)c.irWaitMs);
+        startMaskText(act, t, sizeof(t));
+        s.irQuiet = true;
+        if (!c.ringCalDone && c.autoCalNoise) { for (uint8_t i = 0; i < RING_CH_MAX; i++) if (ringEnabled(c, i)) c.ringNoise[i] = 0; c.ringCalDone = 1; s.autoCal = true; }
+        say("START", "IR CHECK: receivers %s see an IR signal while still (ball, sunlight, lamps, another robot). %S", t, PSTR("Noise floor not measured: minimum threshold used. Seeking starts anyway."));
       } else {
         s.irQuiet = true;
         if (!c.ringCalDone && c.autoCalNoise) {
@@ -146,15 +149,20 @@ static void startupService(Config& c, uint32_t now) {
         say("START", "READY. Commands: '?' lists them. Motor tests need ':mtest <wheel>' / ':dtest' then ':confirm' with the wheels lifted.");
         startGo(ST_READY, now);
       }
-      s.waitingIr = !s.irQuiet;
-      if (!s.waitingIr) startupArmAutostart(c, now);
-      else say("START", "autostart waits for the infrared signal to clear (up to %u ms); everything else is available now.", (unsigned)c.irWaitMs);
+      s.waitingIr = false;
+      startupArmAutostart(c, now);
       g_bootPhase = false;
       break;
     }
 
     case ST_READY:
     case ST_READY_DEGRADED:
+      if (s.waitImu && imuHeadingUsable(c, now)) {          // the MPU6050 came up after the start-up: now the automatic start may begin
+        s.waitImu = false; s.imuOk = true;
+        if (s.st == ST_READY_DEGRADED && g_cond == COND_NORMAL && c.ringCalDone && s.irQuiet) s.st = ST_READY;
+        say("START", "MPU6050 is now working.");
+        startupArmAutostart(c, now);
+      }
       if (s.waitingIr) {                                         // an IR signal was present at the start: give the automatic start a bounded chance
         static uint32_t lastQuietMs = 0;
         if (g_ball.seenMask != 0) lastQuietMs = 0; else if (!lastQuietMs) lastQuietMs = now ? now : 1u;

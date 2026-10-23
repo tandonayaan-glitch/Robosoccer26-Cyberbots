@@ -39,7 +39,7 @@ static uint16_t g_mockRingAmp[16], g_mockRingBase[16];
 static uint16_t g_mockRingNoise = 0;                 // +- counts of deterministic jitter added to every reading
 static bool g_mockModDetect[2];
 static bool g_mockModActiveHigh[2];
-static bool g_mockUnderDetect = false, g_mockUnderActiveHigh = false;   // (legacy) separate underside vote: shares D34 with module 0 now, unused by the mock pin
+static bool g_mockUnderDetect = false;   // (legacy) separate underside vote: shares D34 with module 0 now, unused by the mock pin
 static uint32_t g_mockAdcReads = 0;
 static uint32_t g_mockRng = 12345;
 

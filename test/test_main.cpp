@@ -2730,7 +2730,7 @@ static void t_startup_imu_absent_or_invalid() {
   runStartup(9000);
   runMeasured(400);
   CHECK(g_start.st == ST_READY_DEGRADED && !g_start.imuOk);
-  CHECK(outHas("IMU CHECK: MPU6050 NOT FOUND") && outHas("READY (degraded") && outHas("autostart NOT armed"));
+  CHECK(outHas("IMU CHECK: MPU6050 NOT FOUND") && outHas("READY (degraded") && outHas("autostart waits for the MPU6050"));
   CHECK(!g_autoStartPending && !g_autoEnabled && allWheelsStopped());
   send("f\n"); runMeasured(200);
   CHECK(!allWheelsStopped());                                                       // explicit manual control still works
@@ -2760,31 +2760,22 @@ static void t_startup_imu_absent_or_invalid() {
 }
 
 static void t_startup_ir_interference_and_disconnect() {
-  // (a) an infrared signal (ball or external source) is present while the robot is still: no noise-floor from it, autostart waits, then gives up
+  // (a) an infrared signal (ball or external source) is present at power-on: the noise floor cannot be measured, so the minimum threshold is used and the robot
+  //     starts seeking anyway once the MPU6050 is ready (the ball's own emitter is such a signal)
   g_hostStartupAsync = true; g_hostAutostart = true;
   ballGone(); setup(); ballFar();
   runStartup(9000);
   runMeasured(400);
-  CHECK(g_start.st == ST_READY_DEGRADED && !g_start.irQuiet && !g_start.autoCal && g_cfg.ringCalDone == 0);
-  CHECK(outHas("see an infrared signal while the robot is still") && outHas("waits up to"));
-  CHECK(!g_autoStartPending && !g_autoEnabled && allWheelsStopped());
-  send("a\n"); runMeasured(100);
-  CHECK(!g_autoEnabled && outHas("noise floor not calibrated"));                    // refused with the reason, not silently
-  send("f\n"); runMeasured(200);
-  CHECK(!allWheelsStopped());                                                       // manual driving and motor tests do not depend on the receivers
+  CHECK(g_start.st == ST_READY && g_start.imuOk && g_cfg.ringCalDone == 1 && g_start.autoCal);
+  CHECK(outHas("see an IR signal while still") && outHas("Seeking starts anyway"));
+  CHECK(g_autoStartPending || g_autoEnabled);
+  runMeasured(g_cfg.autoStartDelayMs + 800);
+  CHECK(g_autoEnabled);
   send("s\n"); runMeasured(300);
+  CHECK(allWheelsStopped() && !g_autoEnabled);
   send(":mtest FL\n"); runMeasured(50);
-  CHECK(g_mtest.state == 1);
+  CHECK(g_mtest.state == 1);                                                        // motor tests do not depend on the receivers
   send("s\n"); runMeasured(100);
-  runMeasured(g_cfg.irWaitMs + 1000);
-  CHECK(outHas("autostart given up"));
-  // (b) the signal clears in time (the ball is taken away): the noise floor is measured and the automatic start is armed
-  ballGone(); setup(); ballFar();
-  runStartup(9000);
-  runMeasured(400);
-  CHECK(!g_start.irQuiet);
-  ballGone(); runMeasured(3000);
-  CHECK(g_start.irQuiet && g_start.autoCal && g_cfg.ringCalDone == 1 && (g_autoStartPending || g_autoEnabled));
   // (c) receivers wired wrong / disconnected so that every input sits at the rail: the start-up still finishes, motors never move by themselves
   asyncBoot();
   for (int i = 0; i < 8; i++) g_mockRingBase[i] = 1023;
@@ -2797,14 +2788,62 @@ static void t_startup_ir_interference_and_disconnect() {
   CHECK(!allWheelsStopped());                                                       // a sensing fault never blocks the operator's manual control or motor tests
   send("a\n"); runMeasured(100);
   CHECK(!g_autoEnabled);                                                            // but the attack is refused
-  // (d) noisy receivers (random swing)
+  // (d) noisy receivers (random swing): the start-up still finishes and the robot never moves without a command or a working autostart
   asyncBoot();
   for (int i = 0; i < 8; i++) { g_mockRingBase[i] = 300; g_mockRingAmp[i] = 0; }
   g_mockRingNoise = 40;
   runStartup(12000);
-  runMeasured(400);
-  CHECK(startupFinished() && !g_start.irQuiet && !g_autoEnabled);
+  CHECK(startupFinished());
   g_mockRingNoise = 0;
+}
+
+static void t_calibrate_command_and_autoinfo() {
+  bootCal(); simRun(300);
+  // 'a' prints the full sensor report, then one compact line per autoinfo period
+  ballFar(); Serial.out.clear();
+  send("a\n"); simRun(1500);
+  CHECK(g_autoEnabled && outHas("receivers (A0..A5)") && outHas("obstacle modules") && outHas("IMU ok"));
+  size_t n0 = 0, pos = 0; while ((pos = Serial.out.find("[AUTO]", pos)) != std::string::npos) { n0++; pos++; }
+  CHECK(n0 >= 1 && outHas("receivers seeing:") && outHas("D34") );
+  Serial.out.clear(); simRun(3500);
+  size_t n1 = 0; pos = 0; while ((pos = Serial.out.find("[AUTO]", pos)) != std::string::npos) { n1++; pos++; }
+  CHECK(n1 >= 3 && n1 <= 4);
+  send(":set autoinfo 0\n"); simRun(100); Serial.out.clear(); simRun(2500);
+  CHECK(!outHas("[AUTO]"));
+  send(":set autoinfo 1000\n"); simRun(100);
+  // 'calibrate': refused while running; once stopped it recalibrates the gyro and the receivers, cancels a pending automatic start, and says to send 'a'
+  send("s\n"); simRun(500);
+  Serial.out.clear();
+  ballGone(); simRun(1500); g_cfg.ringCalDone = 0; g_autoStartPending = true; g_autoStartAtMs = millis() + 60000u;
+  send("calibrate\n"); simRun(300);
+  CHECK(!g_autoStartPending && g_ringCalActive && outHas("gyro bias calibration started"));
+  simRun(3000);
+  CHECK(g_cfg.ringCalDone == 1 && g_imu.calibrated && outHas("Calibration finished") && outHas("send 'a'"));
+  simRun(g_cfg.autoStartDelayMs + 1500);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  ballFar(); send("a\n"); simRun(800);
+  CHECK(g_autoEnabled && !allWheelsStopped());
+  // refused with the ball in view (its signal would become the noise floor) and while autonomous
+  Serial.out.clear(); send("calibrate\n"); simRun(100);
+  CHECK(outHas("calibrate refused") && !g_ringCalActive);
+  send("s\n"); simRun(500);
+  Serial.out.clear(); send("calibrate\n"); simRun(100);
+  CHECK(outHas("ball signal is present"));
+  send("!"); simRun(20); Serial.out.clear(); send("calibrate\n"); simRun(100);
+  CHECK(outHas("emergency stop is latched"));
+}
+
+static void t_autostart_waits_for_mpu() {
+  // no MPU6050 at power-on: the automatic start waits for it; when it comes up (reconnected / retried) the start follows, with no operator action
+  g_mpu.present = false;
+  asyncBoot();
+  runStartup(12000); runMeasured(400);
+  CHECK(g_start.st == ST_READY_DEGRADED && g_start.waitImu && !g_autoStartPending && !g_autoEnabled);
+  runMeasured(5000);
+  CHECK(!g_autoEnabled && allWheelsStopped());
+  g_mpu.present = true; ballFar();
+  runMeasured(15000);
+  CHECK(g_autoEnabled && !g_start.waitImu && outHas("MPU6050 is now working"));
 }
 
 static void t_fresh_robot_moves() {
@@ -3219,6 +3258,8 @@ static const TestCase TESTS[] = {
   T(t_startup_imu_absent_or_invalid),
   T(t_startup_ir_interference_and_disconnect),
   T(t_fresh_robot_moves),
+  T(t_calibrate_command_and_autoinfo),
+  T(t_autostart_waits_for_mpu),
   T(t_serial_line_endings_and_framing),
   T(t_serial_malformed_input),
   T(t_serial_emergency_stop_priority),

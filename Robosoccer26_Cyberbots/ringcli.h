@@ -19,7 +19,7 @@ static void ringCalPoll(Config& c, uint32_t now) {
     if (g_ringCalMax[i] >= c.ringSeen) say("WARN", "ring cal: A%u swing %u with the ball off reaches the 'seen' level %u: another IR source or a noisy channel", (unsigned)i, (unsigned)g_ringCalMax[i], (unsigned)c.ringSeen);
   }
   c.ringCalDone = 1;
-  say("INFO", "ring noise floor stored for %u channels. Threshold = max(ringseen %u, noise x %.1f). ':save' keeps it.", (unsigned)n, (unsigned)c.ringSeen, (double)c.ringNoiseX10 / 10.0);
+  say("INFO", "ring noise floor stored for %u channels. Threshold = max(ringseen %u, noise x %.1f). ':save' keeps it. Calibration finished (gyro %S): send 'a' to start the autonomous mode.", (unsigned)n, (unsigned)c.ringSeen, (double)c.ringNoiseX10 / 10.0, g_imu.calibrated ? PSTR("done") : PSTR("not done"));
 }
 
 // ':ring' | ':ring on|off <ch>' | ':ring bearing <ch> <deg>' | ':ring cal noise' | ':ring cal near' | ':ring reset'

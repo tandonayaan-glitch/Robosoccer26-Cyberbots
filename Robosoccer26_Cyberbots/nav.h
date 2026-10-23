@@ -15,6 +15,7 @@ static uint32_t g_autoStartAtMs = 0;
 static bool g_defendEnabled = false;          // defend mode is active (defend.h); exclusive with autonomous attack and manual driving
 static void defendTick(const Config& c, uint32_t now);
 static bool startupGate(const char* what);
+static void autoDetailsReport();                              // report.h: full sensor report, printed when the autonomous mode starts
 static void hdgTestTick(const Config& c, uint32_t now);            // startup.h: false (with the reason printed) until the start-up reached READY
 static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
 static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
@@ -167,6 +168,7 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
   if (c.ringNear == 375) say("WARN", "ringnear is the untouched default: strength (and so the slow-down) is a guess until ':ring cal near' is done with the ball in the shooting position");
   if (!imuHeadingUsable(c, now)) say("WARN", "heading hold unavailable: the robot may rotate while it strafes; shots need the gyro");
   if (g_cond == COND_DEGRADED) say("WARN", "running DEGRADED: reduced speed (x%.2f)", navSensorScale(c));
+  autoDetailsReport();
   return true;
 }
 

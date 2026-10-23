@@ -108,6 +108,9 @@ void loop() {
       if (!navEnableAuto(g_cfg, now)) say("BOOT", "autostart REFUSED by the safety checks above: motors stay off");
     }
   }
+  { static uint32_t lastAutoInfoMs = 0;
+    if (!g_autoEnabled) lastAutoInfoMs = now;
+    else if (g_cfg.autoInfoMs && elapsedMs(now, lastAutoInfoMs) >= g_cfg.autoInfoMs && outUsed() < OUTQ_SIZE / 4) { lastAutoInfoMs = now; printAutoLine(g_cfg, now); } }
   btPoll(g_cfg, now);                              // remote commands first: the emergency stop has the highest priority
   cliPoll(now);
   ringService(g_cfg, now);

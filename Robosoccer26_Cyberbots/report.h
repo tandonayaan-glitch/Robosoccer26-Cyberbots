@@ -231,6 +231,15 @@ static void reportRun(uint8_t kind, const Config& c, uint32_t now) {
 }
 static void reportRequest(uint8_t kind) { g_repKind = kind; g_repSkip = 0; }
 static void startupHealthReport() { reportRequest(REP_HEALTH); }
+static void autoDetailsReport() { reportRequest(REP_SENSORS); }
+
+// One compact line while the autonomous mode runs: what the sensors see and what the robot is doing.
+static void printAutoLine(const Config& c, uint32_t now) {
+  char seen[24]; startMaskText(g_ball.seenMask, seen, sizeof(seen));
+  say("AUTO", "%S | ball %S brg %.0f conf %u | receivers seeing: %s | D34 %S ready %S | IMU %S yaw %.0f err %.0f | cmd vx %.2f vy %.2f w %.2f", (PGM_P)NAV_NAME[g_navState], g_ball.valid ? PSTR("YES") : PSTR("no"), (double)(g_ball.bearingKnown ? g_ball.bearing : 0.0f),
+      (unsigned)g_ball.confidence, seen[0] ? seen : "none", !modEnabled(c, 0) ? PSTR("off") : (g_mod[0].active ? PSTR("DETECT") : PSTR("clear")), g_ball.ready ? PSTR("yes") : PSTR("no"),
+      imuHeadingUsable(c, now) ? PSTR("ok") : PSTR("NO"), (double)g_imu.yaw, (double)(isnan(g_hdgErr) ? 0.0f : g_hdgErr), (double)g_reqVx, (double)g_reqVy, (double)g_reqW);
+}
 static void reportService(const Config& c, uint32_t now) {
   if (g_repKind == REP_NONE || outUsed() > OUTQ_SIZE / 8) return;     // wait until the queue has drained
   g_repActive = true; g_repLine = 0; g_repOverflow = false;

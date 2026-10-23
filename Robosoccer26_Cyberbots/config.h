@@ -11,7 +11,7 @@
 #endif
 // Layout rule: a new setting is ALWAYS appended directly before `crc` (never inserted in the middle, never reordered). Then a config saved by an older version is a byte-wise
 // prefix of the new struct and is migrated on load (storage.h) instead of being thrown away - a firmware update must not silently wipe the saved calibration.
-#define CFG_VERSION 21
+#define CFG_VERSION 22
 #define CFG_MIN_COMPAT 20              // oldest saved layout that can be migrated
 
 struct Config {
@@ -151,6 +151,7 @@ struct Config {
   uint16_t irWaitMs;             // if an IR signal is present at start-up: wait this long for it to clear before the automatic start is given up
   uint8_t autoCalNoise;          // 1 = measure the receivers' noise floor by itself at start-up when they are quiet (RAM only; ':save' keeps it)
   uint8_t hdgManual;             // 1 = hold the gyro heading during manual straight / strafe commands (f b l r)
+  uint16_t autoInfoMs;           // while autonomous: one compact sensor/ball/IMU line this often (0 = off); a full sensor report is printed when it starts
 
   uint32_t crc;                  // CRC32 of every byte before this field
 };
@@ -212,6 +213,7 @@ static const ParamDef PARAMS[] PROGMEM = {
   PD("irwait", PT_U16, irWaitMs, 0, 60000),
   PD("autocal", PT_U8, autoCalNoise, 0, 1),
   PD("hdgmanual", PT_U8, hdgManual, 0, 1),
+  PD("autoinfo", PT_U16, autoInfoMs, 0, 60000),
   PD("teleenable", PT_U8, teleEnable, 0, 1),
   PD("telehz", PT_U8, teleHz, 1, 20),
   PD("teledetail", PT_U8, teleDetailEvery, 1, 20),
@@ -343,7 +345,7 @@ static void cfgDefaults(Config& c) {
   for (int i = 0; i < WHEEL_COUNT; i++) c.wheelScale[i] = 100;
   c.btEnable = 1; c.btLeaseMs = 400; c.btLinkMs = 3000;
   c.autoStart = 1; c.autoStartDelayMs = 1500;
-  c.startSettleMs = 2000; c.startCalMs = 1000; c.irWaitMs = 8000; c.autoCalNoise = 1; c.hdgManual = 1;
+  c.startSettleMs = 2000; c.startCalMs = 1000; c.irWaitMs = 8000; c.autoCalNoise = 1; c.hdgManual = 1; c.autoInfoMs = 1000;
   c.teleEnable = 1; c.teleHz = 5; c.teleDetailEvery = 4; c.btBaud100 = 96;
   c.imuMaxBiasDps = 10.0f; c.driftSec = 20; c.maxMoveSec = 45; c.bearingsSet = 0;
   c.defSpeed = 0.4f; c.defAlignSpeed = 0.2f; c.defTurnSpeed = 0.3f; c.defAlignDeg = 12.0f; c.defFrontArcDeg = 100.0f; c.defBlockStrength = 0.7f; c.defSlope = 0.15f;
