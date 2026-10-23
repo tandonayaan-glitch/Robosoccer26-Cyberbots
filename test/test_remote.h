@@ -4,8 +4,8 @@
 #pragma once
 #include "../Robosoccer26_Cyberbots/sha256_hmac.h"
 
-// ============================================================ ESP32 <-> Mega handshake ============================================================
-typedef void (*AuthRandFn)(uint8_t* out, size_t n);       // ESP32: esp_fill_random(); tests: a deterministic generator
+// ============================================================ remote <-> Mega handshake ============================================================
+typedef void (*AuthRandFn)(uint8_t* out, size_t n);       // real client: os.urandom; tests: a deterministic generator
 
 enum ClState : uint8_t { CL_IDLE, CL_WAIT_CH, CL_SEND_RESP, CL_WAIT_OK, CL_AUTHED };
 struct ClientAuth {
