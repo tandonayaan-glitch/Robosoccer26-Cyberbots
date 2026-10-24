@@ -4,9 +4,10 @@ Updated 24 October 2026. This tracks work **not yet verified on the physical rob
 
 ## 1. Firmware and Bluetooth (wheels lifted, motor battery disconnected)
 
-- [ ] Build the committed telemetry-buffer change, run the host tests, and upload the new firmware to the Mega. The change has been committed but **has not been built, uploaded, or retested**.
-- [ ] Reconnect through outgoing COM6 at **9600 baud** and confirm `AUTHENTICATED` after the upload. The HC-05 UART was verified at 9600; changing the Mega setting alone to 115200 broke communication. Confirm the real key remains provisioned.
-- [ ] Verify `imu` now receives complete `i` JSON frames and that `:tele now i` does not increment `dropped`. Check `ir`, `motors`, and `raw` too; record frame loss and actual rate at 9600 baud.
+- [x] Build and upload the enlarged-frame firmware to the Mega on COM3; verify flash. All 87 firmware simulation cases and 34 Python tests passed.
+- [x] Reconnect through outgoing **wireless COM6** at **9600 baud** and confirm `AUTHENTICATED` after the upload. The HC-05 UART was verified at 9600; changing the Mega setting alone to 115200 broke communication. The real key remains provisioned.
+- [x] Verify the full IMU `i` JSON frame reaches the laptop client: a real 303-byte frame parsed with `imu=1`, as did core, receiver and diagnostic frames. An ordinary 13-second observation received 23 frames with 0 bad and 0 lost.
+- [ ] Resolve frame loss when multiple explicit `tele now` requests are sent together at 9600 baud: the burst check lost 3 sequence numbers out of 17 attempted. Retest view switching under typical client use. A higher UART rate requires changing the HC-05 itself first.
 - [ ] With the client actively connected, compare the HC-05 LED pattern with its rapid-blink idle pattern. Close/reopen the outgoing COM port and confirm the pattern and authentication change appropriately. A paired device may still blink rapidly when its serial port is closed.
 - [ ] Test actual link loss and recovery: disconnect the client or remove HC-05 power/range, confirm the laptop reports loss and an active **manual** command stops within the configured timeout; reconnect and confirm automatic reauthentication. Keep motor power disconnected for the initial session test.
 - [ ] If higher telemetry speed is wanted, identify this HC-05 breakout's AT-command procedure, change its own UART setting, then set matching `btbaud100` on the Mega and retest. Do not assume the module is already at 115200.
@@ -20,6 +21,7 @@ Updated 24 October 2026. This tracks work **not yet verified on the physical rob
 ## 3. Sensors (motor battery disconnected first)
 
 - [ ] Calibrate the A0–A5 ball-receiver noise floor with the ball off. Check each phototransistor's pinout and junction voltage, then present the ball to each receiver at 5, 10, 20, and 40 cm. Record range, raw swing, blind spots, and actual mounting bearing; enter bearing values and save them. Check response in competition lighting and with all transmitters/modules powered.
+- [ ] Repair the loose IR wire identified by the user when safely back at a workbench. The receiver inputs showed high and inconsistent levels; `RING_NONE` briefly caused SAFE_STOP. Check ring supply, common ground, individual 10 kΩ load resistors, phototransistor polarity, and A0–A5 leads. Repeat `:raw` and `sensors` until quiet baseline and real ball response are confirmed. Do not drive before this is fixed and verified.
 - [ ] Test obstacle module D34 with an object at relevant distances and confirm polarity. D35 is currently disabled; fit/configure/test it only if it is part of the robot.
 - [ ] Investigate underside sensor D40, which read LOW and reported BALL but was marked `IGNORED (suspect: stuck)`. Observe it with and without the ball, confirm wiring and active level, then verify it becomes usable.
 - [ ] Calibrate the MPU6050 while still; record stationary drift, check roll/pitch by tilting, and check yaw sign with a hand-turned 90-degree rotation. The observed WHO_AM_I value `0x70` may indicate a compatible clone; watch for I2C faults and recovery.

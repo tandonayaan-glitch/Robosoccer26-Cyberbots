@@ -2221,6 +2221,23 @@ static void t_telemetry_frames() {
   CHECK(allWheelsStopped());                                               // emergency stop is independent of the Bluetooth link
 }
 
+static void t_telemetry_imu_large_values() {
+  bootCal();
+  g_imu.present = g_imu.ok = g_imu.calibrated = g_imu.tiltValid = g_imu.yawValid = true;
+  g_imu.calState = 2;
+  g_imu.ax = -3.999f; g_imu.ay = 3.999f; g_imu.az = -3.999f;
+  g_imu.gx = -499.99f; g_imu.gy = 499.99f; g_imu.gz = -499.99f;
+  g_imu.roll = -177.3f; g_imu.pitch = -179.9f; g_imu.yaw = 179.9f;
+  g_imu.bias = -12.345f; g_imu.driftState = 2;
+  g_imu.driftRateDegMin = -999.99f; g_imu.driftMeanDps = -12.345f;
+  g_tele.seq = 65535;
+  teleBuildImu(g_cfg, 4294967295u);
+  CHECK(g_teleN > 300 && g_teleN < TELE_BUF - 1);
+  TeleSnapshot sn; teleInit(&sn);
+  CHECK(teleParseLine(&sn, g_teleBuf, 1000) == 'i');
+  CHECK(sn.imuOk && sn.bad == 0);
+}
+
 static void t_gyro_diagnostics() {
   // (a) MPU6050 missing at startup
   g_mpu.present = false; bootCal(); g_cfg.teleDetailEvery = 1; simRun(600);
@@ -2744,6 +2761,7 @@ static const TestCase TESTS[] = {
   T(t_estop_every_mode),
   T(t_cmd_parser_limits),
   T(t_telemetry_frames),
+  T(t_telemetry_imu_large_values),
   T(t_gyro_diagnostics),
   T(t_motion_diagnostics),
   T(t_attack_side_ball),
