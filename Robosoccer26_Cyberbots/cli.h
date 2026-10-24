@@ -23,9 +23,9 @@ static uint32_t g_wordLastMs = 0;
 
 static void printHelp() {
   say("INFO", "--- commands (115200 baud, line ending: Newline or Both NL & CR). A single key sent alone acts at once; a WORD ends with Enter; ':' commands take arguments ---");
-  say("INFO", "WORDS (same on USB and Bluetooth): defend | attack | manual | stop | status | sensors | gyro [drift [s]|cal|stop] | calibrate | motors | tele | help   ('!' or X = emergency stop)");
+  say("INFO", "WORDS: ir | mpu | all | off | lock | unlock | our | theres | defend | attack | manual | stop | status | sensors | gyro | motors | help");
   say("INFO", "f b l r : manual forward/back/strafe-left/strafe-right   q e : rotate CCW/CW   (each key moves ~%u ms, repeat to continue)", (unsigned)g_cfg.manualHoldMs);
-  say("INFO", "s : stop + disable autonomy    ! : emergency stop    a : ENABLE autonomous ball seeking (refused if unsafe)");
+  say("INFO", "s : stop   ! : emergency stop   off : persistent software OFF   a : wake and start autonomous if safe   lock/unlock : manual controls");
   say("INFO", "i : receivers + modules   I : live receiver view   m : IMU   d : nav/ball/PWM   h : health report   g : diagnostics   t : test mode help   ? : this help");
   say("INFO", "--- records (events kept in the EEPROM) ---");
   say("INFO", ":log = show all records | :log clear | :log live on|off (print each new record at once) | :log note <n> (add a marker record)");
@@ -40,6 +40,7 @@ static void printHelp() {
   say("INFO", ":set <name> <v> | :get [name] | :save | :load | :defaults | :rev <FL|FR|BL|BR> <0|1> | :roller <X|O>");
   say("INFO", ":ring [on|off <0-7> | bearing <0-7> <deg> | cal noise | cal near | reset] | :mod [on|off <0|1> | level <0|1> low|high]");
   say("INFO", ":authkey <64 hex> | :authkey clear | :authkey = Bluetooth key (USB only) | :auth on|off = enforcement (off lasts until reset)");
+  say("INFO", ":frontonly on|off (USB only, saved): use after setting the real front receiver bearings; our/theres selects clearance vs aligned shots");
   say("INFO", ":tele [on|off|usb on|usb off|now] = telemetry to the laptop | :gyro drift [s] = stationary drift test | :motors = commanded motor state | :defend / :attack / :manual = modes (docs/DEFENDING.md)");
   say("INFO", "Safety: first motor tests with wheels off the ground and the motor battery switch within reach.");
 }
@@ -144,7 +145,26 @@ static void cliExecLine(char* line, uint32_t now) {
   if (n == 0) return;
   const char* cmd = t[0];
   Config& c = g_cfg;
+  if (n != 1 && (STREQ(cmd, "ir") || STREQ(cmd, "mpu") || STREQ(cmd, "all") || STREQ(cmd, "off") || STREQ(cmd, "lock") || STREQ(cmd, "unlock") || STREQ(cmd, "our") || STREQ(cmd, "theres"))) {
+    say("WARN", "unknown word command '%s' (':help')", cmd);
+    return;
+  }
   if (STREQ(cmd, "help")) reportRequest(REP_HELP);
+  else if (STREQ(cmd, "ir")) reportRequest(REP_SENSORS);
+  else if (STREQ(cmd, "mpu")) reportRequest(REP_GYRO);
+  else if (STREQ(cmd, "all")) reportRequest(REP_ALL);
+  else if (STREQ(cmd, "off")) navSoftOff();
+  else if (STREQ(cmd, "lock")) navSetManualLock(true);
+  else if (STREQ(cmd, "unlock")) navSetManualLock(false);
+  else if (STREQ(cmd, "our")) navSetFieldHalf(true);
+  else if (STREQ(cmd, "theres")) navSetFieldHalf(false);
+  else if (STREQ(cmd, "frontonly")) {
+    if (t[1] && STREQ(t[1], "off")) navSetFrontOnly(false);
+    else if (t[1] && STREQ(t[1], "on")) {
+      if (!c.bearingsSet) say("SAFETY", "front-only layout REFUSED: enter real A0-A5 bearings first (':ring bearing <n> <deg>')");
+      else navSetFrontOnly(true);
+    } else say("INFO", "front-only layout %S; use :frontonly on|off", g_frontOnly ? PSTR("ON") : PSTR("OFF"));
+  }
   else if (STREQ(cmd, "defend")) { defendEnable(c, now); }
   else if (STREQ(cmd, "attack")) { if (navEnableAuto(c, now)) say("NAV", "ATTACK mode (autonomous ball seeking) ENABLED. 'stop' ends it."); }
   else if (STREQ(cmd, "idle")) { navStop(PSTR("operator: idle")); g_remoteManual = false; say("SAFETY", "idle: stopped, no mode active"); }
@@ -250,7 +270,8 @@ static void cliExecLine(char* line, uint32_t now) {
     else printBt(c, now);
   }
   else if (STREQ(cmd, "manual") && !t[1]) {
-    if (!navEstopRefuses(PSTR("manual"))) { navStop(PSTR("operator: manual mode")); g_remoteManual = true; recAdd(REC_MODE, 1); say("NAV", "MANUAL mode: keys f b l r q e on USB, W S A D Z C on Bluetooth. 'stop' leaves it; 'attack' / 'defend' switch."); }
+    if (g_softOff || g_manualLocked) say("SAFETY", "manual REFUSED: robot OFF or manual controls LOCKED");
+    else if (!navEstopRefuses(PSTR("manual"))) { navStop(PSTR("operator: manual mode")); g_remoteManual = true; recAdd(REC_MODE, 1); say("NAV", "MANUAL mode: keys f b l r q e on USB, W S A D Z C on Bluetooth. 'stop' leaves it; 'attack' / 'defend' switch."); }
   }
   else if (STREQ(cmd, "manual")) {
     char k1 = t[1] ? t[1][0] : 0;

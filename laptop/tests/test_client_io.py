@@ -47,7 +47,7 @@ def make(auto=False):
 
 class CommandFiltering(unittest.TestCase):
     def test_allowed_and_refused(self):
-        ok = {"w": "W", "M": "M", "x": "X", "!": "X", "Defend": "defend", "gyro drift 30": "gyro drift 30", "tele now r": "tele now r", "calibrate": "calibrate", "R": "R", "?": "?"}
+        ok = {"w": "W", "M": "M", "x": "X", "!": "X", "Defend": "defend", "gyro drift 30": "gyro drift 30", "tele now r": "tele now r", "calibrate": "calibrate", "R": "R", "?": "?", "a": "a", "A": "A", "IR": "ir", "MPU": "mpu", "all": "all", "off": "off", "lock": "lock", "unlock": "unlock", "our": "our", "theres": "theres"}
         for text, want in ok.items():
             self.assertEqual(rp.normalize_command(text), (want, None), text)
         for bad in ("", "set maxauto 255", ":authkey " + TEST_KEY_HEX, "digitalwrite 22 1", "AUTH", "AUTH RESP x y", "gyro drift 30000", "tele now q", "w" * 30, "launch", "esp32connect pass"):
@@ -179,6 +179,8 @@ class AppAgainstFirmware(unittest.TestCase):
             e.advance(500)
             self.assertFalse(e.link.authed)
             app.handle("manual")
+            self.assertTrue(any("not authenticated" in o for o in out))
+            app.handle("off")
             self.assertTrue(any("not authenticated" in o for o in out))
             app.handle("connect")
             self.assertTrue(e.login(5000))

@@ -4,7 +4,7 @@
 Windows laptop ~~~ Bluetooth ~~~> HC-05 --wires--> Arduino Mega (robot)
 ```
 
-**Status:** written and tested in PC simulation only. It has not been tried on the real Mega, HC-05 or a Windows laptop yet. Do the safe test at the end before driving.
+**Status (24 October 2026):** the Mega, HC-05, and authenticated laptop client have exchanged commands and telemetry on the real robot with motor power disconnected. The PIN is `1010`. The loose IR wire, no ball, and untested motors still block a driving test; see [remains.md](remains.md).
 
 The HC-05 stays wired to the Mega exactly as before (Mega TX1 D18 → 1 kΩ/2 kΩ divider → HC-05 RXD, HC-05 TXD → Mega RX1 D19, common ground). Nothing on the robot changes.
 
@@ -17,8 +17,8 @@ Wheels lifted and motor battery disconnected for all of this.
    ```
    python -m pip install -r laptop\requirements.txt
    ```
-3. **Pair Windows with the HC-05:** Settings → Bluetooth & devices → Add device → Bluetooth → pick `HC-05` (or the name you gave it). Enter the PIN `2114` (the HC-05 must actually be set to it; the factory value is usually `1234`). Pairing only opens a Bluetooth link; it does **not** let anyone drive the robot.
-4. **Find the Bluetooth COM port:** Settings → Bluetooth & devices → Devices → More Bluetooth options → **COM Ports** tab → the entry whose direction is **Outgoing** for the HC-05 (for example `COM6`). Or run:
+3. **Pair Windows with the HC-05:** Settings → Bluetooth & devices → Add device → Bluetooth → pick `HC-05` (or the name you gave it). Enter PIN `1010` (set and read back on this module on 24 October 2026). Pairing opens the link; the Mega still requires the saved key before accepting control commands.
+4. **Find the Bluetooth COM port:** Settings → Bluetooth & devices → Devices → More Bluetooth options → **COM Ports** tab → the entry whose direction is **Outgoing** for the HC-05 (currently `COM5` on this laptop after re-pairing). Or run:
    ```
    python laptop\laptop_remote.py --list-ports
    ```
@@ -31,17 +31,22 @@ Wheels lifted and motor battery disconnected for all of this.
 ## Every day
 
 ```
-python laptop\laptop_remote.py --port COM6
+python laptop\laptop_remote.py --port COM5
 ```
 (use **your** Bluetooth port). At the `robot>` prompt, type `connect` and wait for **AUTHENTICATED**. Type `help` for everything.
 
 | Type | What it does |
 |---|---|
 | `defend` / `attack` / `manual` | robot modes |
-| `w s a d z c` | in manual mode: forward, back, turn left/right, strafe left/right (0.4 s each) |
+| `w s A d z c` | in manual mode: forward, back, turn left/right, strafe left/right (0.4 s each; capital `A` turns left) |
+| `off` / `a` | disable motor outputs persistently / wake and start autonomy if safety checks pass |
+| `lock` / `unlock` | block / allow manual movement; autonomous safety checks still apply |
+| `our` / `theres` | select our-half clearance or their-half aligned shot policy |
 | `drive` | hold-to-drive with the keyboard (SPACE stops, `q` leaves, `x` emergency stop) |
 | `stop` | stop the motors and leave the mode |
-| `ir` · `imu` · `motors` · `ball` · `safety` · `raw` | show only that part of the robot's sensor data |
+| `ir` / `mpu` / `all` | stream receiver / MPU / all telemetry to the authenticated client |
+| `imu` · `motors` · `ball` · `safety` · `raw` | change only the client's displayed view |
+| `view off` | stop printing views in the client |
 | `back` | return to the normal full view |
 | `link` | connection and session state |
 | **`x`** | **EMERGENCY STOP** (works even when not logged in; then type `r` after login to clear it) |
@@ -53,7 +58,7 @@ If the program is closed unexpectedly (Ctrl+C, window closed) it asks the robot 
 
 1. Install Python and the packages (step 2), pair the HC-05 (steps 3–4).
 2. Get the key onto the new laptop: copy the file `%LOCALAPPDATA%\Robosoccer26\robot.key` from the first laptop to the same place on the new one (USB stick), **or** run `python tools\provision.py --reuse --show-key` on the first laptop and, on the new one, `python laptop\laptop_remote.py --import-key` and paste the 64 digits (hidden input).
-3. Run `python laptop\laptop_remote.py --port COM6` (its own port number).
+3. Run `python laptop\laptop_remote.py --port COM5` (its own port number).
 
 Anyone who has the key file can control the robot. The key proves that someone *knows the key*; it does not identify a particular laptop.
 
@@ -69,7 +74,7 @@ Anyone who has the key file can control the robot. The key proves that someone *
 
 | Problem | Try |
 |---|---|
-| `cannot open COM6` | wrong port, HC-05 not powered/paired, or another program has it open: `--list-ports` |
+| Cannot open the Bluetooth COM port | Check its **Outgoing** direction after every re-pairing; COM5 is outgoing now and COM6 is incoming. Also check HC-05 power and whether another program has it open: `--list-ports`. |
 | Stays "waiting for challenge" | HC-05 not connected to the Mega's Serial1 / wrong COM port (use the *Outgoing* one) |
 | "authentication refused" | the laptop's key differs from the Mega's: compare the fingerprints (laptop prints one at start; the Mega prints one for `:authkey`), then provision again |
 | "throttling attempts" | wait up to a minute; a correct key resets it |
@@ -77,7 +82,7 @@ Anyone who has the key file can control the robot. The key proves that someone *
 | Robot ignores commands | type `link`; log in again; if the emergency stop is latched type `r` |
 | Link drops | the program logs in again by itself; the robot stops a manual move within 0.4 s |
 
-## Safe first test (nothing here has been done on real hardware yet)
+## Safe tests and workbench checks
 
 Wheels lifted and motor battery disconnected until step 5.
 

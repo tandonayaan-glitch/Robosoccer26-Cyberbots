@@ -1,7 +1,6 @@
 # Bluetooth link: Windows laptop -> HC-05 -> Arduino Mega (commands + telemetry)
 
-Status: **simulated and compiled only. Nothing here has been tested over the air or on the robot.** The Mega firmware is compiled for the ATmega2560 (`tools/avr_build.sh`) and
-tested against simulated sensors (`test/run_tests.sh`); the Python laptop client (`laptop/`) is tested against the same firmware logic in simulation. Beginner steps: **`Connect.md`**.
+Status (24 October 2026): the new firmware was flashed and tested on Mega USB and through the authenticated HC-05 link with motor power disconnected. The HC-05 PIN was set and read back as `1010`. After Windows re-paired, outgoing Bluetooth moved from COM6 to **COM5**; COM6 is now incoming. Beginner steps: **`Connect.md`**; current evidence: **`summary.md`**.
 
 ## Architecture
 
@@ -89,7 +88,7 @@ your revision), then `:set btbaud100 384`, `:save`, reset. Allowed values: 96, 1
 
 ## Pairing and connection (Windows)
 
-1. Leave the HC-05 as it is if it already talks to the Mega. Do not change its name, PIN or baud rate unless you must (AT commands differ between HC-05 revisions; nothing in this repository changes them for you). Your pairing PIN is documented as `2114`; typical factory values are name `HC-05`, PIN `1234`, 9600 baud, slave role - **unverified for your module**, and the firmware never sets the PIN.
+1. This HC-05's pairing PIN was set to `1010` through AT mode and read back as `+PSWD:1010` on 24 October 2026. Windows paired again with that PIN. The module UART and Mega Serial1 remain at 9600 baud; COM3 is Mega USB and outgoing **COM5** is Bluetooth on the tested laptop after re-pairing.
 2. Power the robot. The HC-05 LED blinks fast while unpaired and slowly (about every 2 s) when connected.
 3. Windows: Settings > Bluetooth & devices > Add device > Bluetooth > `HC-05`, enter the PIN. Pairing creates two virtual serial ports.
 4. Find the right one: Settings > Bluetooth & devices > Devices > More Bluetooth options > **COM Ports**: use the **Outgoing** entry for the HC-05 (the Incoming one is for devices that connect to the laptop). `python laptop\laptop_remote.py --list-ports` lists them too.
@@ -146,4 +145,4 @@ No flashing is needed to change the key. The Mega must be flashed once with this
 Opens the Bluetooth COM port, waits for **you** to type `connect`, then authenticates; only supported commands can be sent (`set`, `:authkey`, raw AUTH lines are refused locally); `x` sends the emergency stop at any time, even before login; `quit` stops the robot (without latching the emergency stop) and ends the session; closing the program unexpectedly or Ctrl+C requests an emergency stop. Needs only `pyserial`.
 
 ### HC-05 pairing PIN
-Optional extra hurdle, **not** a replacement for the above. Only change it if your breakout accepts AT commands (hold EN/KEY high while powering it on; many 6-pin HC-05 boards enter AT mode at 38400 baud with `\r\n` endings, some revisions differ - check yours). Typical commands: `AT+NAME=<name>`, `AT+PSWD=<pin>` (some revisions want `AT+PSWD="<pin>"`), `AT+ROLE=0`, `AT+UART=<baud>,0,0`. These are **unverified for your module**; nothing in this repository changes the HC-05 for you and the firmware works with any PIN. Never connect the Mega's 5 V TX1 (D18) straight to the HC-05 RXD: use the 1 kΩ / 2 kΩ divider.
+The tested module entered AT mode with a slow LED blink while KEY was held at power-up. A temporary Mega bridge at 38400 baud received `OK` for `AT` and `AT+PSWD=1010`, then read back `+PSWD:1010` from `AT+PSWD?`. The previous robot firmware was restored and flash-verified afterward. The PIN does not identify the laptop: possession of the private client key is what authorizes commands. Never connect the Mega's 5 V TX1 (D18) straight to the HC-05 RXD: use the 1 kΩ / 2 kΩ divider.

@@ -20,6 +20,8 @@ struct TeleState {
   uint32_t loopAvgUs;
 };
 static TeleState g_tele;
+// An explicit terminal request keeps showing that sensor group until another view is selected.
+// 0 follows the configured schedule; 'a' cycles all four frame kinds.
 static char g_teleBuf[384];
 static const uint16_t TELE_BUF = sizeof(g_teleBuf);
 
@@ -111,7 +113,7 @@ static bool teleSend(const Config& c, uint32_t now, char kind, bool force) {
 static void teleSendNow(const Config& c, uint32_t now, char kind) { teleSend(c, now, kind, true); }
 
 static void teleService(const Config& c, uint32_t now) {
-  if (!c.teleEnable) return;
+  if (!c.teleEnable && !g_teleView) return;
   if (!btAuthOk()) return;                                                        // no telemetry to a peer that has not authenticated
   if (btTxUsed() != 0) return;                                                    // never queue frames behind frames
   uint32_t period = 1000u / (c.teleHz ? c.teleHz : 1u);
@@ -120,8 +122,12 @@ static void teleService(const Config& c, uint32_t now) {
   uint32_t gap = period > budgetGap ? period : budgetGap;
   if (g_tele.lastMs && elapsedMs(now, g_tele.lastMs) < gap) return;
   char kind = 'c';
-  uint8_t every = c.teleDetailEvery ? c.teleDetailEvery : 1u;
-  if (g_tele.slot % every == 0 && g_tele.slot != 0) { uint8_t m = (uint8_t)((g_tele.slot / every) % 3u); kind = m == 1 ? 'r' : (m == 2 ? 'i' : 'd'); }
+  if (g_teleView == 'r' || g_teleView == 'i') kind = g_teleView;
+  else if (g_teleView == 'a') { static const char order[4] = {'c', 'r', 'i', 'd'}; kind = order[g_tele.slot % 4u]; }
+  else {
+    uint8_t every = c.teleDetailEvery ? c.teleDetailEvery : 1u;
+    if (g_tele.slot % every == 0 && g_tele.slot != 0) { uint8_t m = (uint8_t)((g_tele.slot / every) % 3u); kind = m == 1 ? 'r' : (m == 2 ? 'i' : 'd'); }
+  }
   g_tele.slot++;
   if (!g_tele.lastMs) g_tele.lastMs = now ? now : 1u;
   teleSend(c, now, kind, false);

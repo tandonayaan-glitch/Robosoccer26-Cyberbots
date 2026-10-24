@@ -7,16 +7,16 @@ Modes: **ATTACK** (autonomous ball seeking and shooting-position alignment), **D
 >
 > | Verified by | Result |
 > |---|---|
-> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0, `tools/avr_build.sh`) | builds, **0 warnings**: 125,542 B flash (49 %), 5,031 B static RAM (61 %), 3,161 B left for the stack |
-> | **Host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM, Bluetooth) | 80 test cases, 2,734 checks, all pass, ASan/UBSan clean; static analysis (cppcheck, clang-tidy, valgrind) clean |
+> | **Real ATmega2560 compilation** (Arduino AVR core 1.8.6, avr-gcc 7.3.0) | builds with **0 warnings**: 141,156 B flash, 5,643 B static RAM, 2,549 B left for stack and local variables; flashed and verified on COM3 |
+> | **Windows host simulation** (mock Arduino core, simulated sensors, IMU, EEPROM, Bluetooth) | 90 test cases, 2,837 checks, all pass; sanitizer and static-analysis tools were unavailable for this run |
 > | **Python laptop client** (`laptop/`) | 34 tests pass against the real firmware logic in simulation (cross-checks Python's `hmac` with the firmware's HMAC) |
-> | Upload / run on a Mega, HC-05 pairing, range, receivers, modules, underside sensor, motors, power, MPU6050 on the real robot | **not done** – every behaviour below is unverified on hardware |
+> | Actual Mega and HC-05 | New firmware flashed; USB commands and authenticated Bluetooth commands tested with motor power disconnected. HC-05 PIN is `1010`; outgoing Bluetooth is now COM5 after re-pairing. The loose IR wire, ball response, and motor-powered tests remain pending. |
 >
 > **The robot is not competition-ready.** Follow `docs/COMMISSIONING_CHECKLIST.md` and the staged plan in `docs/CALIBRATION_AND_TEST_PLAN.md`. Details: `docs/VERIFICATION_REPORT.md`.
 
 ## Commands (Serial Monitor 115200 baud, line ending **Newline** or **Both NL & CR**; the same words work over Bluetooth)
 
-`defend` · `attack` · `manual` · `stop` (or `idle`) · `status` · `sensors` · `gyro` (`gyro drift [s]`, `gyro cal`, `gyro stop`) · `calibrate` · `motors` · `tele` · `help`; emergency stop `!` (USB) / `X` (Bluetooth).
+`defend` · `attack` · `manual` · `stop` (or `idle`) · `off` · `lock` · `unlock` · `our` · `theres` · `ir` · `mpu` · `all` · `status` · `sensors` · `gyro` (`gyro drift [s]`, `gyro cal`, `gyro stop`) · `calibrate` · `motors` · `tele` · `help`; emergency stop `!` (USB) / `X` (Bluetooth).
 **Bluetooth control needs authentication** (`Connect.md`, `docs/BLUETOOTH.md`): `python laptop\laptop_remote.py --port COMx`, then `connect`; views `ir`, `imu`, `motors`, `ball`, `safety`, `back`; `x` = emergency stop. One-time key setup: `python tools\provision.py --mega-port COMy`.
 Classic single keys (`f b l r q e s a h i m d g t ?`) work **when sent alone**; `:set`, `:get`, `:save`, `:ring`, `:mod`, `:log`, … are unchanged. A multi-letter burst that is not a known word executes nothing. Full list: `help`; protocol: `docs/BLUETOOTH.md`; telemetry: `docs/TELEMETRY.md`; defending: `docs/DEFENDING.md`.
 

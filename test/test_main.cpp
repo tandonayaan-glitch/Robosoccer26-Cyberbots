@@ -1323,6 +1323,62 @@ static void t_nav_lost_search_reacquire() {
   CHECK(g_navState == NAV_WAIT && allWheelsStopped());
 }
 
+static void t_off_lock_and_wake() {
+  bootCal();
+  simRun(300);
+  navSetManualLock(true);
+  CHECK(g_manualLocked);
+  navManual(g_cfg, 'f', millis());
+  CHECK(allWheelsStopped() && g_navState != NAV_MANUAL);
+  navSoftOff();
+  uint32_t latch = 0; EEPROM.get(EEPROM_CTRL_OFF_ADDR, latch);
+  CHECK(g_softOff && latch == CTRL_OFF_MAGIC && allWheelsStopped());
+  navManual(g_cfg, 'f', millis());
+  CHECK(allWheelsStopped());
+  CHECK(navEnableAuto(g_cfg, millis()));
+  EEPROM.get(EEPROM_CTRL_OFF_ADDR, latch);
+  CHECK(!g_softOff && latch == 0 && g_autoEnabled && g_manualLocked);
+  navEstop(PSTR("test"));
+  CHECK(!navEnableAuto(g_cfg, millis()) && allWheelsStopped());
+}
+
+static void t_bt_sensor_views() {
+  bootCal(); simRun(300);
+  Serial1.feed("IR\n"); simRun(1200);
+  CHECK(g_teleView == 'r' && outCountOf(Serial1.out, "\"k\":\"r\"") >= 2);
+  Serial1.out.clear();
+  Serial1.feed("MPU\n"); simRun(1200);
+  CHECK(g_teleView == 'i' && outCountOf(Serial1.out, "\"k\":\"i\"") >= 2);
+  Serial1.out.clear();
+  Serial1.feed("all\n"); simRun(2500);
+  CHECK(g_teleView == 'a');
+  for (char kind : {'c', 'r', 'i', 'd'}) {
+    std::string marker = std::string("\"k\":\"") + kind + "\"";
+    CHECK(Serial1.out.find(marker) != std::string::npos);
+  }
+}
+
+static void t_front_only_loss_defend_clear() {
+  bootCal();
+  for (int i = 0; i < 6; i++) g_cfg.ringBearing[i] = (int16_t)(-60 + i * 24);
+  g_cfg.ringEnable = 0x3F; g_cfg.bearingsSet = 1;
+  g_cfg.shootEnable = 1;
+  navSetFrontOnly(true); navSetFieldHalf(true);
+  simRun(300); startAuto();
+  ballAt(36, 0.7f); simRun(400);
+  CHECK(g_navState == NAV_APPROACH);
+  ballGone(); simRun(g_cfg.lostHoldMs + 500);
+  CHECK(g_navState == NAV_SEARCH && g_autoLossDefense && g_lossSpinDir == 1);
+  simRun(900);
+  CHECK(g_reqW > 0.9f && g_navState == NAV_SEARCH);
+  simRun(g_cfg.defRecoverMs + 700);
+  CHECK(g_navState == NAV_DEFEND && g_defendEnabled && g_autoLossDefense);
+  ballAt(36, 0.7f); simRun(150);
+  CHECK(g_navState == NAV_SHOOT && g_clearShot);
+  simRun(g_cfg.shootBackMs + g_cfg.shootDriveMs + 300);
+  CHECK(g_stats.shots == 1 && !g_clearShot);
+}
+
 // A ball that disappears is looked for where it can have gone: the way it was moving, else the nearest uncovered arc, else its last side.
 static void t_nav_blind_spot_search() {
   bootCal();
@@ -2741,6 +2797,9 @@ static const TestCase TESTS[] = {
   T(t_nav_approach_and_stop),
   T(t_nav_turn_toward_ball),
   T(t_nav_lost_search_reacquire),
+  T(t_off_lock_and_wake),
+  T(t_bt_sensor_views),
+  T(t_front_only_loss_defend_clear),
   T(t_nav_blind_spot_search),
   T(t_nav_ring_fault_safe),
   T(t_goal_register_and_aim_window),

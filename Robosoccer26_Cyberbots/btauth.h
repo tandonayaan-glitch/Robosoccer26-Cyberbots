@@ -82,6 +82,7 @@ static void authClearKey() {
   AuthBlock b;
   memset(&b, 0xFF, sizeof(b));
   EEPROM.put(EEPROM_AUTH_ADDR, b);
+  g_auth.enabled = true;
   authWipeRam();
 }
 // Short fingerprint to compare keys on the two boards without showing the key: first 4 bytes of HMAC(key, "FPR").

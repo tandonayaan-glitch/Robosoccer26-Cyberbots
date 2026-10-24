@@ -48,6 +48,7 @@ void setup() {
   // Configuration from EEPROM (never writes at boot).
   char rep[40];
   CfgLoadResult cr = cfgLoad(g_cfg, rep, sizeof(rep));
+  navLoadControlLatches();
   say("BOOT", "config: %S%s%s", cfgLoadText(cr), rep[0] ? " -> " : "", rep);
   if (cr != CL_OK && cr != CL_NOFILE) faultRaise(F_CFG_REPLACED, "%s", rep[0] ? rep : "config replaced");
 
@@ -87,13 +88,14 @@ void setup() {
   imuHealth(g_cfg, now);
   condEvaluate();
 
-  motorsSetEnabled(true);                          // outputs allowed, but every target is zero
+  motorsSetEnabled(!g_softOff);                    // persistent OFF keeps all motor outputs disabled across a reset
   motorsDrive(g_cfg, 0, 0, 0, g_cfg.maxManual);
   g_motorsLastUpdateMs = millis();
   navSetState(g_cond == COND_SAFE_STOP ? NAV_SAFE_STOP : NAV_IDLE, PSTR("boot complete"));
 
   printHealth(g_cfg, now, PSTR("BOOT"));
-  if (g_cfg.autoStart && g_cond != COND_SAFE_STOP) {
+  if (g_softOff) say("BOOT", "software OFF latch restored: motors disabled until 'a' safely starts autonomy");
+  else if (g_cfg.autoStart && g_cond != COND_SAFE_STOP) {
     g_autoStartPending = true; g_autoStartAtMs = now + g_cfg.autoStartDelayMs;
     say("BOOT", "autostart: autonomous mode begins in %u ms if all checks still pass. Cancel: X (Bluetooth), '!', 's' or M; disable: ':set autostart 0' + ':save'.", (unsigned)g_cfg.autoStartDelayMs);
   } else if (g_cfg.autoStart) say("BOOT", "autostart SKIPPED: robot is in SAFE_STOP (see 'h'). Motors stay off.");

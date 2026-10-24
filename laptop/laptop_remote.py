@@ -29,19 +29,26 @@ connection (YOU start and end the login)
 robot modes (after authentication)
   defend               defending mode: hold heading, strafe to get in front of the ball
   attack               autonomous attack mode
+  a                    wake from software OFF and start autonomy after safety checks (lower-case)
+  off                  disable the motors persistently; sensors and Bluetooth stay on
+  lock | unlock        block or allow manual movement; lock does not block autonomy
+  our | theres         select our-half clearance or their-half aligned shot policy
   manual               manual mode (then use w a s d z c or 'drive')
   stop                 stop the motors and leave attack / defend / manual (does not clear the emergency stop)
   calibrate            gyro bias + receiver noise floor (robot still, ball removed)
 manual driving (after 'manual'; each command moves the robot for 0.4 s)
-  w s a d z c          forward, backward, turn left, turn right, strafe left, strafe right
+  w s A d z c          forward, backward, turn left, turn right, strafe left, strafe right (capital A turns left)
   drive                hold-to-drive with the keyboard (Windows): w a s d z c move, SPACE stops, q leaves, x = EMERGENCY STOP
   r                    clear the emergency-stop latch (leaves the robot idle; needs authentication)
 views of the robot's sensors (type 'back' to return to the full view)
-  ir                   receivers A0-A5, obstacle modules D34/D35, underside sensor D40
+  ir                   stream receivers A0-A5; 'all' includes other sensors
+  mpu                  stream MPU6050 accelerometer, gyro, and angle estimates
   imu                  accelerometer, gyro, roll/pitch/yaw estimates
   motors               motor COMMAND PWM and directions (commands, not measured speed)
   ball | safety | raw  ball bearing / mode, faults, e-stop latch / raw telemetry lines
-  back | all           the normal full view          off   stop printing views
+  all                  stream all four telemetry frame kinds and show the full view
+  back                 show the full view without changing the robot stream
+  view off             stop printing views (robot continues its selected stream)
 other robot commands
   gyro drift 30 | gyro cal | gyro stop | tele on | tele off | tele now r
 EMERGENCY STOP
@@ -88,14 +95,28 @@ class App:
         if low == "link":
             self.out(self.link_state())
             return True
-        if low == "off":
+        if low == "view off":
             self.view = None
             self.out("views off")
+            return True
+        if low == "off":
+            self.view = None
+            try:
+                self.out("sent: " + self.link.send_command("off"))
+            except (ValueError, rl.NotAuthenticated, rl.LinkDown) as exc:
+                self.out(str(exc))
+            return True
+        if low in ("ir", "mpu", "all"):
+            self.view = "imu" if low == "mpu" else low
+            try:
+                self.out("sent: " + self.link.send_command(low))
+            except (ValueError, rl.NotAuthenticated, rl.LinkDown) as exc:
+                self.out(str(exc))
             return True
         v = rp.VIEW_ALIASES.get(low, low)
         if v in rp.VIEWS:
             self.view = v
-            self.out("view: %s   ('back' = full view, 'off' = stop printing)" % v)
+            self.out("view: %s   ('back' = full view, 'view off' = stop printing)" % v)
             return True
         if low == "drive":
             self.out("drive mode needs the interactive Windows terminal; use w a s d z c instead")

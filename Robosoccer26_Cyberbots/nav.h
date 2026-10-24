@@ -10,10 +10,39 @@
 
 static bool g_autoEnabled = false;          // RAM only: every reset starts with autonomy OFF
 static bool g_estop = false;                // emergency-stop LATCH (RAM only): while set, no movement and no autonomy can be started from anywhere
+static bool g_softOff = false;              // software OFF: motor outputs disabled; sensors, USB and Bluetooth stay available
+static bool g_manualLocked = false;         // blocks manual motion and motor tests; autonomous operation remains available
+// Independent EEPROM latches in the unused tail of the 64-byte authentication reservation (4032..4095).
+// They do not change the versioned Config layout or the stored authentication key.
+static const int EEPROM_CTRL_OFF_ADDR = 4080, EEPROM_CTRL_LOCK_ADDR = 4084, EEPROM_CTRL_FLAGS_ADDR = 4092;
+static const uint32_t CTRL_OFF_MAGIC = 0x46464F52u, CTRL_LOCK_MAGIC = 0x4B434F4Cu;
+static bool g_fieldOurHalf = false, g_frontOnly = false; // default: aligned shot on their half; old full-circle layout until mapped
+static void navStoreControlFlags() {
+  EEPROM.put(EEPROM_CTRL_FLAGS_ADDR, (uint32_t)(0xC0DE0000u | (g_fieldOurHalf ? 1u : 0u) | (g_frontOnly ? 2u : 0u)));
+}
+static void navLoadControlLatches() {
+  uint32_t v = 0;
+  EEPROM.get(EEPROM_CTRL_OFF_ADDR, v); g_softOff = v == CTRL_OFF_MAGIC;
+  EEPROM.get(EEPROM_CTRL_LOCK_ADDR, v); g_manualLocked = v == CTRL_LOCK_MAGIC;
+  EEPROM.get(EEPROM_CTRL_FLAGS_ADDR, v);
+  g_fieldOurHalf = (v & 0xFFFF0000u) == 0xC0DE0000u && (v & 1u);
+  g_frontOnly = (v & 0xFFFF0000u) == 0xC0DE0000u && (v & 2u);
+}
+static void navSetFieldHalf(bool ourHalf) {
+  g_fieldOurHalf = ourHalf;
+  navStoreControlFlags();
+  say("NAV", "field side %S: %S", ourHalf ? PSTR("OUR") : PSTR("THEIRS"), ourHalf ? PSTR("reacquired ball gets a bounded reverse-forward clearance when shooting is enabled") : PSTR("align and confirm the shooting position before a shot"));
+}
+static void navSetFrontOnly(bool frontOnly) {
+  g_frontOnly = frontOnly;
+  navStoreControlFlags();
+  say("NAV", "front-only receiver layout %S: %S", frontOnly ? PSTR("ON") : PSTR("OFF"), frontOnly ? PSTR("last-seen full-speed defensive turn enabled") : PSTR("full-circle search behavior restored"));
+}
 static bool g_autoStartPending = false;       // boot decided to start autonomy by itself once the start delay has passed
 static uint32_t g_autoStartAtMs = 0;
 static bool g_defendEnabled = false;          // defend mode is active (defend.h); exclusive with autonomous attack and manual driving
 static void defendTick(const Config& c, uint32_t now);
+static bool defendEnable(const Config& c, uint32_t now);
 static bool g_remoteManual = false;         // the remote asked for manual mode (M); cleared by U, X and a reset
 static uint32_t g_autoStartMs = 0, g_approachSinceMs = 0, g_reSince = 0, g_reLockUntil = 0, g_waitHoldUntil = 0;
 static uint8_t g_rePhase = 0, g_reCount = 0, g_appTimeouts = 0;
@@ -23,6 +52,11 @@ static uint8_t g_searchAttempt = 0;
 static int8_t g_searchDir = 1;
 static uint32_t g_searchStartMs = 0, g_lostAtMs = 0, g_pauseUntilMs = 0, g_searchBrakeUntilMs = 0;
 static bool g_lostPending = false;          // a loss happened and has not been re-acquired yet
+static bool g_autoLossDefense = false;
+static uint32_t g_lossSpinUntilMs = 0;
+static int8_t g_lossSpinDir = 1;
+static bool g_clearNeedLoss = false;
+static bool g_clearShot = false;
 static float g_refYaw = 0;
 static uint32_t g_lastNavTick = 0;
 
@@ -101,9 +135,31 @@ static void navStop(PGM_P why) {
   g_autoEnabled = false;
   g_defendEnabled = false;
   g_mtest.state = 0;
+  g_autoLossDefense = false;
+  g_clearShot = false;
   g_hdgErr = NAN;
   if (g_cond == COND_SAFE_STOP) navSetState(NAV_SAFE_STOP, why);
   else navSetState(NAV_IDLE, why);
+}
+
+static void navSoftOff() {
+  g_softOff = true;
+  g_autoStartPending = false;
+  g_remoteManual = false;
+  navStop(PSTR("operator OFF"));
+  motorsSetEnabled(false);                  // force PWM and driver direction pins low, even if a later command is missed
+  EEPROM.put(EEPROM_CTRL_OFF_ADDR, CTRL_OFF_MAGIC);
+  say("SAFETY", "OFF: motors disabled; sensors and link stay on. 'a' starts autonomous only after its safety checks pass; X remains available.");
+}
+
+static void navSetManualLock(bool locked) {
+  if (locked && (g_remoteManual || g_navState == NAV_MANUAL || g_mtest.state)) {
+    g_remoteManual = false;
+    navStop(PSTR("manual controls locked"));
+  }
+  g_manualLocked = locked;
+  EEPROM.put(EEPROM_CTRL_LOCK_ADDR, (uint32_t)(locked ? CTRL_LOCK_MAGIC : 0u));
+  say("SAFETY", "manual controls %S", locked ? PSTR("LOCKED (use 'unlock')") : PSTR("unlocked"));
 }
 
 // Emergency stop: everything stops NOW and a latch keeps the robot from moving until it is cleared deliberately (remote 'R' or ':recover').
@@ -124,6 +180,7 @@ static void navMarkLoss(PGM_P where) {
   g_stats.ballLossEvents++;
   g_lostAtMs = millis();
   g_lostPending = true;
+  g_clearNeedLoss = false;
   say("NAV", "ball lost (%S): loss #%lu, last bearing %.0f deg%s, moving %.0f deg/s", where, UL(g_stats.ballLossEvents), (double)g_lastBearing, ringInBlindSpot(g_cfg, g_lastBearing) ? " (inside a blind arc)" : "", (double)g_bearingRate);
   logEvent("N", "ball_lost");
   recAdd(REC_BALL_LOST, (uint16_t)(int16_t)g_lastBearing);
@@ -139,13 +196,21 @@ static bool navEnableAuto(const Config& c, uint32_t now) {
   if (ringCountUsable(c) == 0) { say("SAFETY", "autonomous REFUSED: no usable ball-ring channel (':ring' shows which are off or saturated)"); return false; }
   if (!c.ringCalDone) { say("SAFETY", "autonomous REFUSED: ring noise floor not calibrated. Ball OFF, then ':ring cal noise' and ':save' (docs/RING_AND_MODULES.md)."); return false; }
   if (!modEnabled(c, 0)) { say("SAFETY", "autonomous REFUSED: IR module 0 (front, shooting position) is switched off (':mod on 0'): the robot could not tell when the ball is in place"); return false; }
+  if (g_softOff) {
+    motorsStopNow();
+    EEPROM.put(EEPROM_CTRL_OFF_ADDR, (uint32_t)0);
+    motorsSetEnabled(true);
+    g_softOff = false;
+  }
   g_defendEnabled = false;
+  g_autoLossDefense = false;
   g_remoteManual = false;
   g_autoEnabled = true;
   g_autoStartMs = now ? now : 1u;
   g_reCount = 0; g_appTimeouts = 0; g_reLockUntil = 0; g_waitHoldUntil = 0;
   g_searchAttempt = 0;
   g_lostPending = false;
+  if (!g_ball.valid) g_clearNeedLoss = false;
   if (imuHeadingUsable(c, now)) { g_refYaw = g_imu.yaw; }
   motorsStopNow();
   navSetState(NAV_SEEK, PSTR("autonomous enabled by operator"));
@@ -214,6 +279,7 @@ static bool navShootCheck(const Config& c, uint32_t now) {
   if (g_ball.readySinceMs == 0 || elapsedMs(now, g_ball.readySinceMs) < c.shootHoldMs) return false;
   if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
   g_shootPhase = 0; g_shootStartMs = now; g_shotT0 = now; g_heldLostSinceMs = 0; g_rampBoost = true;   // no acceleration limit during the whole shot
+  g_clearShot = false;
   navSetState(NAV_SHOOT, PSTR("ball in the shooting position: aim at the goal heading, reverse, then full speed forward"));
   return true;
 }
@@ -236,17 +302,36 @@ static void navEnterSearch(PGM_P why, bool brake = false) {
   // then rotate: going straight from a strafe to a spin would reverse two wheels through the dead-time pause for nothing.
   g_searchBrakeUntilMs = brake ? g_searchStartMs + 20u + (uint32_t)g_cfg.maxAuto * 1000u / (g_cfg.decelPwmPerS ? g_cfg.decelPwmPerS : 1u) : g_searchStartMs;
   g_searchDir = navPickSearchDir(g_cfg);
+  if (g_frontOnly && g_lostPending && g_cfg.bearingsSet) {
+    g_autoLossDefense = true;
+    g_lossSpinDir = g_lastBearing >= 0.0f ? 1 : -1;
+    g_lossSpinUntilMs = g_searchBrakeUntilMs + g_cfg.defRecoverMs;
+  }
   navSetState(NAV_SEARCH, why);
+}
+
+// Our-half clearance starts only on a fresh, unambiguous reacquisition after a real loss.
+// It is bounded by the configured reverse/drive times and still requires shooting to be enabled.
+static bool navClearOnReacquire(const Config& c, uint32_t now) {
+  if (!g_fieldOurHalf || !g_lostPending || g_clearNeedLoss || !c.shootEnable || g_cond != COND_NORMAL) return false;
+  if (!g_ball.valid || !g_ball.bearingKnown || g_ball.ambiguous || !g_ringLastScanMs || elapsedMs(now, g_ringLastScanMs) > 100) return false;
+  if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
+  g_clearShot = true; g_clearNeedLoss = true; g_lostPending = false;
+  g_shootPhase = 1; g_shootStartMs = now; g_shotT0 = now; g_shootLaunched = false;
+  g_rampBoost = true;
+  navSetState(NAV_SHOOT, PSTR("our-half ball reacquired: bounded reverse then forward clearance"));
+  return true;
 }
 
 // 100 Hz control tick (called with the loop's timestamp).
 static void navTick(const Config& c, uint32_t now) {
   g_lastNavTick = now;
+  if (g_softOff) { motorsDrive(c, 0, 0, 0, c.maxManual); return; }
   if (g_ball.lostEvent) {
     g_ball.lostEvent = false;
     if (g_autoEnabled && g_navState == NAV_APPROACH) navMarkLoss(PSTR("approach"));
   }
-  if (g_autoEnabled && (g_cond == COND_SAFE_STOP || drivetrainFault())) navStop(PSTR("safe stop"));
+  if (g_autoEnabled && (g_cond == COND_SAFE_STOP || drivetrainFault() || (g_frontOnly && sensingFault()))) navStop(PSTR("safe stop"));
   if (g_navState == NAV_SEEK || g_navState == NAV_APPROACH || g_navState == NAV_SEARCH || g_navState == NAV_SEARCH_PAUSE || g_navState == NAV_WAIT) navShootCheck(c, now);
 
   switch (g_navState) {
@@ -267,7 +352,7 @@ static void navTick(const Config& c, uint32_t now) {
       break;
 
     case NAV_APPROACH:
-      if (!g_ball.valid) { g_searchAttempt = 1; navEnterSearch(PSTR("ball lost"), true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
+      if (!g_ball.valid) { if (!g_lostPending) navMarkLoss(PSTR("approach")); g_searchAttempt = 1; navEnterSearch(PSTR("ball lost"), true); motorsDrive(c, 0, 0, 0, c.maxAuto); }
       else if (g_ball.held) { g_appTimeouts = 0; g_approachSinceMs = now ? now : 1u; navApproach(c, now); }   // reached it: the timer restarts
       else if (elapsedMs(now, g_approachSinceMs) > c.approachTimeoutMs) {
         // Approaching for this long without the front module ever reporting the ball: a false detection (or a ball that keeps rolling away). Search again;
@@ -281,6 +366,31 @@ static void navTick(const Config& c, uint32_t now) {
 
     case NAV_SHOOT: {
       if (!g_autoEnabled) break;
+      if (g_clearShot) {
+        if (g_cond != COND_NORMAL || sensingFault() || drivetrainFault() || !c.shootEnable) {
+          navStop(PSTR("our-half clearance cancelled by fault or setting"));
+          break;
+        }
+        uint32_t el = elapsedMs(now, g_shootStartMs);
+        float sc = navSensorScale(c);
+        if (g_shootPhase == 1) {
+          if (el < c.shootBackMs) { motorsDrive(c, 0, -c.shootBackSpeed * sc, 0, c.maxAuto); break; }
+          g_shootPhase = 2; g_shootStartMs = now; g_shootLaunched = false; el = 0;
+        }
+        motorsDrive(c, 0, sc, 0, c.shootPwm > c.maxAuto ? c.shootPwm : c.maxAuto);
+        if (!g_shootLaunched) {
+          float fwd = 0; for (int i = 0; i < WHEEL_COUNT; i++) fwd += g_wheelCur[i];
+          if (fwd > 1.0f || el > 600) { g_shootLaunched = true; g_shootStartMs = now; el = 0; }
+        }
+        if (g_shootLaunched && el >= c.shootDriveMs) {
+          g_lastShotMs = now; g_shotDone = true; g_needRelease = true; g_stats.shots++;
+          recAdd(REC_SHOT, (uint16_t)g_stats.shots);
+          g_clearShot = false;
+          motorsDrive(c, 0, 0, 0, c.maxAuto);
+          navSetState(NAV_SEEK, PSTR("our-half clearance complete"));
+        }
+        break;
+      }
       float w = 0, vx = 0, vy = 0;
       uint8_t limit = c.maxAuto;
       bool goalOk = goalValid() && imuHeadingUsable(c, now);
@@ -369,12 +479,19 @@ static void navTick(const Config& c, uint32_t now) {
         if (g_lostPending) {
           g_stats.reacquisitions++;
           g_stats.reacquireTotalMs += elapsedMs(now, g_lostAtMs);
-          g_lostPending = false;
           say("NAV", "ball re-acquired after %lu ms", UL(elapsedMs(now, g_lostAtMs)));
         }
+        if (navClearOnReacquire(c, now)) break;
+        g_lostPending = false;
         if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
         navSetState(NAV_APPROACH, PSTR("ball re-acquired"));
         navApproach(c, now);
+      } else if (g_autoLossDefense && deadlineReached(now, g_lossSpinUntilMs)) {
+        motorsDrive(c, 0, 0, 0, c.maxAuto);
+        if (!defendEnable(c, now)) navStop(PSTR("defensive recovery refused"));
+      } else if (g_autoLossDefense) {
+        if (!deadlineReached(now, g_searchBrakeUntilMs)) motorsDrive(c, 0, 0, 0, c.maxAuto);
+        else motorsDrive(c, 0, 0, (float)g_lossSpinDir, c.maxAuto);
       } else if (elapsedMs(now, g_searchStartMs) > c.searchTimeoutMs) {
         motorsDrive(c, 0, 0, 0, c.maxAuto);
         if (g_searchAttempt >= c.searchAttempts) navSetState(NAV_WAIT, PSTR("search attempts exhausted"));
@@ -399,7 +516,20 @@ static void navTick(const Config& c, uint32_t now) {
       else if (elapsedMs(now, g_navSince) > c.researchMs) { g_searchAttempt = 1; navEnterSearch(PSTR("fresh search after the pause")); }   // never stay blind for good
       break;
 
-    case NAV_DEFEND: defendTick(c, now); break;
+    case NAV_DEFEND:
+      if (g_autoLossDefense && g_cond == COND_NORMAL && !sensingFault() && !drivetrainFault() && g_ball.valid && g_ball.bearingKnown && !g_ball.ambiguous) {
+        g_defendEnabled = false; g_autoEnabled = true; g_autoLossDefense = false;
+        if (g_lostPending) {
+          g_stats.reacquisitions++; g_stats.reacquireTotalMs += elapsedMs(now, g_lostAtMs);
+          say("NAV", "ball re-acquired from defensive recovery after %lu ms", UL(elapsedMs(now, g_lostAtMs)));
+        }
+        if (navClearOnReacquire(c, now)) break;
+        g_lostPending = false;
+        if (imuHeadingUsable(c, now)) g_refYaw = g_imu.yaw;
+        navSetState(NAV_APPROACH, PSTR("ball re-acquired from defense"));
+        navApproach(c, now);
+      } else defendTick(c, now);
+      break;
 
     case NAV_COUNT: break;
 
@@ -443,10 +573,13 @@ static void navTick(const Config& c, uint32_t now) {
 
 // Manual keys. Manual control always cancels autonomy until 'a' is sent again.
 static void navManual(const Config& c, char key, uint32_t now, uint16_t holdMs = 0) {
+  if (g_softOff) { say("SAFETY", "manual motion REFUSED: robot is OFF ('a' to start autonomous)"); return; }
+  if (g_manualLocked) { say("SAFETY", "manual motion REFUSED: manual controls are LOCKED ('unlock')"); return; }
   if (navEstopRefuses(PSTR("manual motion"))) return;
   if (drivetrainFault()) { say("SAFETY", "manual motion REFUSED: drivetrain fault active (use :recover after fixing)"); return; }
   g_autoEnabled = false;
   g_defendEnabled = false;
+  g_autoLossDefense = false;
   g_mtest.state = 0;
   g_hdgErr = NAN;
   float vx = 0, vy = 0, w = 0;
@@ -471,6 +604,7 @@ static int wheelByName(const char* s) {
 }
 
 static bool navMotorTestArm(const Config& c, int wheel, uint32_t now, bool drive = false) {
+  if (g_softOff || g_manualLocked) { say("SAFETY", "motor test REFUSED: robot is OFF or manual controls are LOCKED"); return false; }
   if (wheel >= 0 && navEstopRefuses(PSTR("motor test"))) return false;
   if (wheel < 0) return false;
   if (drivetrainFault()) { say("SAFETY", "motor test REFUSED: drivetrain fault active"); return false; }

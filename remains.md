@@ -1,11 +1,23 @@
 # Remaining real-hardware testing
 
-Updated 24 October 2026. This tracks work **not yet verified on the physical robot**. See [summary.md](summary.md) for tests already completed. The HC-05 did carry traffic in both directions: the laptop authenticated on outgoing COM6, received replies and telemetry, and the Mega accepted authenticated commands. Its LED pattern alone is not a reliable end-to-end test; rapid blinking often means no active serial connection, while connected indications vary by breakout.
+## Current priority after the 24 October update
+
+- [x] Set the HC-05 pairing PIN to `1010`, read it back in AT mode, restore the previous Mega firmware, and pair Windows with the new PIN.
+- [x] Compile the new authenticated-control firmware; run 90 C++ simulation cases and 34 Python client tests.
+- [x] Upload and flash-verify the new firmware on USB COM3; check `off`, `lock`, manual refusal, `ir`, `mpu`, `all`, `our`, `theres`, and safe refusal of `a` during the IR fault with motor power disconnected.
+- [x] Re-establish the outgoing Bluetooth link after pairing with PIN `1010`: Windows changed it to **COM5**. COM6 is now incoming and times out as a client. The keyed laptop client authenticated on COM5; `ir`, `mpu`, `all`, `off`, and `lock` returned `OK`, and all four telemetry frame kinds arrived.
+- [ ] Investigate occasional telemetry sequence gaps when changing views quickly at 9600 baud. A final 18-frame check had 0 malformed and 2 reported gaps; an earlier paced 23-frame check had 0 gaps.
+- [ ] Repair the loose IR wire, map and calibrate all six **front-facing** A0–A5 receivers, then enable `:frontonly on` over USB. The software refuses this setting until bearings are entered.
+- [ ] With a real ball and wheels safely lifted, verify last-bearing recovery, automatic defense, `our` reverse/forward clearance, and `theres` held-position/heading alignment. Shooting is still disabled and should only be enabled for a supervised test after sensor and motor checks.
+- [x] Verify the `off` latch survives a USB reset with motor power disconnected; the boot log confirmed motors disabled and no autostart.
+- [ ] Verify `a` wake with motor power present only after the bench checks; test manual `lock` against all movement keys, `unlock`, and emergency stop priority on real hardware. Simulation already covers the command logic.
+
+Updated 24 October 2026. This tracks work **not yet verified on the physical robot**. See [summary.md](summary.md) for tests already completed. The HC-05 carried traffic in both directions: the laptop authenticated on outgoing COM5 after re-pairing, received replies and telemetry, and the Mega accepted authenticated commands. Its LED pattern alone is not a reliable end-to-end test; rapid blinking often means no active serial connection, while connected indications vary by breakout.
 
 ## 1. Firmware and Bluetooth (wheels lifted, motor battery disconnected)
 
 - [x] Build and upload the enlarged-frame firmware to the Mega on COM3; verify flash. All 87 firmware simulation cases and 34 Python tests passed.
-- [x] Reconnect through outgoing **wireless COM6** at **9600 baud** and confirm `AUTHENTICATED` after the upload. The HC-05 UART was verified at 9600; changing the Mega setting alone to 115200 broke communication. The real key remains provisioned.
+- [x] Reconnect through the outgoing wireless port at **9600 baud** and confirm `AUTHENTICATED` after upload. It was COM6 before re-pairing and is **COM5 now**. The HC-05 UART was verified at 9600; changing the Mega setting alone to 115200 broke communication. The real key remains provisioned.
 - [x] Verify the full IMU `i` JSON frame reaches the laptop client: a real 303-byte frame parsed with `imu=1`, as did core, receiver and diagnostic frames. An ordinary 13-second observation received 23 frames with 0 bad and 0 lost.
 - [ ] Resolve frame loss when multiple explicit `tele now` requests are sent together at 9600 baud: the burst check lost 3 sequence numbers out of 17 attempted. Retest view switching under typical client use. A higher UART rate requires changing the HC-05 itself first.
 - [ ] With the client actively connected, compare the HC-05 LED pattern with its rapid-blink idle pattern. Close/reopen the outgoing COM port and confirm the pattern and authentication change appropriately. A paired device may still blink rapidly when its serial port is closed.

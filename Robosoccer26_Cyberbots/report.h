@@ -205,7 +205,7 @@ static void printGyro(const Config& c, uint32_t now) {
 
 // ---- paced reports -----------------------------------------------------------------------------------
 // Every long report is requested with reportRequest() and printed by reportService() from the main loop in as many passes as the small output queue needs.
-enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY, REP_LOG, REP_RAW, REP_PINS, REP_STATUS, REP_SENSORS, REP_GYRO, REP_MOTORS };
+enum RepKind : uint8_t { REP_NONE, REP_HELP, REP_HEALTH, REP_RING, REP_NAV, REP_IMU, REP_TEST, REP_MOD, REP_RINGONLY, REP_LOG, REP_RAW, REP_PINS, REP_STATUS, REP_SENSORS, REP_GYRO, REP_MOTORS, REP_ALL };
 static uint8_t g_repKind = REP_NONE;
 static void printHelp();
 static void cmdTestModeText();
@@ -226,6 +226,7 @@ static void reportRun(uint8_t kind, const Config& c, uint32_t now) {
     case REP_SENSORS: printSensors(c, now); break;
     case REP_GYRO: printGyro(c, now); break;
     case REP_MOTORS: printMotion(c, now); break;
+    case REP_ALL: printStatus(c, now); printSensors(c, now); printGyro(c, now); printMotion(c, now); break;
     default: break;
   }
 }

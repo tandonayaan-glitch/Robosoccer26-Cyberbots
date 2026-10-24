@@ -1,5 +1,15 @@
 # RoboSoccer 2026: work and hardware status
 
+## Latest update: PIN, authenticated controls, and front-only recovery (24 October 2026)
+
+- Changed the HC-05 pairing PIN from `1234` to `1010` with a temporary Mega AT bridge on USB COM3. `AT` and `AT+PSWD=1010` returned `OK`; `AT+PSWD?` returned `+PSWD:1010`. Restored and flash-verified the previously tested robot firmware. The user removed the old Windows pairing and confirmed pairing with `1010` worked.
+- Kept the Mega's keyed Bluetooth authentication enabled because the user chose laptop-client-only control. The PIN admits a Bluetooth connection; only a client with the saved key can send ordinary control commands. COM3 is Mega USB; outgoing COM6 is the HC-05 link on the tested laptop.
+- Prepared firmware and laptop-client changes for `ir`, `mpu`, and `all` streaming; persistent `off` with `a` to wake into autonomy after safety checks; persistent `lock`/`unlock` for manual commands; and `our`/`theres` field-side policy. Front-only loss handling spins toward the last bearing at the configured maximum autonomous PWM for a bounded interval, then enters defense. Our-half reacquisition uses a bounded reverse/forward clearance only if shooting is enabled; their-half uses the existing held-position and heading alignment checks.
+- The front-only behavior remains disabled until A0–A5's actual left-to-right order and angles are entered and saved. Shooting remains disabled in the robot configuration. The loose IR wire and lack of a ball prevent physical validation of reacquisition or a shot.
+- Current working sources compiled for ATmega2560 with zero warnings (141,156 bytes flash, 5,643 bytes static RAM). All 90 Windows host C++ simulation cases (2,837 checks) and all 34 Python client tests passed. Uploaded the new firmware to the Mega over COM3 and verified all 141,156 flash bytes. No motor-powered test was performed.
+- USB-only commands on the real Mega confirmed `off` disabled motors, manual movement was refused, `ir` and `mpu` printed data, `our` and `theres` changed the field policy, and `a` correctly refused autonomy during a `RING_NONE` SAFE_STOP. All six A0–A5 receivers read 1023 with rail faults; MPU6050 calibrated and reported readings. A further USB reset confirmed the persistent OFF latch was restored at boot and autostart did not run. Left software OFF and manual controls locked.
+- After Windows re-paired, the outgoing HC-05 port moved from COM6 to **COM5**; COM6 became the incoming port and timed out when used as a client. The keyed laptop client authenticated on COM5. `off`, `lock`, `ir`, `mpu`, and `all` returned `OK`; fresh receiver, IMU, core, and diagnostic frames arrived as selected. The final 18-frame check had 0 malformed and 2 reported sequence gaps during rapid view changes at 9600 baud. The module carried traffic in both directions after the PIN change.
+
 Updated 24 October 2026. This distinguishes PC simulation from observations on the actual Mega and HC-05. The motor battery was disconnected for all hardware work below; wheel motion has not been tested.
 
 ## Software and Git

@@ -18,6 +18,7 @@
 
 static void cliExecLine(char* line, uint32_t now);
 static void teleSendNow(const Config& c, uint32_t now, char kind);
+static char g_teleView = 0;              // selected by a plain terminal IR, MPU, or all command
 
 static bool g_btLink = false;
 static uint32_t g_btLastByteMs = 0, g_btBytes = 0, g_btCmds = 0, g_btUnknown = 0, g_btRefused = 0, g_btReplyDrops = 0, g_btUnkReplyMs = 0;
@@ -83,6 +84,7 @@ static void btHandle(const Config& c, char ch, uint32_t now) {
       break;
     case 'M':
       if (g_estop) { btReplyErr("ESTOP"); g_btRefused++; break; }
+      if (g_softOff || g_manualLocked) { btReplyErr(g_softOff ? "OFF" : "LOCKED"); g_btRefused++; break; }
       navStop(PSTR("remote: manual mode"));
       g_remoteManual = true;
       recAdd(REC_MODE, 1);
@@ -103,6 +105,7 @@ static void btHandle(const Config& c, char ch, uint32_t now) {
     }
     case 'W': case 'S': case 'A': case 'D': case 'Z': case 'C': {
       if (g_estop) { btReplyErr("ESTOP"); g_btRefused++; break; }
+      if (g_softOff || g_manualLocked) { btReplyErr(g_softOff ? "OFF" : "LOCKED"); g_btRefused++; break; }
       if (!g_remoteManual || g_autoEnabled) { btReplyErr("NOT_MANUAL"); g_btRefused++; break; }     // autonomy and manual driving never share the motors
       char key = ch == 'W' ? 'f' : ch == 'S' ? 'b' : ch == 'A' ? 'q' : ch == 'D' ? 'e' : ch == 'Z' ? 'l' : 'r';
       navManual(c, key, now, c.btLeaseMs);
@@ -133,7 +136,9 @@ static uint32_t g_btLineLastMs = 0, g_btLines = 0, g_btTooLong = 0;
 
 static bool cliIsWord(const char* w) {
   return STREQ(w, "defend") || STREQ(w, "attack") || STREQ(w, "manual") || STREQ(w, "stop") || STREQ(w, "status") || STREQ(w, "sensors") || STREQ(w, "gyro")
-      || STREQ(w, "calibrate") || STREQ(w, "help") || STREQ(w, "motors") || STREQ(w, "tele") || STREQ(w, "idle");
+      || STREQ(w, "calibrate") || STREQ(w, "help") || STREQ(w, "motors") || STREQ(w, "tele") || STREQ(w, "idle")
+      || STREQ(w, "ir") || STREQ(w, "mpu") || STREQ(w, "all") || STREQ(w, "off") || STREQ(w, "lock") || STREQ(w, "unlock")
+      || STREQ(w, "our") || STREQ(w, "theres");
 }
 
 static void btFinishLine(const Config& c, uint32_t now) {
@@ -146,7 +151,15 @@ static void btFinishLine(const Config& c, uint32_t now) {
   while (s0 < n && (g_btLine[s0] == ' ' || g_btLine[s0] == '\t')) s0++;
   if (s0 >= n) return;
   g_btLines++;
-  if (n - s0 == 1) { btHandle(c, g_btLine[s0], now); return; }
+  if (n - s0 == 1) {
+    if (g_btLine[s0] == 'a') {                       // lowercase a = autonomous; uppercase A stays the manual left-turn key
+      if (!btAuthOk()) { btAuthRefuse(now); g_btRefused++; return; }
+      authTouch(now);
+      if (navEnableAuto(c, now)) btReplyRam("OK:AUTO"); else { btReplyErr("REFUSED"); g_btRefused++; }
+      return;
+    }
+    btHandle(c, g_btLine[s0], now); return;
+  }
   bool isAuth = n - s0 >= 4 && (g_btLine[s0] | 0x20) == 'a' && (g_btLine[s0 + 1] | 0x20) == 'u' && (g_btLine[s0 + 2] | 0x20) == 't' && (g_btLine[s0 + 3] | 0x20) == 'h' && (n - s0 == 4 || g_btLine[s0 + 4] == ' ');
   if (isAuth) {                                                            // never reaches the command table, never executed as keys
     char a[84]; uint8_t ka = 0;
@@ -171,7 +184,7 @@ static void btFinishLine(const Config& c, uint32_t now) {
   }
   if (!btAuthOk()) { btAuthRefuse(now); g_btRefused++; return; }          // words (modes, calibration, settings, ...) need an authenticated session
   authTouch(now);
-  if (g_estop && !(STREQ(first, "status") || STREQ(first, "sensors") || STREQ(first, "gyro") || STREQ(first, "stop") || STREQ(first, "help") || STREQ(first, "motors") || STREQ(first, "tele"))) {
+  if (g_estop && !(STREQ(first, "status") || STREQ(first, "sensors") || STREQ(first, "gyro") || STREQ(first, "stop") || STREQ(first, "help") || STREQ(first, "motors") || STREQ(first, "tele") || STREQ(first, "ir") || STREQ(first, "mpu") || STREQ(first, "all") || STREQ(first, "off") || STREQ(first, "lock") || STREQ(first, "unlock"))) {
     btReplyErr("ESTOP"); g_btRefused++; return;                       // the latch blocks every movement-capable word
   }
   cliExecLine(w, now);                                                // the SAME parser as the USB console
@@ -185,6 +198,9 @@ static void btFinishLine(const Config& c, uint32_t now) {
   else if (STREQ(first, "sensors")) { teleSendNow(c, now, 'r'); teleSendNow(c, now, 'c'); }
   else if (STREQ(first, "gyro")) teleSendNow(c, now, 'i');
   else if (STREQ(first, "motors")) teleSendNow(c, now, 'd');
+  else if (STREQ(first, "ir")) { g_teleView = 'r'; teleSendNow(c, now, 'r'); }
+  else if (STREQ(first, "mpu")) { g_teleView = 'i'; teleSendNow(c, now, 'i'); }
+  else if (STREQ(first, "all")) { g_teleView = 'a'; teleSendNow(c, now, 'c'); }
   snprintf(b, sizeof(b), "OK:%s", first);
   for (uint8_t i = 3; b[i]; i++) if (b[i] >= 'a' && b[i] <= 'z') b[i] = (char)(b[i] - 'a' + 'A');
   btReplyRam(b);

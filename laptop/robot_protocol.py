@@ -153,7 +153,7 @@ class Handshake:
 
 # ------------------------------------------------------------------------------------------------ commands the laptop may send
 SINGLE_KEYS = set("MUQWSADZCRP?")
-WORDS = {"defend", "attack", "manual", "stop", "idle", "calibrate"}
+WORDS = {"defend", "attack", "manual", "stop", "idle", "calibrate", "ir", "mpu", "all", "off", "lock", "unlock", "our", "theres"}
 
 
 def normalize_command(text):
@@ -166,6 +166,8 @@ def normalize_command(text):
     low = t.lower()
     if low in ("x", "!"):
         return "X", None
+    if t == "a":
+        return "a", None                 # lower-case a starts autonomy; upper-case A is manual left
     if len(t) == 1 and t.upper() in SINGLE_KEYS:
         return t.upper(), None
     if low in WORDS:
