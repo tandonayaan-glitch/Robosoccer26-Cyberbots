@@ -57,6 +57,8 @@ static uint32_t g_lossSpinUntilMs = 0;
 static int8_t g_lossSpinDir = 1;
 static bool g_clearNeedLoss = false;
 static bool g_clearShot = false;
+static bool g_instinctShot = false, g_instinctNeedLoss = false;
+static uint32_t g_instinctSinceMs = 0;
 static float g_refYaw = 0;
 static uint32_t g_lastNavTick = 0;
 
@@ -137,6 +139,7 @@ static void navStop(PGM_P why) {
   g_mtest.state = 0;
   g_autoLossDefense = false;
   g_clearShot = false;
+  g_instinctShot = false;
   g_hdgErr = NAN;
   if (g_cond == COND_SAFE_STOP) navSetState(NAV_SAFE_STOP, why);
   else navSetState(NAV_IDLE, why);
@@ -181,6 +184,7 @@ static void navMarkLoss(PGM_P where) {
   g_lostAtMs = millis();
   g_lostPending = true;
   g_clearNeedLoss = false;
+  g_instinctNeedLoss = false;
   say("NAV", "ball lost (%S): loss #%lu, last bearing %.0f deg%s, moving %.0f deg/s", where, UL(g_stats.ballLossEvents), (double)g_lastBearing, ringInBlindSpot(g_cfg, g_lastBearing) ? " (inside a blind arc)" : "", (double)g_bearingRate);
   logEvent("N", "ball_lost");
   recAdd(REC_BALL_LOST, (uint16_t)(int16_t)g_lastBearing);
@@ -267,20 +271,40 @@ static void navApproach(const Config& c, uint32_t now) {
   motorsDrive(c, vx, vy, w, c.maxAuto);
 }
 
-// Start a shot when the ball has been in the shooting position (sensor 0 near and centred) for shootHoldMs and the goal heading is registered.
+// A fallback shot is possible when the front position module misses the ball but the
+// calibrated receiver ring sees a stable, strong, unambiguous ball straight ahead.
+static bool navInstinctSignal(const Config& c, uint32_t now) {
+  return c.ringCalDone && c.bearingsSet && ringCountUsable(c) > 0 && !sensingFault()
+      && g_ringLastScanMs && elapsedMs(now, g_ringLastScanMs) <= 100
+      && g_ball.valid && g_ball.bearingKnown && !g_ball.ambiguous
+      && g_ball.strength >= 0.8f && g_ball.confidence >= 60
+      && absf(g_ball.bearing) <= (c.centerDeg < 10.0f ? c.centerDeg : 10.0f);
+}
+
+// Start a confirmed shot or a ring-only fallback after a longer stable observation.
 // Returns true when the state changed.
 static bool navShootCheck(const Config& c, uint32_t now) {
   bool fresh = g_ringLastScanMs && elapsedMs(now, g_ringLastScanMs) <= 100;   // a stalled sensor loop cannot start a shot
   if (fresh && !g_ball.held) g_needRelease = false;                 // the ball has left the front module: the next ball may be shot
+  if (!g_ball.valid) g_instinctNeedLoss = false;
+  bool instinct = g_navState == NAV_APPROACH && !g_ball.ready && !g_ball.held && navInstinctSignal(c, now);
+  if (instinct) { if (!g_instinctSinceMs) g_instinctSinceMs = now ? now : 1u; }
+  else g_instinctSinceMs = 0;
   bool goalOk = goalValid() && imuHeadingUsable(c, now);
-  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || (c.shootNeedGoal && !goalOk) || !fresh || !g_ball.ready) return false;
+  if (!c.shootEnable || !g_autoEnabled || g_cond != COND_NORMAL || (c.shootNeedGoal && !goalOk && !g_fieldOurHalf) || !fresh || (!g_ball.ready && !instinct)) return false;
   if (!deadlineReached(now, g_reLockUntil)) return false;           // reverse-and-reattack tries used up: stay put for reCooldownMs
-  if (g_needRelease) return false;                                  // still the same ball: wait until it has left the sensor
-  if (g_ball.readySinceMs == 0 || elapsedMs(now, g_ball.readySinceMs) < c.shootHoldMs) return false;
+  if (g_needRelease || (instinct && g_instinctNeedLoss)) return false; // never repeatedly kick one unconfirmed ball
+  if (instinct) {
+    uint32_t holdMs = c.shootHoldMs > 400 ? c.shootHoldMs : 400;
+    if (!g_instinctSinceMs || elapsedMs(now, g_instinctSinceMs) < holdMs) return false;
+  } else if (g_ball.readySinceMs == 0 || elapsedMs(now, g_ball.readySinceMs) < c.shootHoldMs) return false;
   if (g_shotDone && elapsedMs(now, g_lastShotMs) < c.shootCooldownMs) return false;
-  g_shootPhase = 0; g_shootStartMs = now; g_shotT0 = now; g_heldLostSinceMs = 0; g_rampBoost = true;   // no acceleration limit during the whole shot
-  g_clearShot = false;
-  navSetState(NAV_SHOOT, PSTR("ball in the shooting position: aim at the goal heading, reverse, then full speed forward"));
+  g_instinctShot = instinct;
+  if (instinct) g_instinctNeedLoss = true;
+  g_shootPhase = instinct && g_fieldOurHalf ? 1 : 0;
+  g_shootStartMs = now; g_shotT0 = now; g_heldLostSinceMs = 0; g_rampBoost = true;
+  g_clearShot = instinct && g_fieldOurHalf;
+  navSetState(NAV_SHOOT, instinct ? PSTR("front position unconfirmed: strong centred ring signal, bounded fallback shot") : PSTR("ball in the shooting position: aim at the goal heading, reverse, then full speed forward"));
   return true;
 }
 
@@ -394,7 +418,7 @@ static void navTick(const Config& c, uint32_t now) {
       float w = 0, vx = 0, vy = 0;
       uint8_t limit = c.maxAuto;
       bool goalOk = goalValid() && imuHeadingUsable(c, now);
-      if (c.shootNeedGoal && !goalOk) {                             // the heading reference is gone: stop rather than drive along a wrong heading
+  if (c.shootNeedGoal && !goalOk && !g_instinctShot) {           // normal shots need a valid goal heading
         motorsDrive(c, 0, 0, 0, c.maxAuto);
         g_lastShotMs = now; g_shotDone = true; g_needRelease = true;
         navSetState(NAV_SEEK, PSTR("shot cancelled: heading reference lost"));
@@ -405,11 +429,12 @@ static void navTick(const Config& c, uint32_t now) {
       float err = goalOk ? angDiffDeg(g_goalYaw, g_imu.yaw) : 0.0f;    // no goal heading (shootneedgoal 0): a straight drive burst along the current heading
       float hold = absf(err) < c.hdgDeadbandDeg ? 0.0f : clampf(c.hdgKp * err, -c.hdgMaxRot, c.hdgMaxRot);   // keep the heading
       if (g_shootPhase == 0) {                                     // aim (and, in parallel mode, reverse at the same time)
-        if (!g_ball.held) { if (!g_heldLostSinceMs) g_heldLostSinceMs = now ? now : 1u; } else g_heldLostSinceMs = 0;
+        bool evidence = g_instinctShot ? navInstinctSignal(c, now) : g_ball.held;
+        if (!evidence) { if (!g_heldLostSinceMs) g_heldLostSinceMs = now ? now : 1u; } else g_heldLostSinceMs = 0;
         if (el > c.aimTimeoutMs || (g_heldLostSinceMs && elapsedMs(now, g_heldLostSinceMs) > 400)) {
           g_lastShotMs = now; g_shotDone = true; g_needRelease = true;
           motorsDrive(c, 0, 0, 0, c.maxAuto);
-          navSetState(NAV_SEEK, g_heldLostSinceMs ? PSTR("shot cancelled: ball no longer held") : PSTR("shot cancelled: aim timeout"));
+          navSetState(NAV_SEEK, g_heldLostSinceMs ? PSTR("shot cancelled: ball evidence lost") : PSTR("shot cancelled: aim timeout"));
           break;
         }
         bool aligned = absf(err) <= 0.5f * shootAimTolDeg(c);
@@ -440,7 +465,10 @@ static void navTick(const Config& c, uint32_t now) {
         g_lastShotMs = now; g_shotDone = true; g_needRelease = true; g_stats.shots++; recAdd(REC_SHOT, (uint16_t)g_stats.shots);
         say("NAV", "shot %lu: held-to-launch %lu ms, drive %lu ms, heading error at launch within +-%.1f deg", UL(g_stats.shots), UL(elapsedMs(g_shotLaunchMs, g_shotT0)), UL(el), (double)(0.5f * shootAimTolDeg(c)));
         g_rePhase = 0; g_reSince = now ? now : 1u;
-        navSetState(NAV_REVERSE, PSTR("shot finished: judging the result"));
+        if (g_instinctShot) {
+          g_instinctShot = false; g_reLockUntil = now + c.shootCooldownMs; g_waitHoldUntil = g_reLockUntil;
+          navSetState(NAV_WAIT, PSTR("ring-only fallback shot complete: waiting for ball to leave"));
+        } else navSetState(NAV_REVERSE, PSTR("shot finished: judging the result"));
       }
       break;
     }
